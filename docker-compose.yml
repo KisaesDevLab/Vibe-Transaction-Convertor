@@ -1,0 +1,23 @@
+# Standalone deployment — populated in Phase 28.
+# This skeleton lists service names so other phases can reference them.
+services:
+  postgres:
+    image: postgres:16
+    profiles: ['standalone']
+
+  redis:
+    image: redis:7
+    profiles: ['standalone']
+
+  glm-ocr:
+    image: vibe/glm-ocr-server:latest
+    profiles: ['standalone']
+
+  llm-gateway:
+    image: vibe/llm-gateway:latest
+    profiles: ['standalone']
+
+  api:
+    build:
+      context: .
+    profiles: ['standalone']

@@ -1,0 +1,6 @@
+**/dist/**
+**/node_modules/**
+**/coverage/**
+**/.turbo/**
+pnpm-lock.yaml
+data/fidir/fidir-us.txt

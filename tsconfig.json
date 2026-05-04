@@ -1,0 +1,12 @@
+{
+  "files": [],
+  "references": [
+    { "path": "./packages/shared" },
+    { "path": "./packages/fidir" },
+    { "path": "./packages/reconciler" },
+    { "path": "./packages/exporters" },
+    { "path": "./packages/extractor" },
+    { "path": "./apps/api" },
+    { "path": "./apps/web" }
+  ]
+}

@@ -1,0 +1,9 @@
+# Appliance overlay — populated in Phase 29.
+# Uses shared Postgres, Redis, GLM-OCR, LLM gateway from the appliance manifest.
+services:
+  api:
+    build:
+      context: .
+    environment:
+      APPLIANCE_MODE: 'true'
+    profiles: ['appliance']
