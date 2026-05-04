@@ -1,12 +1,26 @@
 # Standalone deployment — populated in Phase 28.
-# This skeleton lists service names so other phases can reference them.
+# Phase 3 brings up Postgres so migrations + smoke tests can run locally.
 services:
   postgres:
     image: postgres:16
-    profiles: ['standalone']
+    environment:
+      POSTGRES_USER: vibetc
+      POSTGRES_PASSWORD: vibetc
+      POSTGRES_DB: vibetc
+    ports:
+      - '5432:5432'
+    volumes:
+      - vibetc-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U vibetc']
+      interval: 2s
+      timeout: 3s
+      retries: 30
 
   redis:
     image: redis:7
+    ports:
+      - '6379:6379'
     profiles: ['standalone']
 
   glm-ocr:
@@ -21,3 +35,6 @@ services:
     build:
       context: .
     profiles: ['standalone']
+
+volumes:
+  vibetc-pgdata:

@@ -9,8 +9,12 @@
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js",
     "test": "vitest run",
-    "db:migrate": "echo 'db:migrate placeholder — implemented in Phase 3'",
-    "db:seed": "echo 'db:seed placeholder — implemented in Phase 3'"
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "tsx src/db/migrate.ts",
+    "db:push:dev": "drizzle-kit push",
+    "db:studio": "drizzle-kit studio",
+    "db:seed": "tsx src/db/seed.ts",
+    "db:reset:dev": "tsx src/db/reset.ts"
   },
   "dependencies": {
     "@vibe-tx-converter/extractor": "workspace:*",
@@ -18,10 +22,14 @@
     "@vibe-tx-converter/fidir": "workspace:*",
     "@vibe-tx-converter/reconciler": "workspace:*",
     "@vibe-tx-converter/shared": "workspace:*",
+    "drizzle-orm": "^0.33.0",
+    "pg": "^8.12.0",
     "pino": "^9.3.2",
     "pino-http": "^10.2.0"
   },
   "devDependencies": {
+    "@types/pg": "^8.11.6",
+    "drizzle-kit": "^0.24.2",
     "pino-pretty": "^11.2.2",
     "tsx": "^4.16.2"
   }
