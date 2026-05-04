@@ -14,6 +14,7 @@
     "format:check": "prettier --check .",
     "format": "prettier --write .",
     "typecheck": "tsc -b",
+    "acceptance": "pnpm typecheck && pnpm lint && pnpm test && pnpm build",
     "db:migrate": "pnpm --filter @vibe-tx-converter/api run db:migrate",
     "db:seed": "pnpm --filter @vibe-tx-converter/api run db:seed",
     "prepare": "husky"
