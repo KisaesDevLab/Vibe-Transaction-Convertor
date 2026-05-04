@@ -1,9 +1,11 @@
 import js from '@eslint/js';
 import tseslint from '@typescript-eslint/eslint-plugin';
 import tsparser from '@typescript-eslint/parser';
+import drizzle from 'eslint-plugin-drizzle';
 import importPlugin from 'eslint-plugin-import';
 import reactPlugin from 'eslint-plugin-react';
 import reactHooks from 'eslint-plugin-react-hooks';
+import unicorn from 'eslint-plugin-unicorn';
 
 const ignores = [
   '**/dist/**',
@@ -29,19 +31,46 @@ export default [
     plugins: {
       '@typescript-eslint': tseslint,
       import: importPlugin,
+      unicorn,
     },
     rules: {
+      'no-unused-vars': 'off',
       '@typescript-eslint/no-unused-vars': [
         'error',
         { argsIgnorePattern: '^_', varsIgnorePattern: '^_' },
       ],
       'no-console': 'warn',
+      'unicorn/prefer-node-protocol': 'error',
+    },
+  },
+  {
+    files: ['apps/api/**/*.ts', 'packages/*/src/**/*.ts'],
+    languageOptions: {
+      globals: {
+        process: 'readonly',
+        console: 'readonly',
+        Buffer: 'readonly',
+        URL: 'readonly',
+        URLSearchParams: 'readonly',
+        setTimeout: 'readonly',
+        clearTimeout: 'readonly',
+        setInterval: 'readonly',
+        clearInterval: 'readonly',
+        setImmediate: 'readonly',
+        clearImmediate: 'readonly',
+        global: 'readonly',
+        __dirname: 'readonly',
+        __filename: 'readonly',
+      },
     },
   },
   {
     files: ['apps/api/**/*.ts'],
+    plugins: { drizzle },
     rules: {
       'no-console': 'error',
+      'drizzle/enforce-delete-with-where': 'error',
+      'drizzle/enforce-update-with-where': 'error',
     },
   },
   {

@@ -7,8 +7,8 @@ typecheck → lint → test → build).
 | Phase | Title                                        | Status | Commit    | Notes                      |
 | ----- | -------------------------------------------- | ------ | --------- | -------------------------- |
 | 0     | Repo Bootstrap                               | ✅     | `9838a8f` | runnable monorepo skeleton |
-| 1     | ADRs, Docs Skeleton, License                 | ✅     | _next_    | 20 ADRs landed             |
-| 2     | Workspace, TS, Lint, Test Config             | ⏳     | —         |                            |
+| 1     | ADRs, Docs Skeleton, License                 | ✅     | `77c429d` | 20 ADRs landed             |
+| 2     | Workspace, TS, Lint, Test Config             | ✅     | _next_    | helpers + 18 tests passing |
 | 3     | Database Schema & Migrations                 | ⏸      | —         |                            |
 | 4     | API Scaffolding & Health                     | ⏸      | —         |                            |
 | 5     | FIDIR Mirror, Parser, Seeder                 | ⏸      | —         |                            |
