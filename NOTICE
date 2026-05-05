@@ -6,8 +6,37 @@ See the LICENSE file for the full license text.
 
 ----------------------------------------------------------------------
 
-This product includes third-party software. Full license attribution is
-populated in Phase 31 of the build plan. Each dependency retains its
-upstream license; nothing in this NOTICE supersedes those terms.
+This product bundles third-party software. Each retains its upstream
+license; the list below is informational.
 
-(placeholder — to be populated in Phase 31)
+Major runtime dependencies:
+  - Node.js 20 LTS (MIT)
+  - Express 4 (MIT)
+  - Drizzle ORM (Apache-2.0)
+  - PostgreSQL 16 (PostgreSQL License)
+  - Redis 7 (Redis Source Available License)
+  - BullMQ (MIT)
+  - argon2 (Apache-2.0)
+  - Zod (MIT)
+  - Pino (MIT)
+  - pdfjs-dist (Apache-2.0)
+  - pdf-parse (MIT)
+  - pdf-lib (MIT, dev fixture only)
+  - React 18 + ReactDOM (MIT)
+  - TanStack Query 5 (MIT)
+  - react-router 6 (MIT)
+  - Tailwind CSS 3 (MIT)
+  - Vite 5 (MIT)
+
+External services (operator-managed):
+  - GLM-OCR (Zhipu AI, MIT)
+  - Vibe LLM Gateway (PolyForm Internal Use 1.0.0)
+
+Optional services:
+  - Anthropic Claude API (subject to Anthropic's terms;
+    opt-in only, OFF by default — see ADR-019, ADR-020)
+
+Data:
+  - data/fidir/fidir-us.txt is a starter set of major US banks.
+    The production deployment must replace it with the current Intuit
+    publication. See data/fidir/README.md.

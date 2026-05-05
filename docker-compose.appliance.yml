@@ -1,9 +1,41 @@
-# Appliance overlay — populated in Phase 29.
-# Uses shared Postgres, Redis, GLM-OCR, LLM gateway from the appliance manifest.
+# Appliance overlay — Phase 29.
+# Reuses shared Postgres / Redis / GLM-OCR / LLM gateway from the
+# vibe appliance. Operators run:
+#   docker compose -f docker-compose.appliance.yml up -d
+# alongside the appliance's own compose file.
+
+x-api-env: &api-env
+  NODE_ENV: production
+  PORT: 4000
+  DATABASE_URL: ${VIBETC_DATABASE_URL:?DATABASE_URL must be set in appliance env}
+  REDIS_URL: ${VIBETC_REDIS_URL:?REDIS_URL must be set}
+  GLM_OCR_URL: ${VIBE_APPLIANCE_GLM_OCR_URL:?shared GLM-OCR URL required}
+  LLM_GATEWAY_URL: ${VIBE_APPLIANCE_LLM_GATEWAY_URL:?shared LLM gateway URL required}
+  LLM_PROVIDER: local
+  LLM_MODEL_ID: qwen3-8b
+  SESSION_SECRET: ${SESSION_SECRET:?SESSION_SECRET must be set}
+  WEB_BASE_URL: ${WEB_BASE_URL:-https://vibetc.local}
+  DATA_DIR: /var/lib/vibetc
+  WORKER_INLINE: 'true'
+  APPLIANCE_MODE: 'true'
+  APPLIANCE_VERSION: ${APPLIANCE_VERSION:-1}
+
 services:
   api:
     build:
       context: .
-    environment:
-      APPLIANCE_MODE: 'true'
-    profiles: ['appliance']
+      args:
+        BUILD_SHA: ${BUILD_SHA:-unknown}
+    environment: *api-env
+    networks:
+      - vibe-appliance
+    volumes:
+      - vibetc-data:/var/lib/vibetc
+
+networks:
+  vibe-appliance:
+    external: true
+    name: vibe-appliance
+
+volumes:
+  vibetc-data:

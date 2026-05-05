@@ -1,5 +1,21 @@
-# Standalone deployment — populated in Phase 28.
-# Phase 3 brings up Postgres so migrations + smoke tests can run locally.
+# Standalone deployment — Phase 28.
+# Brings up Postgres + Redis + GLM-OCR + LLM Gateway alongside the API.
+# Operators run `docker compose --profile standalone up -d`.
+
+x-api-env: &api-env
+  NODE_ENV: production
+  PORT: 4000
+  DATABASE_URL: postgres://vibetc:vibetc@postgres:5432/vibetc?schema=vibetc
+  REDIS_URL: redis://redis:6379
+  GLM_OCR_URL: http://glm-ocr:8080
+  LLM_GATEWAY_URL: http://llm-gateway:8000
+  LLM_PROVIDER: local
+  LLM_MODEL_ID: qwen3-8b
+  SESSION_SECRET: ${SESSION_SECRET:?SESSION_SECRET must be set}
+  WEB_BASE_URL: ${WEB_BASE_URL:-http://localhost:4000}
+  DATA_DIR: /var/lib/vibetc
+  WORKER_INLINE: 'true'
+
 services:
   postgres:
     image: postgres:16
@@ -22,19 +38,49 @@ services:
     ports:
       - '6379:6379'
     profiles: ['standalone']
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 2s
+      timeout: 3s
+      retries: 30
 
   glm-ocr:
     image: vibe/glm-ocr-server:latest
     profiles: ['standalone']
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -q -O - http://localhost:8080/health || exit 1']
+      interval: 5s
+      timeout: 5s
+      retries: 30
 
   llm-gateway:
     image: vibe/llm-gateway:latest
     profiles: ['standalone']
+    environment:
+      LLM_GATEWAY_MODEL: qwen3-8b
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -q -O - http://localhost:8000/health || exit 1']
+      interval: 5s
+      timeout: 5s
+      retries: 30
 
   api:
     build:
       context: .
+      args:
+        BUILD_SHA: ${BUILD_SHA:-unknown}
     profiles: ['standalone']
+    environment: *api-env
+    ports:
+      - '4000:4000'
+    volumes:
+      - vibetc-data:/var/lib/vibetc
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
 
 volumes:
   vibetc-pgdata:
+  vibetc-data:

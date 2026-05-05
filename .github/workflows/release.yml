@@ -1,8 +1,7 @@
 name: Release
 
-# Skeleton — populated in Phase 30.
-# Triggered by tagged releases; publishes signed multi-arch images to GHCR
-# with SBOM, OCI labels, and Trivy scan attestations.
+# Phase 30 — publishes signed multi-arch images to GHCR with SBOM and
+# Trivy scan attestations on every tag matching v*.
 
 on:
   push:
@@ -10,9 +9,66 @@ on:
       - 'v*'
   workflow_dispatch:
 
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+  attestations: write
+
 jobs:
   publish:
     runs-on: ubuntu-latest
-    if: false # disabled until Phase 30 wires it
+    timeout-minutes: 30
     steps:
-      - run: echo "Release workflow placeholder"
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=ref,event=tag
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+
+      - id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: BUILD_SHA=${{ github.sha }}
+          provenance: true
+          sbom: true
+
+      - uses: actions/attest-build-provenance@v1
+        with:
+          subject-name: ghcr.io/${{ github.repository }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+      - uses: aquasecurity/trivy-action@0.24.0
+        with:
+          image-ref: ghcr.io/${{ github.repository }}@${{ steps.build.outputs.digest }}
+          format: sarif
+          output: trivy.sarif
+          severity: CRITICAL,HIGH
+          exit-code: '1'
+          ignore-unfixed: true
+
+      - if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy.sarif
