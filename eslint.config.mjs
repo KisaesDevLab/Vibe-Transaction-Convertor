@@ -119,6 +119,8 @@ export default [
         HTMLTableElement: 'readonly',
         requestAnimationFrame: 'readonly',
         cancelAnimationFrame: 'readonly',
+        ResizeObserver: 'readonly',
+        globalThis: 'readonly',
         React: 'readonly',
         Node: 'readonly',
         Element: 'readonly',

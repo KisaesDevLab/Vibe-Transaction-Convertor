@@ -156,6 +156,47 @@ export const renderExport = async (
   throw new Error(`unknown export format: ${format as string}`);
 };
 
+// QBO importer in QuickBooks Desktop chokes on files > ~350 KB; for safety
+// we slice into 200-transaction chunks and let the caller bundle them.
+// Phase 22 item 9.
+const QBO_SPLIT_THRESHOLD = 200;
+
+export const renderExportSlices = async (
+  db: Db,
+  statementId: string,
+  format: ExportFormat,
+  opts: { allowOverride?: boolean } = {},
+): Promise<RenderedExport[]> => {
+  if (format !== 'qbo' && format !== 'qfx') {
+    return [await renderExport(db, statementId, format, opts)];
+  }
+  const { stmt, account, txs } = await fetchStatementContext(db, statementId);
+  if (stmt.reconciliationStatus === 'discrepancy' && !opts.allowOverride) {
+    throw new ConflictError('reconciliation discrepancy — export requires override');
+  }
+  if (txs.length <= QBO_SPLIT_THRESHOLD) {
+    return [await renderExport(db, statementId, format, opts)];
+  }
+  const baseName = `${account.financialInstitution.replace(/\s+/g, '-')}_${
+    account.accountNumberLast4 ?? account.accountNumber.slice(-4)
+  }_${stmt.periodStart ?? 'unknown'}_${stmt.periodEnd ?? 'unknown'}`;
+  const slices: RenderedExport[] = [];
+  for (let i = 0; i < txs.length; i += QBO_SPLIT_THRESHOLD) {
+    const chunkTxs = txs.slice(i, i + QBO_SPLIT_THRESHOLD);
+    const part = Math.floor(i / QBO_SPLIT_THRESHOLD) + 1;
+    const ast = buildOfxStmt(stmt, account, chunkTxs);
+    const ext = format === 'qbo' ? 'qbo' : 'qfx';
+    slices.push({
+      format,
+      contentType: format === 'qbo' ? 'application/vnd.intu.qbo' : 'application/vnd.intu.qfx',
+      filename: `${baseName}_part${part}.${ext}`,
+      bytes: Buffer.from(format === 'qbo' ? renderQbo(ast) : renderQfx(ast), 'utf8'),
+      intuBidUsed: ast.bankAccountInfo.intuBid ?? FALLBACK_INTU_BID,
+    });
+  }
+  return slices;
+};
+
 export const recordExportJob = async (
   db: Db,
   actor: User,

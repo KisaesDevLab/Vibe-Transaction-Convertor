@@ -357,17 +357,22 @@ export function StatementReviewPage() {
             }
           />
 
-          <PdfViewer
-            pdfHash={s.sourcePdfHash}
-            highlight={
-              selectedTx?.sourceBboxJson
-                ? {
-                    page: selectedTx.sourcePage,
-                    bbox: selectedTx.sourceBboxJson,
-                  }
-                : null
-            }
-          />
+          {/* Hide PDF viewer below 1024px — the side-by-side review layout
+              isn't usable on small screens, and rendering pdf.js there is
+              expensive for no benefit. Phase 19 item 14. */}
+          <div className="hidden lg:block">
+            <PdfViewer
+              pdfHash={s.sourcePdfHash}
+              highlight={
+                selectedTx?.sourceBboxJson
+                  ? {
+                      page: selectedTx.sourcePage,
+                      bbox: selectedTx.sourceBboxJson,
+                    }
+                  : null
+              }
+            />
+          </div>
         </div>
         <ReconciliationWidget stmt={s} txCount={txs.length} txSumCents={txSumCents} />
       </div>

@@ -10,7 +10,9 @@ import { LoginPage } from './pages/LoginPage';
 import { RegisterFirstAdminPage } from './pages/RegisterFirstAdminPage';
 import { AdminHomePage } from './pages/AdminHomePage';
 import { AuditLogPage } from './pages/AuditLogPage';
+import { BackupAdminPage } from './pages/BackupAdminPage';
 import { DiagnosticsPage } from './pages/DiagnosticsPage';
+import { EnginesAdminPage } from './pages/EnginesAdminPage';
 import { MaintenanceAdminPage } from './pages/MaintenanceAdminPage';
 import { StatementReviewPage } from './pages/StatementReviewPage';
 import { StatementsListPage } from './pages/StatementsListPage';
@@ -71,6 +73,22 @@ export function App() {
                   element={
                     <AdminGate>
                       <MaintenanceAdminPage />
+                    </AdminGate>
+                  }
+                />
+                <Route
+                  path="/admin/engines"
+                  element={
+                    <AdminGate>
+                      <EnginesAdminPage />
+                    </AdminGate>
+                  }
+                />
+                <Route
+                  path="/admin/backup"
+                  element={
+                    <AdminGate>
+                      <BackupAdminPage />
                     </AdminGate>
                   }
                 />

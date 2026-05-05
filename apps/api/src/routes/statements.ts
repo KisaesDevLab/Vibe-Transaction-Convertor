@@ -63,35 +63,58 @@ export const statementsRouter = (): Router => {
       const rows = await db.select().from(transactions).where(eq(transactions.id, txId));
       const tx = rows[0];
       if (!tx) throw new NotFoundError(`transaction ${txId}`);
-      const patch: Record<string, unknown> = {
-        userEdited: true,
-        updatedAt: sql`now()`,
-      };
-      let recomputeFitid = false;
+
+      // Compute the would-be next state then short-circuit if nothing
+      // actually changed. Idempotent PATCHes should be a no-op — they must
+      // not write audit_log rows or bump updatedAt. Phase 18 item 12.
+      const next: {
+        description?: string;
+        normalizedDescription?: string;
+        amountCents?: bigint;
+        trntype?: string;
+        postedDate?: string;
+      } = {};
       if (typeof body.description === 'string') {
-        patch.description = body.description.trim();
-        patch.normalizedDescription = body.description.trim().toLowerCase();
-        recomputeFitid = true;
+        const d = body.description.trim();
+        if (d !== tx.description) {
+          next.description = d;
+          next.normalizedDescription = normalizeDescription(d);
+        }
       }
       if (typeof body.amount_cents === 'number' || typeof body.amount_cents === 'string') {
         const amt = BigInt(body.amount_cents);
         if (amt === 0n) throw new ValidationError('amount must be non-zero');
-        patch.amountCents = amt;
-        recomputeFitid = true;
+        if (amt !== tx.amountCents) next.amountCents = amt;
       }
-      if (typeof body.trntype === 'string') patch.trntype = body.trntype;
+      if (typeof body.trntype === 'string' && body.trntype !== tx.trntype) {
+        next.trntype = body.trntype;
+      }
       if (typeof body.posted_date === 'string') {
         if (!/^\d{4}-\d{2}-\d{2}$/.test(body.posted_date)) {
           throw new ValidationError('posted_date must be YYYY-MM-DD');
         }
-        patch.postedDate = body.posted_date;
-        recomputeFitid = true;
+        if (body.posted_date !== tx.postedDate) next.postedDate = body.posted_date;
       }
+      const hasChange = Object.keys(next).length > 0;
+      if (!hasChange) {
+        res.json(serializeBigint(tx));
+        return;
+      }
+
+      const patch: Record<string, unknown> = {
+        userEdited: true,
+        updatedAt: sql`now()`,
+        ...next,
+      };
+      const recomputeFitid =
+        next.description !== undefined ||
+        next.amountCents !== undefined ||
+        next.postedDate !== undefined;
       if (recomputeFitid) {
         patch.fitid = computeFitid({
-          postedDate: (patch.postedDate as string) ?? tx.postedDate,
-          amountCents: (patch.amountCents as bigint) ?? tx.amountCents,
-          description: (patch.description as string) ?? tx.description,
+          postedDate: next.postedDate ?? tx.postedDate,
+          amountCents: next.amountCents ?? tx.amountCents,
+          description: next.description ?? tx.description,
           seqInDay: tx.seqInDay,
         });
       }
@@ -105,7 +128,7 @@ export const statementsRouter = (): Router => {
         entityType: 'transaction',
         entityId: txId,
         action: 'transaction.update',
-        payload: body as Record<string, unknown>,
+        payload: { ...next, amountCents: next.amountCents?.toString() } as Record<string, unknown>,
       });
       res.json(serializeBigint(updated!));
     } catch (err) {

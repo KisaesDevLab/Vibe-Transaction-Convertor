@@ -3,11 +3,13 @@ import { Link, useParams } from 'react-router-dom';
 
 import { ACCOUNT_TYPE_LABELS, type AccountTypeCode } from '@vibe-tx-converter/shared';
 
+import { StatusBadge, ReconciliationBadge } from '../components/StatusBadge';
 import { UploadDropzone } from '../components/UploadDropzone';
 import { useToast } from '../components/Toast';
 import { fetchRevealedAccount } from '../hooks/useAccounts';
 import { useMe } from '../hooks/useAuth';
 import { useAccount } from '../hooks/useStatements';
+import { useStatementsByAccount } from '../hooks/useStatementsList';
 import { ApiError } from '../lib/api';
 
 const REVEAL_DURATION_MS = 30_000;
@@ -15,6 +17,7 @@ const REVEAL_DURATION_MS = 30_000;
 export function AccountDetailPage() {
   const { accountId = '' } = useParams();
   const account = useAccount(accountId);
+  const statements = useStatementsByAccount(accountId);
   const me = useMe();
   const toast = useToast();
   const [revealedNumber, setRevealedNumber] = useState<string | null>(null);
@@ -94,11 +97,51 @@ export function AccountDetailPage() {
       <h2 className="mb-2 text-lg font-medium">Upload statements</h2>
       <UploadDropzone accountId={a.id} />
 
-      <p className="mt-4 text-sm">
-        <Link to={`/accounts/${a.id}/statements`} className="text-accent hover:underline">
-          View statements →
-        </Link>
-      </p>
+      <section className="mt-8">
+        <div className="mb-2 flex items-baseline justify-between">
+          <h2 className="text-lg font-medium">Statements</h2>
+          <Link to={`/accounts/${a.id}/statements`} className="text-sm text-accent hover:underline">
+            See all →
+          </Link>
+        </div>
+        {statements.isPending ? (
+          <p className="text-sm text-ink-muted">Loading…</p>
+        ) : !statements.data || statements.data.length === 0 ? (
+          <p className="rounded-lg border border-dashed border-surface-muted bg-surface-subtle p-4 text-sm text-ink-muted">
+            No statements yet. Upload a PDF above to get started.
+          </p>
+        ) : (
+          <ul className="divide-y divide-surface-muted rounded-lg border border-surface-muted bg-white">
+            {statements.data.slice(0, 10).map((s) => {
+              const period =
+                s.periodStart && s.periodEnd
+                  ? `${s.periodStart} → ${s.periodEnd}`
+                  : 'period pending…';
+              return (
+                <li key={s.id}>
+                  <Link
+                    to={`/statements/${s.id}`}
+                    className="flex flex-wrap items-center justify-between gap-3 px-4 py-3 hover:bg-surface-subtle"
+                  >
+                    <div className="min-w-0">
+                      <p className="font-mono text-sm text-ink">{period}</p>
+                      <p className="text-xs text-ink-muted">
+                        {s.sourcePdfPages} pages · uploaded {new Date(s.createdAt).toLocaleString()}
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <StatusBadge status={s.status} />
+                      {s.status === 'review' || s.status === 'exported' ? (
+                        <ReconciliationBadge status={s.reconciliationStatus} />
+                      ) : null}
+                    </div>
+                  </Link>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </section>
     </section>
   );
 }

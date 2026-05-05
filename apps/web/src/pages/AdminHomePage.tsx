@@ -75,6 +75,12 @@ export function AdminHomePage() {
           <Link to="/admin/maintenance" className="text-accent hover:underline">
             Maintenance →
           </Link>
+          <Link to="/admin/engines" className="text-accent hover:underline">
+            Engines →
+          </Link>
+          <Link to="/admin/backup" className="text-accent hover:underline">
+            Backup →
+          </Link>
         </nav>
       </header>
 

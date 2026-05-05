@@ -3,7 +3,7 @@ import JSZip from 'jszip';
 
 import { db } from '../db/client.js';
 import { ValidationError } from '../lib/errors.js';
-import { recordExportJob, renderExport, type ExportFormat } from '../services/exports.js';
+import { recordExportJob, renderExportSlices, type ExportFormat } from '../services/exports.js';
 
 const VALID: ExportFormat[] = [
   'csv-qbo3',
@@ -24,11 +24,28 @@ export const exportsRouter = (): Router => {
       const format = String(req.params.format) as ExportFormat;
       if (!VALID.includes(format)) throw new ValidationError(`unknown format ${format}`);
       const allowOverride = req.query.override === 'true';
-      const result = await renderExport(db, statementId, format, { allowOverride });
-      await recordExportJob(db, req.user!, statementId, result);
-      res.setHeader('content-type', result.contentType);
-      res.setHeader('content-disposition', `attachment; filename="${result.filename}"`);
-      res.send(result.bytes);
+      // QBO/QFX get auto-split into 200-tx chunks (Phase 22 item 9). When
+      // there's only one slice we send it inline; >1 we wrap in a zip so the
+      // client gets a single download.
+      const slices = await renderExportSlices(db, statementId, format, { allowOverride });
+      if (slices.length === 1) {
+        const result = slices[0]!;
+        await recordExportJob(db, req.user!, statementId, result);
+        res.setHeader('content-type', result.contentType);
+        res.setHeader('content-disposition', `attachment; filename="${result.filename}"`);
+        res.send(result.bytes);
+        return;
+      }
+      const zip = new JSZip();
+      for (const r of slices) {
+        zip.file(r.filename, r.bytes);
+        await recordExportJob(db, req.user!, statementId, r);
+      }
+      const bytes = await zip.generateAsync({ type: 'nodebuffer' });
+      const zipName = slices[0]!.filename.replace(/_part\d+\.[^.]+$/, '') + `-split.zip`;
+      res.setHeader('content-type', 'application/zip');
+      res.setHeader('content-disposition', `attachment; filename="${zipName}"`);
+      res.send(bytes);
     } catch (err) {
       next(err);
     }
@@ -42,11 +59,12 @@ export const exportsRouter = (): Router => {
       const zip = new JSZip();
       let lastBaseName: string | null = null;
       for (const fmt of VALID) {
-        const r = await renderExport(db, statementId, fmt, { allowOverride });
-        zip.file(r.filename, r.bytes);
-        await recordExportJob(db, req.user!, statementId, r);
-        // Strip the format-specific extension to derive a stable base.
-        lastBaseName = r.filename.replace(/\.[^.]+$/, '');
+        const slices = await renderExportSlices(db, statementId, fmt, { allowOverride });
+        for (const r of slices) {
+          zip.file(r.filename, r.bytes);
+          await recordExportJob(db, req.user!, statementId, r);
+          lastBaseName = r.filename.replace(/(_part\d+)?\.[^.]+$/, '');
+        }
       }
       const bytes = await zip.generateAsync({ type: 'nodebuffer' });
       const zipName = `${lastBaseName ?? `statement-${statementId}`}-bundle.zip`;

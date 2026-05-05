@@ -19,12 +19,19 @@ export interface PdfViewerProps {
 const ZOOM_STEPS = [0.5, 0.75, 1, 1.25, 1.5, 2];
 
 const STORAGE_KEY = 'vibetc:pdfviewer:zoom';
+const FIT_KEY = 'vibetc:pdfviewer:fit';
+
+type FitMode = 'manual' | 'width' | 'page';
 
 export function PdfViewer({ pdfHash, highlight, onPdfClick }: PdfViewerProps) {
   const [pdfBlobUrl, setPdfBlobUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [numPages, setNumPages] = useState<number>(0);
   const [page, setPage] = useState<number>(1);
+  const [fit, setFit] = useState<FitMode>(() => {
+    const v = localStorage.getItem(FIT_KEY);
+    return v === 'width' || v === 'page' ? v : 'manual';
+  });
   const [zoom, setZoom] = useState<number>(() => {
     const saved = Number.parseFloat(localStorage.getItem(STORAGE_KEY) ?? '');
     return Number.isFinite(saved) && saved > 0 ? saved : 1;
@@ -70,10 +77,38 @@ export function PdfViewer({ pdfHash, highlight, onPdfClick }: PdfViewerProps) {
     }
   }, [highlight]);
 
-  // Persist zoom.
+  // Persist zoom + fit mode.
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY, String(zoom));
   }, [zoom]);
+  useEffect(() => {
+    localStorage.setItem(FIT_KEY, fit);
+  }, [fit]);
+
+  // Recompute zoom when fit mode is fit-width / fit-page based on the
+  // available container width and the natural PDF page dimensions.
+  const pdfW = pageGeom?.pdfWidth ?? 0;
+  const pdfH = pageGeom?.pdfHeight ?? 0;
+  useEffect(() => {
+    if (fit === 'manual') return;
+    const recompute = (): void => {
+      const c = containerRef.current;
+      if (!c) return;
+      const availW = c.clientWidth - 24;
+      const availH = c.clientHeight - 24;
+      if (pdfW <= 0 || pdfH <= 0) return;
+      const widthScale = availW / pdfW;
+      const z =
+        fit === 'width'
+          ? widthScale
+          : Math.min(widthScale, availH > 0 ? availH / pdfH : widthScale);
+      setZoom(Math.max(0.25, Math.min(4, z)));
+    };
+    recompute();
+    const ro = new ResizeObserver(recompute);
+    if (containerRef.current) ro.observe(containerRef.current);
+    return () => ro.disconnect();
+  }, [fit, pdfW, pdfH]);
 
   // Keyboard shortcuts: arrow keys page nav, +/- zoom.
   useEffect(() => {
@@ -85,11 +120,13 @@ export function PdfViewer({ pdfHash, highlight, onPdfClick }: PdfViewerProps) {
       } else if (e.key === 'ArrowRight' || e.key === 'PageDown') {
         setPage((p) => Math.min(numPages, p + 1));
       } else if (e.key === '+' || e.key === '=') {
+        setFit('manual');
         setZoom((z) => {
           const idx = ZOOM_STEPS.findIndex((s) => s >= z);
           return ZOOM_STEPS[Math.min(idx + 1, ZOOM_STEPS.length - 1)] ?? z;
         });
       } else if (e.key === '-') {
+        setFit('manual');
         setZoom((z) => {
           const idx = ZOOM_STEPS.findIndex((s) => s >= z);
           return ZOOM_STEPS[Math.max(idx - 1, 0)] ?? z;
@@ -161,10 +198,27 @@ export function PdfViewer({ pdfHash, highlight, onPdfClick }: PdfViewerProps) {
         </div>
         <div className="flex items-center gap-2">
           <select
-            value={zoom}
-            onChange={(e) => setZoom(Number.parseFloat(e.target.value))}
+            value={fit}
+            onChange={(e) => setFit(e.target.value as FitMode)}
             className="rounded border border-surface-muted bg-white px-1 py-0.5"
+            title="Fit mode"
           >
+            <option value="manual">Manual</option>
+            <option value="width">Fit width</option>
+            <option value="page">Fit page</option>
+          </select>
+          <select
+            value={ZOOM_STEPS.includes(zoom) ? zoom : ''}
+            onChange={(e) => {
+              setFit('manual');
+              setZoom(Number.parseFloat(e.target.value));
+            }}
+            disabled={fit !== 'manual'}
+            className="rounded border border-surface-muted bg-white px-1 py-0.5 disabled:opacity-50"
+          >
+            {!ZOOM_STEPS.includes(zoom) ? (
+              <option value="">{Math.round(zoom * 100)}%</option>
+            ) : null}
             {ZOOM_STEPS.map((s) => (
               <option key={s} value={s}>
                 {Math.round(s * 100)}%
