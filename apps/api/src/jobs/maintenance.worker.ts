@@ -6,12 +6,13 @@ import { join } from 'node:path';
 import { db } from '../db/client.js';
 import { auditLog, sessions } from '../db/schema.js';
 import { logger } from '../lib/logger.js';
+import { cleanupExpiredBackups } from '../services/backup.js';
 import { cleanupExpiredExports } from '../services/exports.js';
 
 import { QUEUE_MAINTENANCE, getJobConnection, maintenanceQueue } from './queues.js';
 
 interface MaintenanceJobData {
-  task: 'prune-sessions' | 'prune-audit' | 'clean-tmp' | 'expire-exports';
+  task: 'prune-sessions' | 'prune-audit' | 'clean-tmp' | 'expire-exports' | 'expire-backups';
 }
 
 const pruneSessions = async (): Promise<{ deleted: number }> => {
@@ -74,6 +75,8 @@ const processMaintenance = async (data: MaintenanceJobData): Promise<unknown> =>
       return cleanTmp();
     case 'expire-exports':
       return cleanupExpiredExports(db);
+    case 'expire-backups':
+      return cleanupExpiredBackups();
     default:
       throw new Error(`unknown maintenance task: ${(data as { task: string }).task}`);
   }
@@ -122,5 +125,11 @@ const scheduleRecurring = async (): Promise<void> => {
     'expire-exports',
     { task: 'expire-exports' },
     { repeat: { pattern: '30 3 * * *' }, removeOnComplete: 50 },
+  );
+  // Phase 26 #21: nightly sweep of backups older than retention.
+  await q.add(
+    'expire-backups',
+    { task: 'expire-backups' },
+    { repeat: { pattern: '45 3 * * *' }, removeOnComplete: 50 },
   );
 };

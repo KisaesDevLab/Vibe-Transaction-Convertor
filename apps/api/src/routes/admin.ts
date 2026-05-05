@@ -1,14 +1,16 @@
 import { Router } from 'express';
 import { eq, lt, sql } from 'drizzle-orm';
+import { createReadStream } from 'node:fs';
 import { rm, readdir, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { db } from '../db/client.js';
 import { statements, sessions, systemSettings } from '../db/schema.js';
-import { ValidationError } from '../lib/errors.js';
+import { NotFoundError, ValidationError } from '../lib/errors.js';
 import { unwrapSecret, wrapSecret } from '../lib/secrets.js';
 import { requireAdmin } from '../middleware/auth.js';
 import { writeAudit } from '../services/audit.js';
+import { backupFilePath, createBackup, deleteBackup, listBackups } from '../services/backup.js';
 import { getFidirStatus, seedFidir } from '../services/fidir-seeder.js';
 import { buildProvider } from '../services/llm-provider.js';
 import { extractionQueue } from '../jobs/queues.js';
@@ -362,6 +364,87 @@ export const adminRouter = (): Router => {
         payload: { removed, kept },
       });
       res.json({ removed, kept, tmpDir });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // Phase 26 #6/#7/#8/#9: backup endpoints. Trigger pg_dump, list,
+  // download, delete. Files live under $DATA_DIR/backups; admin-only.
+  router.post('/backup', async (req, res, next) => {
+    try {
+      const summary = await createBackup();
+      await writeAudit(db, {
+        actorUserId: req.user!.id,
+        entityType: 'system',
+        entityId: 'backup',
+        action: 'backup.create',
+        payload: { filename: summary.filename, sizeBytes: summary.sizeBytes },
+      });
+      res.status(201).json(summary);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.get('/backups', async (_req, res, next) => {
+    try {
+      const list = await listBackups();
+      const retentionDays = Number.parseInt(process.env.BACKUP_RETENTION_DAYS ?? '90', 10);
+      res.json({
+        backups: list,
+        retentionDays: Number.isFinite(retentionDays) ? retentionDays : 90,
+      });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.get('/backups/:filename/file', async (req, res, next) => {
+    try {
+      const filename = String(req.params.filename);
+      let path: string;
+      try {
+        path = backupFilePath(filename);
+      } catch (err) {
+        throw new ValidationError((err as Error).message);
+      }
+      try {
+        await stat(path);
+      } catch {
+        throw new NotFoundError(`backup ${filename} not found`);
+      }
+      await writeAudit(db, {
+        actorUserId: req.user!.id,
+        entityType: 'system',
+        entityId: 'backup',
+        action: 'backup.download',
+        payload: { filename },
+      });
+      res.setHeader('content-type', 'application/octet-stream');
+      res.setHeader('content-disposition', `attachment; filename="${filename}"`);
+      createReadStream(path).pipe(res);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.delete('/backups/:filename', async (req, res, next) => {
+    try {
+      const filename = String(req.params.filename);
+      try {
+        await deleteBackup(filename);
+      } catch (err) {
+        throw new ValidationError((err as Error).message);
+      }
+      await writeAudit(db, {
+        actorUserId: req.user!.id,
+        entityType: 'system',
+        entityId: 'backup',
+        action: 'backup.delete',
+        payload: { filename },
+      });
+      res.status(204).end();
     } catch (err) {
       next(err);
     }

@@ -15,7 +15,8 @@
     "db:studio": "drizzle-kit studio",
     "db:seed": "tsx src/db/seed.ts",
     "db:reset:dev": "tsx src/db/reset.ts",
-    "db:fidir-seed": "tsx src/scripts/fidir-refresh.ts"
+    "db:fidir-seed": "tsx src/scripts/fidir-refresh.ts",
+    "db:restore": "tsx src/scripts/restore.ts"
   },
   "dependencies": {
     "@vibe-tx-converter/extractor": "workspace:*",
