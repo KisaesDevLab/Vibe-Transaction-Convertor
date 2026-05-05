@@ -12,9 +12,11 @@ import { logger } from './lib/logger.js';
 import { errorHandler, notFoundHandler } from './middleware/error-handler.js';
 import { loadSession, requireAuth } from './middleware/auth.js';
 import { csrf, csrfTokenHandler } from './middleware/csrf.js';
+import { requireInternalNetwork } from './middleware/internal-network.js';
 import { unauthRateLimiter } from './middleware/rate-limit.js';
 import { requestId } from './middleware/request-id.js';
 import { accountsByCompanyRouter, accountsRouter } from './routes/accounts.js';
+import { applianceAdminRouter, internalApplianceRouter } from './routes/appliance.js';
 import { authRouter, usersRouter } from './routes/auth.js';
 import { companiesRouter } from './routes/companies.js';
 import { adminRouter } from './routes/admin.js';
@@ -94,6 +96,13 @@ export const createApp = (): Express => {
   app.use('/api/exports', requireAuth, exportJobsRouter());
   app.use('/api/audit', requireAuth, auditRouter());
   app.use('/api/admin', requireAuth, adminRouter());
+  // Phase 29 #10 — admin-only "Update available" surfacing for the SPA.
+  app.use('/api/admin/appliance', requireAuth, applianceAdminRouter());
+  // Phase 29 #13 — internal-network-only handshake endpoint for the
+  // appliance orchestrator. No auth, IP-restricted to RFC 1918 +
+  // loopback ranges. Mounted *after* loadSession so an accidental
+  // exposure to the public internet still 403s.
+  app.use('/api/internal/appliance', requireInternalNetwork, internalApplianceRouter());
 
   // Static SPA serving — production deployments bundle apps/web/dist into
   // the same container as the API. Locating it relative to this file lets

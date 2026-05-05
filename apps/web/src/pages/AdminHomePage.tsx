@@ -2,6 +2,7 @@ import { type FormEvent, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 
+import { UpdateAvailableBanner } from '../components/UpdateAvailableBanner';
 import { api, ApiError } from '../lib/api';
 
 interface ProviderStatus {
@@ -110,6 +111,7 @@ export function AdminHomePage() {
 
   return (
     <section className="mx-auto max-w-3xl space-y-8">
+      <UpdateAvailableBanner />
       <header className="space-y-1">
         <h1 className="text-2xl font-semibold">Admin</h1>
         <nav className="flex flex-wrap gap-3 text-sm">

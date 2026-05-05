@@ -67,6 +67,15 @@ migrations:
 bootstrap:
   - description: 'Seed FIDIR mirror from the vendored fidir-us.txt.'
     command: ['node', 'apps/api/dist/scripts/fidir-refresh.js']
+  - description: 'Verify dependencies + write self-check JSON to the orchestrator.'
+    command: ['node', 'apps/api/dist/scripts/appliance-self-check.js']
+    optional: true # exit-code-1 here is informational; orchestrator decides
+
+# Operator-run uninstall, invoked by the installer when removing this
+# app. The script refuses without --i-have-a-backup so a misfire of
+# the orchestrator can't drop everything silently.
+uninstall:
+  command: ['node', 'apps/api/dist/scripts/remove-from-appliance.js', '--i-have-a-backup']
 
 # Healthcheck the appliance orchestrator polls. Mirrors the Dockerfile
 # HEALTHCHECK so compose-level and orchestrator-level both agree.
