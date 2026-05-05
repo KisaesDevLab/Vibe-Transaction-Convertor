@@ -24,7 +24,13 @@ const FIT_KEY = 'vibetc:pdfviewer:fit';
 type FitMode = 'manual' | 'width' | 'page';
 
 export function PdfViewer({ pdfHash, highlight, onPdfClick }: PdfViewerProps) {
-  const [pdfBlobUrl, setPdfBlobUrl] = useState<string | null>(null);
+  // We feed pdf.js the raw bytes (Uint8Array) instead of a blob: URL.
+  // Wrapping the API response in URL.createObjectURL and handing that
+  // string to <Document file={...}/> makes pdf.js's worker do its own
+  // XHR against the blob URL, which can resolve to status 0 in pdf.js
+  // v4 even though the document is fully readable. Bytes-in-memory
+  // bypass that entirely.
+  const [pdfData, setPdfData] = useState<Uint8Array | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [numPages, setNumPages] = useState<number>(0);
   const [page, setPage] = useState<number>(1);
@@ -45,28 +51,25 @@ export function PdfViewer({ pdfHash, highlight, onPdfClick }: PdfViewerProps) {
     pdfHeight: number;
   } | null>(null);
 
-  // Fetch the PDF (cookie-authed) once per hash.
+  // Fetch the PDF (cookie-authed) once per hash, into memory as bytes.
   useEffect(() => {
     let cancelled = false;
-    let createdUrl: string | null = null;
     setError(null);
-    setPdfBlobUrl(null);
+    setPdfData(null);
     setNumPages(0);
     if (!pdfHash) return;
     fetch(`/api/uploads/${pdfHash}/raw`, { credentials: 'include' })
       .then(async (res) => {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const blob = await res.blob();
+        const buffer = await res.arrayBuffer();
         if (cancelled) return;
-        createdUrl = URL.createObjectURL(blob);
-        setPdfBlobUrl(createdUrl);
+        setPdfData(new Uint8Array(buffer));
       })
       .catch((err) => {
         if (!cancelled) setError((err as Error).message);
       });
     return () => {
       cancelled = true;
-      if (createdUrl) URL.revokeObjectURL(createdUrl);
     };
   }, [pdfHash]);
 
@@ -225,13 +228,31 @@ export function PdfViewer({ pdfHash, highlight, onPdfClick }: PdfViewerProps) {
               </option>
             ))}
           </select>
-          <a
-            href={pdfBlobUrl ?? '#'}
-            download
-            className="rounded border border-surface-muted px-2 py-0.5"
+          <button
+            type="button"
+            onClick={() => {
+              // Construct a transient blob URL just for this click.
+              // No revoke needed — modern browsers GC blob URLs after
+              // the click, and we only build one per click.
+              if (!pdfData) return;
+              // Cast through ArrayBuffer to satisfy TS — pdfData is a
+              // Uint8Array whose .buffer can technically be a
+              // SharedArrayBuffer, which the Blob ctor types reject.
+              const blob = new Blob([pdfData.slice().buffer], { type: 'application/pdf' });
+              const url = URL.createObjectURL(blob);
+              const a = document.createElement('a');
+              a.href = url;
+              a.download = `${pdfHash.slice(0, 12)}.pdf`;
+              document.body.appendChild(a);
+              a.click();
+              a.remove();
+              setTimeout(() => URL.revokeObjectURL(url), 0);
+            }}
+            disabled={!pdfData}
+            className="rounded border border-surface-muted px-2 py-0.5 disabled:opacity-50"
           >
             ↓ Download
-          </a>
+          </button>
         </div>
       </div>
 
@@ -247,13 +268,13 @@ export function PdfViewer({ pdfHash, highlight, onPdfClick }: PdfViewerProps) {
               Retry
             </button>
           </div>
-        ) : !pdfBlobUrl ? (
+        ) : !pdfData ? (
           <div className="grid h-64 animate-pulse place-items-center rounded-md bg-surface-muted/50 text-xs text-ink-muted">
             Loading PDF…
           </div>
         ) : (
           <Document
-            file={pdfBlobUrl}
+            file={{ data: pdfData }}
             onLoadSuccess={({ numPages: n }) => setNumPages(n)}
             onLoadError={(err) => setError(err.message)}
             loading={null}
