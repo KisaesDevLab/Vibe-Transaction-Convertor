@@ -77,6 +77,39 @@ describe('assignSeqInDay', () => {
     expect(out[1]?.seqInDay).toBe(1);
     expect(out[2]?.seqInDay).toBe(0);
   });
+
+  it('preserves input order even when dates interleave (regression)', () => {
+    const rows = [
+      { postedDate: '2026-03-05', amountCents: -100, description: 'A', sourceLine: 0 },
+      { postedDate: '2026-03-06', amountCents: -200, description: 'B', sourceLine: 1 },
+      { postedDate: '2026-03-05', amountCents: -300, description: 'C', sourceLine: 2 },
+      { postedDate: '2026-03-07', amountCents: -400, description: 'D', sourceLine: 3 },
+      { postedDate: '2026-03-05', amountCents: -500, description: 'E', sourceLine: 4 },
+    ];
+    const out = assignSeqInDay(rows);
+    // Output indices must align with input indices (worker depends on this).
+    expect(out.map((r) => r.description)).toEqual(['A', 'B', 'C', 'D', 'E']);
+    // Seq within each date follows source-line order.
+    expect(out[0]?.seqInDay).toBe(0); // A on 2026-03-05 (sourceLine 0)
+    expect(out[1]?.seqInDay).toBe(0); // B on 2026-03-06
+    expect(out[2]?.seqInDay).toBe(1); // C on 2026-03-05 (sourceLine 2)
+    expect(out[3]?.seqInDay).toBe(0); // D on 2026-03-07
+    expect(out[4]?.seqInDay).toBe(2); // E on 2026-03-05 (sourceLine 4)
+  });
+
+  it('breaks sourceLine ties by amount, then description', () => {
+    const rows = [
+      { postedDate: '2026-03-05', amountCents: -200, description: 'B' },
+      { postedDate: '2026-03-05', amountCents: -100, description: 'A' },
+      { postedDate: '2026-03-05', amountCents: -100, description: 'B' },
+    ];
+    const out = assignSeqInDay(rows);
+    // No sourceLine — ties break on amount asc (-200 first), then description asc.
+    // Seq assigned by sorted order, mapped back to input order.
+    expect(out[0]?.seqInDay).toBe(0); // -200 'B'
+    expect(out[1]?.seqInDay).toBe(1); // -100 'A'
+    expect(out[2]?.seqInDay).toBe(2); // -100 'B'
+  });
 });
 
 describe('inferTrntype', () => {

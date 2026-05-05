@@ -22,9 +22,22 @@ const getRedis = (): Redis | undefined => {
 
 const keyFor = (email: string): string => `login:attempts:${email.trim().toLowerCase()}`;
 
+// Drop expired buckets so the in-memory map can't grow unbounded across
+// the lifetime of a long-running process. Cheap O(n) sweep; called
+// at most once per increment, gated to one sweep per minute.
+let lastSweepAt = 0;
+const sweepExpired = (now: number): void => {
+  if (now - lastSweepAt < 60_000) return;
+  lastSweepAt = now;
+  for (const [k, v] of memoryBuckets) {
+    if (v.resetAt < now) memoryBuckets.delete(k);
+  }
+};
+
 const incrementMemory = (email: string): { count: number; resetAt: number } => {
   const k = keyFor(email);
   const now = Date.now();
+  sweepExpired(now);
   const bucket = memoryBuckets.get(k);
   if (!bucket || bucket.resetAt < now) {
     const fresh = { count: 1, resetAt: now + WINDOW_MS };

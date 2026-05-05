@@ -5,7 +5,7 @@ import { schemas } from '@vibe-tx-converter/shared';
 const { CompanyCreate, CompanyId, CompanyListQuery, CompanyUpdate } = schemas.company;
 
 import { db } from '../db/client.js';
-import { ValidationError } from '../lib/errors.js';
+import { ForbiddenError, ValidationError } from '../lib/errors.js';
 import {
   createCompany,
   deleteCompany,
@@ -62,6 +62,9 @@ export const companiesRouter = (): Router => {
     try {
       const id = CompanyId.parse(req.params.id);
       const force = req.query.force === 'true';
+      if (force && req.user?.role !== 'admin') {
+        throw new ForbiddenError('admin required for ?force=true');
+      }
       await deleteCompany(db, req.user!, id, { force });
       res.status(204).end();
     } catch (err) {

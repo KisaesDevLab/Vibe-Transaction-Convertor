@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 
-import { formatUsd } from '@vibe-tx-converter/shared';
+import { decimalString, formatUsd, parseDecimalToCents } from '@vibe-tx-converter/shared';
 
 import {
   useOverrideReconciliation,
@@ -232,7 +232,11 @@ function Row({
 }) {
   const [editing, setEditing] = useState(false);
   const [desc, setDesc] = useState(tx.description);
-  const [amount, setAmount] = useState(tx.amountCents);
+  // Edit amount as decimal dollars; convert at save time. Storing the
+  // raw cents string in the input was confusing — display showed
+  // "$-4.50" but the input showed "-450".
+  const [amountInput, setAmountInput] = useState(decimalString(BigInt(tx.amountCents)));
+  const [amountError, setAmountError] = useState<string | null>(null);
   return (
     <tr>
       <td className="px-3 py-2 align-top">{tx.postedDate}</td>
@@ -259,11 +263,18 @@ function Row({
       </td>
       <td className="px-3 py-2 text-right align-top tabular-nums">
         {editing ? (
-          <input
-            className="w-28 rounded-md border border-surface-muted px-2 py-1 text-right"
-            value={amount}
-            onChange={(e) => setAmount(e.target.value)}
-          />
+          <div>
+            <input
+              className="w-28 rounded-md border border-surface-muted px-2 py-1 text-right"
+              value={amountInput}
+              inputMode="decimal"
+              onChange={(e) => {
+                setAmountInput(e.target.value);
+                setAmountError(null);
+              }}
+            />
+            {amountError ? <p className="text-xs text-danger">{amountError}</p> : null}
+          </div>
         ) : (
           formatUsd(BigInt(tx.amountCents))
         )}
@@ -272,7 +283,18 @@ function Row({
             <button
               type="button"
               onClick={async () => {
-                await onSave({ description: desc, amount_cents: amount });
+                let cents: bigint;
+                try {
+                  cents = parseDecimalToCents(amountInput);
+                } catch {
+                  setAmountError('Enter a number like -4.50 or 12.34');
+                  return;
+                }
+                if (cents === 0n) {
+                  setAmountError('amount must be non-zero');
+                  return;
+                }
+                await onSave({ description: desc, amount_cents: cents.toString() });
                 setEditing(false);
               }}
               className="rounded-md bg-accent px-2 py-1 text-xs text-accent-fg"
@@ -283,7 +305,8 @@ function Row({
               type="button"
               onClick={() => {
                 setDesc(tx.description);
-                setAmount(tx.amountCents);
+                setAmountInput(decimalString(BigInt(tx.amountCents)));
+                setAmountError(null);
                 setEditing(false);
               }}
               className="rounded-md border border-surface-muted px-2 py-1 text-xs"

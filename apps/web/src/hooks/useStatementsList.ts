@@ -39,7 +39,23 @@ export const useStatementsByAccount = (accountId: string) =>
     queryFn: () =>
       api.get<StatementSummary[]>('/api/statements', accountId ? { accountId } : undefined),
     enabled: accountId.length > 0,
+    // Poll the list while any statement is mid-pipeline so newly uploaded
+    // PDFs appear and progress through statuses without a manual refresh.
+    refetchInterval: (q) => {
+      const data = q.state.data as StatementSummary[] | undefined;
+      if (!data || data.length === 0) return false;
+      const anyInFlight = data.some(
+        (s) =>
+          s.status !== 'review' &&
+          s.status !== 'exported' &&
+          s.status !== 'failed' &&
+          s.status !== 'awaiting-locale-confirmation',
+      );
+      return anyInFlight ? 3_000 : false;
+    },
   });
+
+const TERMINAL_STATUSES = new Set(['review', 'exported', 'failed', 'awaiting-locale-confirmation']);
 
 export const useStatement = (statementId: string) =>
   useQuery({
@@ -49,6 +65,16 @@ export const useStatement = (statementId: string) =>
         `/api/statements/${statementId}`,
       ),
     enabled: statementId.length > 0,
+    // Poll while the extraction pipeline is running so the operator sees
+    // status transitions (uploaded → preprocessing → ocr → extracting →
+    // reconciling → review) without manual refresh.
+    refetchInterval: (q) => {
+      const data = q.state.data as
+        | { statement: StatementSummary; transactions: TransactionRow[] }
+        | undefined;
+      if (!data) return 2_000; // initial load — try again soon
+      return TERMINAL_STATUSES.has(data.statement.status) ? false : 3_000;
+    },
   });
 
 export interface TransactionPatch {

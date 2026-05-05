@@ -73,6 +73,9 @@ export const accountsRouter = (): Router => {
     try {
       const id = AccountId.parse(req.params.id);
       const force = req.query.force === 'true';
+      if (force && req.user?.role !== 'admin') {
+        throw new ForbiddenError('admin required for ?force=true');
+      }
       await deleteAccount(db, req.user!, id, { force });
       res.status(204).end();
     } catch (err) {

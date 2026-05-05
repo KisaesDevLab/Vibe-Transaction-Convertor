@@ -37,34 +37,36 @@ export interface SeqInputRow {
 export const assignSeqInDay = <T extends SeqInputRow>(
   rows: T[],
 ): Array<T & { seqInDay: number }> => {
-  const grouped = new Map<string, T[]>();
-  for (const r of rows) {
-    const list = grouped.get(r.postedDate) ?? [];
-    list.push(r);
-    grouped.set(r.postedDate, list);
-  }
-  const out: Array<T & { seqInDay: number }> = [];
-  for (const [, group] of grouped) {
-    group.sort((a, b) => {
-      const lineA = a.sourceLine ?? Number.MAX_SAFE_INTEGER;
-      const lineB = b.sourceLine ?? Number.MAX_SAFE_INTEGER;
-      if (lineA !== lineB) return lineA - lineB;
-      const amtA = typeof a.amountCents === 'bigint' ? a.amountCents : BigInt(a.amountCents);
-      const amtB = typeof b.amountCents === 'bigint' ? b.amountCents : BigInt(b.amountCents);
-      if (amtA !== amtB) return amtA < amtB ? -1 : 1;
-      return a.description.localeCompare(b.description);
-    });
-    let seq = 0;
-    for (const row of group) {
-      out.push({ ...row, seqInDay: seq });
-      seq += 1;
-    }
-  }
-  // preserve the original input ordering for downstream stability
-  out.sort((a, b) => {
-    const idxA = rows.indexOf(a as T);
-    const idxB = rows.indexOf(b as T);
-    return idxA - idxB;
+  // Group by date carrying the original index so we can restore input
+  // order after computing seq within each group. The previous
+  // implementation tried to restore order via rows.indexOf() on spread
+  // copies — which always returns -1 — so output was grouped-by-date
+  // not input-order. Worker code assumes seqAssigned[i] aligns with
+  // rows[i]; now it does.
+  const byDate = new Map<string, Array<{ row: T; originalIndex: number }>>();
+  rows.forEach((row, originalIndex) => {
+    const list = byDate.get(row.postedDate) ?? [];
+    list.push({ row, originalIndex });
+    byDate.set(row.postedDate, list);
   });
-  return out;
+
+  const seqByOriginalIndex = new Map<number, number>();
+  for (const [, group] of byDate) {
+    group.sort((a, b) => {
+      const lineA = a.row.sourceLine ?? Number.MAX_SAFE_INTEGER;
+      const lineB = b.row.sourceLine ?? Number.MAX_SAFE_INTEGER;
+      if (lineA !== lineB) return lineA - lineB;
+      const amtA =
+        typeof a.row.amountCents === 'bigint' ? a.row.amountCents : BigInt(a.row.amountCents);
+      const amtB =
+        typeof b.row.amountCents === 'bigint' ? b.row.amountCents : BigInt(b.row.amountCents);
+      if (amtA !== amtB) return amtA < amtB ? -1 : 1;
+      return a.row.description.localeCompare(b.row.description);
+    });
+    group.forEach((item, seq) => {
+      seqByOriginalIndex.set(item.originalIndex, seq);
+    });
+  }
+
+  return rows.map((row, idx) => ({ ...row, seqInDay: seqByOriginalIndex.get(idx) ?? 0 }));
 };

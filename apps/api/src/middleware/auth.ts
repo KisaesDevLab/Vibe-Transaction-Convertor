@@ -22,13 +22,27 @@ const readSessionId = (req: Request): string | undefined => {
   return undefined;
 };
 
-export const loadSession: RequestHandler = async (req, _res, next) => {
+export const loadSession: RequestHandler = async (req, res, next) => {
   try {
     const sid = readSessionId(req);
     if (!sid) return next();
     const ctx = await getSession(db, sid);
     if (!ctx) return next();
+    const before = ctx.session.expiresAt.getTime();
     const session = await maybeRollSession(db, ctx.session);
+    // If the rolling helper extended the expiry, re-issue the cookie so
+    // the browser tracks the new expiration. Without this, the DB row
+    // keeps rolling but the browser drops the cookie at the original
+    // deadline.
+    if (session.expiresAt.getTime() !== before) {
+      res.cookie(SESSION_COOKIE, sid, {
+        httpOnly: true,
+        sameSite: 'lax',
+        secure: process.env.NODE_ENV === 'production',
+        signed: true,
+        expires: session.expiresAt,
+      });
+    }
     req.user = ctx.user;
     req.session = session;
     next();

@@ -64,19 +64,23 @@ describe('OFX 2.x XML', () => {
 });
 
 describe('OFX 1.x SGML — QBO/QFX', () => {
-  it('QBO emits the SGML header + INTU.BID + INTU.USERID', () => {
+  it('QBO emits the SGML header + INTU.BID + the standard <FI> block', () => {
     const out = renderQbo(STMT);
     expect(out.startsWith('OFXHEADER:100')).toBe(true);
     expect(out).toContain('VERSION:102');
     expect(out).toContain('<INTU.BID>3000');
-    expect(out).toContain('<INTU.USERID>Wells Fargo');
+    expect(out).toContain('<FI>');
+    expect(out).toContain('<ORG>Wells Fargo');
+    expect(out).toContain('<FID>3000');
+    expect(out).not.toContain('<INTU.USERID>'); // never emitted (was wrong)
     expect(out).toContain('<TRNAMT>-74.21');
   });
 
-  it('QFX emits INTU.BID but skips INTU.USERID', () => {
+  it('QFX emits INTU.BID but skips the <FI> block (Quicken)', () => {
     const out = renderQfx(STMT);
     expect(out).toContain('<INTU.BID>3000');
     expect(out).not.toContain('<INTU.USERID>');
+    expect(out).not.toContain('<FI>');
   });
 });
 

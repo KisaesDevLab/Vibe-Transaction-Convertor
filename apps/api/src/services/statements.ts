@@ -26,17 +26,10 @@ export const ingestUpload = async (
   actor: User,
   input: UploadIngestInput,
 ): Promise<UploadIngestResult> => {
-  const existing = await db
-    .select()
-    .from(statements)
-    .where(
-      and(eq(statements.accountId, input.accountId), eq(statements.sourcePdfHash, input.hash)),
-    );
-  if (existing[0]) {
-    return { statement: existing[0], deduplicated: true };
-  }
-
-  const [created] = await db
+  // ON CONFLICT DO NOTHING + RETURNING closes the race window where two
+  // parallel uploads of the same hash for the same account both pass a
+  // pre-INSERT SELECT and then collide on the unique index.
+  const inserted = await db
     .insert(statements)
     .values({
       accountId: input.accountId,
@@ -45,18 +38,34 @@ export const ingestUpload = async (
       sourcePdfPages: input.pages,
       status: 'uploaded',
     })
+    .onConflictDoNothing({ target: [statements.accountId, statements.sourcePdfHash] })
     .returning();
-  if (!created) throw new Error('statement insert returned no row');
 
-  await writeAudit(db, {
-    actorUserId: actor.id,
-    entityType: 'statement',
-    entityId: created.id,
-    action: 'statement.upload',
-    payload: { hash: input.hash, filename: input.filename, bytes: input.bytes, pages: input.pages },
-  });
+  if (inserted[0]) {
+    await writeAudit(db, {
+      actorUserId: actor.id,
+      entityType: 'statement',
+      entityId: inserted[0].id,
+      action: 'statement.upload',
+      payload: {
+        hash: input.hash,
+        filename: input.filename,
+        bytes: input.bytes,
+        pages: input.pages,
+      },
+    });
+    return { statement: inserted[0], deduplicated: false };
+  }
 
-  return { statement: created, deduplicated: false };
+  // Conflict path: another writer (or a re-upload) already created it.
+  const existing = await db
+    .select()
+    .from(statements)
+    .where(
+      and(eq(statements.accountId, input.accountId), eq(statements.sourcePdfHash, input.hash)),
+    );
+  if (!existing[0]) throw new Error('statement insert lost the race AND row not found');
+  return { statement: existing[0], deduplicated: true };
 };
 
 export const findByHash = async (db: Db, hash: string): Promise<Statement | null> => {

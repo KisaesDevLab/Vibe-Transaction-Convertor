@@ -31,7 +31,11 @@ export const useLogin = () => {
   return useMutation({
     mutationFn: (input: { email: string; password: string }) =>
       api.post<{ user: AuthUser }>('/api/auth/login', input),
-    onSuccess: () => qc.invalidateQueries({ queryKey: meKey }),
+    // Set the meQuery cache synchronously from the login response — this
+    // closes the brief flash where AuthGate sees stale `null` and bounces
+    // the just-authenticated user back to /login while the meQuery
+    // refetches.
+    onSuccess: (data) => qc.setQueryData(meKey, data.user),
   });
 };
 
@@ -39,7 +43,7 @@ export const useLogout = () => {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: () => api.post<{ ok: boolean }>('/api/auth/logout'),
-    onSuccess: () => qc.invalidateQueries({ queryKey: meKey }),
+    onSuccess: () => qc.setQueryData(meKey, null),
   });
 };
 

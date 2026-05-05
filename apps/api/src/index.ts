@@ -1,5 +1,6 @@
 import { db } from './db/client.js';
 import { startWorkers } from './jobs/index.js';
+import { runBootChecks } from './lib/boot-checks.js';
 import { logger } from './lib/logger.js';
 import { seedFidirIfEmpty } from './services/fidir-seeder.js';
 import { createApp } from './server.js';
@@ -7,14 +8,11 @@ import { createApp } from './server.js';
 const port = Number.parseInt(process.env.PORT ?? '4000', 10);
 
 const main = async (): Promise<void> => {
-  if (process.env.DATABASE_URL) {
-    try {
-      await seedFidirIfEmpty(db);
-    } catch (err) {
-      logger.warn({ err }, 'fidir bootstrap seed failed; continuing');
-    }
-  } else {
-    logger.warn('DATABASE_URL not set; skipping FIDIR bootstrap seed');
+  runBootChecks();
+  try {
+    await seedFidirIfEmpty(db);
+  } catch (err) {
+    logger.warn({ err }, 'fidir bootstrap seed failed; continuing');
   }
   startWorkers();
   const app = createApp();
@@ -23,4 +21,7 @@ const main = async (): Promise<void> => {
   });
 };
 
-void main();
+main().catch((err) => {
+  logger.fatal({ err }, 'boot failed');
+  process.exit(1);
+});

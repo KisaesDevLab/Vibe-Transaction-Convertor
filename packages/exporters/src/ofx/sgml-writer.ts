@@ -40,7 +40,11 @@ const renderStmtTrnSgml = (trn: Stmt['transactions'][number]): string => {
 
 export interface SgmlWriterOptions {
   emitIntuBid?: boolean | undefined;
-  emitIntuOrg?: boolean | undefined;
+  // Toggles the standard OFX <FI><ORG><FID></FI> block, present in both
+  // QBO and QFX. The intentionally-removed `INTU.USERID` was a wrong
+  // field — it's a per-user identifier we don't have, not the bank's
+  // org name. QuickBooks accepts files without it.
+  emitFiBlock?: boolean | undefined;
 }
 
 export const renderOfxSgml = (stmt: Stmt, opts: SgmlWriterOptions = {}): string => {
@@ -56,16 +60,13 @@ export const renderOfxSgml = (stmt: Stmt, opts: SgmlWriterOptions = {}): string 
     stag('DTSERVER', ofxDateTime(stmt.asOf)),
     stag('LANGUAGE', 'ENG'),
   ];
-  if (opts.emitIntuOrg !== false && stmt.bankAccountInfo.intuOrg) {
+  if (opts.emitFiBlock !== false && stmt.bankAccountInfo.intuOrg) {
     sonrs.push('<FI>', stag('ORG', sgmlEscape(stmt.bankAccountInfo.intuOrg)));
     if (stmt.bankAccountInfo.intuBid) sonrs.push(stag('FID', stmt.bankAccountInfo.intuBid));
     sonrs.push('</FI>');
   }
   if (opts.emitIntuBid !== false && stmt.bankAccountInfo.intuBid) {
     sonrs.push(stag('INTU.BID', stmt.bankAccountInfo.intuBid));
-  }
-  if (opts.emitIntuOrg !== false && stmt.bankAccountInfo.intuOrg) {
-    sonrs.push(stag('INTU.USERID', sgmlEscape(stmt.bankAccountInfo.intuOrg)));
   }
   sonrs.push('</SONRS>');
 
@@ -140,10 +141,11 @@ export const renderOfxSgml = (stmt: Stmt, opts: SgmlWriterOptions = {}): string 
   return `${SGML_HEADER}\r\n\r\n${body}\r\n`;
 };
 
-// Phase 22: QBO is the SGML writer with intu.bid/intu.org enabled.
+// Phase 22: QBO is the SGML writer with INTU.BID + the standard <FI> block.
 export const renderQbo = (stmt: Stmt): string =>
-  renderOfxSgml(stmt, { emitIntuBid: true, emitIntuOrg: true });
+  renderOfxSgml(stmt, { emitIntuBid: true, emitFiBlock: true });
 
-// Phase 23: QFX is the SGML writer with intu.bid only (Quicken).
+// Phase 23: QFX is the SGML writer with INTU.BID only — Quicken doesn't
+// require the <FI> block when INTU.BID is present.
 export const renderQfx = (stmt: Stmt): string =>
-  renderOfxSgml(stmt, { emitIntuBid: true, emitIntuOrg: false });
+  renderOfxSgml(stmt, { emitIntuBid: true, emitFiBlock: false });

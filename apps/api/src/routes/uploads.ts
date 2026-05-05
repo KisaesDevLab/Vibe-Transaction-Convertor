@@ -1,6 +1,9 @@
 import { Router } from 'express';
 import multer from 'multer';
-import pdfParse from 'pdf-parse';
+// pdf-parse's package entry has a debug branch that auto-reads a test
+// PDF when it suspects it's running as the package main. The explicit
+// lib path skips that branch — required for production deployments.
+import pdfParse from 'pdf-parse/lib/pdf-parse.js';
 
 import { db } from '../db/client.js';
 import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from '../lib/errors.js';

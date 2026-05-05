@@ -1,9 +1,12 @@
 import compression from 'compression';
 import cookieParser from 'cookie-parser';
 import cors from 'cors';
-import express, { type Express } from 'express';
+import express, { type Express, type Request, type Response, type NextFunction } from 'express';
 import helmet from 'helmet';
 import { pinoHttp } from 'pino-http';
+import { existsSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { logger } from './lib/logger.js';
 import { errorHandler, notFoundHandler } from './middleware/error-handler.js';
@@ -90,6 +93,47 @@ export const createApp = (): Express => {
   app.use('/api/statements', requireAuth, exportsRouter());
   app.use('/api/audit', requireAuth, auditRouter());
   app.use('/api/admin', requireAuth, adminRouter());
+
+  // Static SPA serving — production deployments bundle apps/web/dist into
+  // the same container as the API. Locating it relative to this file lets
+  // the same code path work in dev (tsx watch from src/) and in prod
+  // (compiled to dist/, with web at ../../web/dist).
+  const __dirname = dirname(fileURLToPath(import.meta.url));
+  const candidates = [
+    resolve(__dirname, '..', '..', 'web', 'dist'), // monorepo dev: apps/api/src/ → apps/web/dist
+    resolve(__dirname, '..', '..', '..', 'web', 'dist'), // built: apps/api/dist/ → apps/web/dist
+    resolve('/app/apps/web/dist'), // container layout
+  ];
+  const spaDir = candidates.find((p) => existsSync(p));
+  if (spaDir) {
+    logger.info({ spaDir }, 'serving SPA');
+    // Cache hashed assets aggressively, never the index.html.
+    app.use(
+      express.static(spaDir, {
+        index: false,
+        setHeaders: (res, filePath) => {
+          if (/\.(js|css|woff2?|png|svg|jpg|gif|webp)$/i.test(filePath)) {
+            res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+          }
+        },
+      }),
+    );
+    // SPA fallback — serve index.html for any non-/api GET so client-side
+    // routing survives a refresh on a deep route. We do NOT fall back for
+    // requests that look like static assets (have an extension that isn't
+    // .html) so missing JS/CSS/image files honestly 404 instead of
+    // returning HTML that the browser can't parse.
+    app.get(/^(?!\/api\/).*$/, (req: Request, res: Response, next: NextFunction) => {
+      if (/\.[a-z0-9]+$/i.test(req.path) && !req.path.endsWith('.html')) {
+        return next();
+      }
+      res.sendFile(join(spaDir, 'index.html'), (err) => {
+        if (err) next(err);
+      });
+    });
+  } else {
+    logger.warn({ candidates }, 'SPA dist not found; / will 404');
+  }
 
   app.use(notFoundHandler);
   app.use(errorHandler);

@@ -11,8 +11,14 @@ import {
   routePdf,
   type ExtractionMethod,
 } from '@vibe-tx-converter/extractor';
-import { reconcileGoldenRule } from '@vibe-tx-converter/reconciler';
-import { assignSeqInDay, computeFitid, inferTrntype } from '@vibe-tx-converter/exporters';
+import { reconcileGoldenRule, repairPass } from '@vibe-tx-converter/reconciler';
+import {
+  assignSeqInDay,
+  computeFitid,
+  inferTrntype,
+  normalizeDescription,
+} from '@vibe-tx-converter/exporters';
+import { schemas } from '@vibe-tx-converter/shared';
 
 import { db } from '../db/client.js';
 import { statements, transactions } from '../db/schema.js';
@@ -71,10 +77,12 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
     markdown = ocr.pages.map((p) => `# Page ${p.index + 1}\n\n${p.markdown}`).join('\n\n');
   }
 
-  // LLM extraction
+  // LLM extraction. Pass the JSON Schema explicitly so the local Vibe
+  // Gateway uses guided_json mode (ADR-004); the Anthropic provider
+  // gets the same schema via its tool_use input_schema (ADR-020).
   await setStatus(stmtId, 'extracting');
   const provider = await buildProvider(db);
-  const result = await provider.extract(markdown);
+  const result = await provider.extract(markdown, schemas.extraction.ExtractionJsonSchema);
 
   await db
     .update(statements)
@@ -95,60 +103,126 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
     })
     .where(eq(statements.id, stmtId));
 
-  // Compute seqInDay + FITID + TRNTYPE per row.
   await setStatus(stmtId, 'reconciling');
+
+  // Reconcile, then attempt the repair pass (ADR-010 + Phase 16) when
+  // the Golden Rule fails. Repair tries sign-flip and drop-duplicate;
+  // when it succeeds we mutate `effectiveTxs` in-place so all downstream
+  // FITID + insert logic uses the corrected list.
+  const openingCents = BigInt(result.data.opening_balance_cents);
+  const closingCents = BigInt(result.data.closing_balance_cents);
+  let effectiveTxs = result.data.transactions.map((t, idx) => ({
+    postedDate: t.posted_date,
+    description: t.description,
+    amountCents: BigInt(t.amount_cents),
+    runningBalanceCents:
+      t.running_balance_cents !== undefined && t.running_balance_cents !== null
+        ? BigInt(t.running_balance_cents)
+        : null,
+    checkNumber: t.check_number ?? null,
+    trntypeHint: t.trntype,
+    sourcePage: t.source_page,
+    confidence: t.confidence ?? 1,
+    sourceLine: idx,
+  }));
+
+  let reconciled = reconcileGoldenRule({
+    openingBalanceCents: openingCents,
+    closingBalanceCents: closingCents,
+    transactions: effectiveTxs.map((t) => ({ amountCents: t.amountCents })),
+    periodStart: result.data.period_start,
+    periodEnd: result.data.period_end,
+    transactionDates: effectiveTxs.map((t) => t.postedDate),
+  });
+
+  let repairApplied: string | null = null;
+  if (reconciled.status === 'discrepancy') {
+    const candidate = repairPass(
+      effectiveTxs.map((t) => ({ amountCents: t.amountCents, description: t.description })),
+      reconciled.deltaCents,
+    );
+    if (candidate) {
+      // Apply the repair to effectiveTxs (preserving the rest of the
+      // metadata) — drop-duplicate removes a row, sign-flip mutates one.
+      const repairedAmounts = candidate.transactions;
+      if (repairedAmounts.length === effectiveTxs.length) {
+        effectiveTxs = effectiveTxs.map((t, i) => ({
+          ...t,
+          amountCents: repairedAmounts[i]!.amountCents,
+        }));
+      } else {
+        // length differs → a row was dropped; rebuild by matching position.
+        const out: typeof effectiveTxs = [];
+        let r = 0;
+        for (const original of effectiveTxs) {
+          if (
+            r < repairedAmounts.length &&
+            repairedAmounts[r]!.amountCents === original.amountCents &&
+            repairedAmounts[r]!.description === original.description
+          ) {
+            out.push(original);
+            r += 1;
+          }
+        }
+        effectiveTxs = out;
+      }
+      reconciled = reconcileGoldenRule({
+        openingBalanceCents: openingCents,
+        closingBalanceCents: closingCents,
+        transactions: effectiveTxs.map((t) => ({ amountCents: t.amountCents })),
+        periodStart: result.data.period_start,
+        periodEnd: result.data.period_end,
+        transactionDates: effectiveTxs.map((t) => t.postedDate),
+      });
+      if (reconciled.status === 'verified') {
+        repairApplied = candidate.fixDescription;
+        logger.info({ stmtId, fix: candidate.fixDescription }, 'reconcile repair applied');
+      }
+    }
+  }
+
   const seqAssigned = assignSeqInDay(
-    result.data.transactions.map((t, idx) => ({
-      postedDate: t.posted_date,
-      amountCents: t.amount_cents,
+    effectiveTxs.map((t) => ({
+      postedDate: t.postedDate,
+      amountCents: t.amountCents,
       description: t.description,
-      sourceLine: idx,
+      sourceLine: t.sourceLine,
     })),
   );
 
-  const reconciled = reconcileGoldenRule({
-    openingBalanceCents: BigInt(result.data.opening_balance_cents),
-    closingBalanceCents: BigInt(result.data.closing_balance_cents),
-    transactions: result.data.transactions.map((t) => ({ amountCents: BigInt(t.amount_cents) })),
-    periodStart: result.data.period_start,
-    periodEnd: result.data.period_end,
-    transactionDates: result.data.transactions.map((t) => t.posted_date),
-  });
-
   // Bulk insert transactions (idempotent on (statement_id, fitid)).
-  for (let i = 0; i < result.data.transactions.length; i += 1) {
-    const tx = result.data.transactions[i]!;
+  // Iterate effectiveTxs (post-repair) so insertions reflect the
+  // reconciled, repaired state — never the pre-repair LLM output.
+  for (let i = 0; i < effectiveTxs.length; i += 1) {
+    const tx = effectiveTxs[i]!;
     const seq = seqAssigned[i]!.seqInDay;
     const fitid = computeFitid({
-      postedDate: tx.posted_date,
-      amountCents: tx.amount_cents,
+      postedDate: tx.postedDate,
+      amountCents: tx.amountCents,
       description: tx.description,
       seqInDay: seq,
     });
     const trntype = inferTrntype({
       description: tx.description,
-      amountCents: tx.amount_cents,
-      ...(tx.trntype ? { llmHint: tx.trntype } : {}),
+      amountCents: tx.amountCents,
+      ...(tx.trntypeHint ? { llmHint: tx.trntypeHint } : {}),
     });
     await db
       .insert(transactions)
       .values({
         statementId: stmtId,
         seqInDay: seq,
-        postedDate: tx.posted_date,
+        postedDate: tx.postedDate,
         description: tx.description,
-        normalizedDescription: tx.description.toLowerCase().replace(/\s+/g, ' ').trim(),
-        amountCents: BigInt(tx.amount_cents),
-        runningBalanceCents:
-          tx.running_balance_cents !== undefined && tx.running_balance_cents !== null
-            ? BigInt(tx.running_balance_cents)
-            : null,
-        checkNumber: tx.check_number ?? null,
+        normalizedDescription: normalizeDescription(tx.description),
+        amountCents: tx.amountCents,
+        runningBalanceCents: tx.runningBalanceCents,
+        checkNumber: tx.checkNumber,
         trntype,
         fitid,
-        sourcePage: tx.source_page,
+        sourcePage: tx.sourcePage,
         sourceBboxJson: null,
-        confidence: tx.confidence ?? 1,
+        confidence: tx.confidence,
       })
       .onConflictDoNothing();
   }
@@ -171,7 +245,9 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
       method,
       provider: provider.id,
       reconciliation: reconciled.status,
-      txCount: result.data.transactions.length,
+      txCount: effectiveTxs.length,
+      llmEmittedTxCount: result.data.transactions.length,
+      ...(repairApplied ? { repairApplied } : {}),
     },
   });
 };
@@ -195,6 +271,14 @@ export const startExtractionWorker = (): Worker<ExtractionJobData> => {
         throw err;
       }
     },
-    { connection: getJobConnection() },
+    {
+      connection: getJobConnection(),
+      // lockDuration must comfortably exceed the longest expected job;
+      // otherwise BullMQ marks the job as orphaned and re-queues it
+      // while the worker is still processing. OCR + LLM can take
+      // several minutes, so default 30s is too tight.
+      lockDuration: Number(process.env.VIBETC_EXTRACTION_TIMEOUT_MS ?? 600_000) + 60_000,
+      concurrency: Math.max(1, Number(process.env.WORKER_CONCURRENCY ?? 1)),
+    },
   );
 };
