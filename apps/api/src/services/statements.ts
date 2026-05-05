@@ -1,4 +1,4 @@
-import { and, eq } from 'drizzle-orm';
+import { and, eq, isNull, sql } from 'drizzle-orm';
 import { createReadStream } from 'node:fs';
 
 import type { Db } from '../db/client.js';
@@ -29,6 +29,12 @@ export const ingestUpload = async (
   // ON CONFLICT DO NOTHING + RETURNING closes the race window where two
   // parallel uploads of the same hash for the same account both pass a
   // pre-INSERT SELECT and then collide on the unique index.
+  //
+  // Migration 0006 replaced the plain unique index with a partial one
+  // (`statements_account_hash_unsplit_uq` ... WHERE page_range IS NULL)
+  // so multiple post-split rows can share (account, hash) with disjoint
+  // page_range. The conflict target therefore needs the same predicate
+  // — Postgres won't match a partial index without it.
   const inserted = await db
     .insert(statements)
     .values({
@@ -38,7 +44,10 @@ export const ingestUpload = async (
       sourcePdfPages: input.pages,
       status: 'uploaded',
     })
-    .onConflictDoNothing({ target: [statements.accountId, statements.sourcePdfHash] })
+    .onConflictDoNothing({
+      target: [statements.accountId, statements.sourcePdfHash],
+      where: sql`page_range IS NULL`,
+    })
     .returning();
 
   if (inserted[0]) {
@@ -58,11 +67,18 @@ export const ingestUpload = async (
   }
 
   // Conflict path: another writer (or a re-upload) already created it.
+  // Match the partial unique index (page_range IS NULL) so split-child
+  // rows that happen to share (account, hash) are ignored — only the
+  // original whole-PDF row counts as a duplicate.
   const existing = await db
     .select()
     .from(statements)
     .where(
-      and(eq(statements.accountId, input.accountId), eq(statements.sourcePdfHash, input.hash)),
+      and(
+        eq(statements.accountId, input.accountId),
+        eq(statements.sourcePdfHash, input.hash),
+        isNull(statements.pageRange),
+      ),
     );
   if (!existing[0]) throw new Error('statement insert lost the race AND row not found');
   return { statement: existing[0], deduplicated: true };
