@@ -24,13 +24,13 @@ just whether the happy path runs. Acceptance gauntlet: `pnpm acceptance`
 | 14    | Multi-Account Auto-Split                  | ⚠      | `9e34173`   | detection only — never splits into multiple statements         |
 | 15    | BullMQ Extraction Pipeline                | ⚠      | `56e80e0`   | no SSE progress; no cancel; no awaiting-locale gate            |
 | 16    | Golden Rule Reconciler & Repair Pass      | ⚠      | `9e34173`   | repair is heuristic (spec: LLM 2nd pass); no findSuspectRows   |
-| 17    | TRNTYPE Inference + FITID Generator       | ⚠      | `9e34173`   | ~10 spec rules missing; isCreditCard not wired through worker  |
+| 17    | TRNTYPE Inference + FITID Generator       | ⚠      | `702449e`   | rule list + isCreditCard wired; no docs/extraction.md          |
 | 18    | Statement & Transaction Review UI         | ⚠      | `d22cccd`   | no global /statements; no full-detail header                   |
 | 19    | PDF Viewer with Bounding-Box Highlighting | ⚠      | `9a1fc2f`   | PDF→txn click selection not wired                              |
-| 20    | CSV Exporter                              | ⚠      | `d22cccd`   | qbo4 column order swapped; xero 6-col; generic missing 4 cols  |
-| 21    | OFX 2.x XML Exporter                      | ⚠      | `d22cccd`   | uses LF not CRLF; no <FI> in SONRS; no ofx4js parse roundtrip  |
-| 22    | QBO Exporter                              | ⚠      | `d22cccd`   | INTU.BID conditional (spec: always); no fallback ladder        |
-| 23    | QFX Exporter                              | ⚠      | `d22cccd`   | <INTU.USERID> missing entirely                                 |
+| 20    | CSV Exporter                              | ⚠      | `702449e`   | column shapes fixed; no golden-master fixtures yet             |
+| 21    | OFX 2.x XML Exporter                      | ⚠      | `702449e`   | CRLF + SONRS FI block; no ofx4js parse roundtrip               |
+| 22    | QBO Exporter                              | ⚠      | `702449e`   | INTU.BID always; BANKID ladder; no transliteration             |
+| 23    | QFX Exporter                              | ⚠      | `702449e`   | INTU.USERID stable; needs golden-master + qfx-import.md        |
 | 24    | Export UI & Download Bundling             | ⚠      | `d22cccd`   | no <ExportPage>; no preview; no download list endpoint         |
 | 25    | Audit Log                                 | ⚠      | `d22cccd`   | no diffs / no JSON tree / no downloads / no retention          |
 | 26    | Admin / Settings                          | ⚠      | `d22cccd`   | no LlmProviderAdminPage; no real BackupAdminPage; no FidirPage |
@@ -50,7 +50,7 @@ The **core happy path works end-to-end**: register first admin → create
 company → add account with bank-picker → upload PDF → BullMQ worker
 analyzes / extracts / reconciles → review grid with inline edits and
 PDF viewer → export to CSV/OFX/QBO/QFX → audit-log every mutation. The
-acceptance suite is green (102 unit + supertests pass, build clean).
+acceptance suite is green (120 unit + supertests pass, build clean).
 
 What's missing is **breadth, polish and several spec invariants**:
 
@@ -61,9 +61,11 @@ What's missing is **breadth, polish and several spec invariants**:
   no token budget, no LLM-driven repair pass.
 - Multi-account detection works but does not split into multiple
   statement rows (no `page_range` column, no confirm-split route).
-- Exporter byte shapes diverge from spec on multiple formats (CSV
-  columns, OFX line endings, QBO INTU.BID conditional, QFX
-  INTU.USERID missing entirely, no BANKID fallback ladder).
+- ~~Exporter byte shapes diverge from spec.~~ Resolved 2026-05-05 in
+  commit `702449e`: CSV column sets, OFX 2.x CRLF + FI block, QBO
+  always-emit INTU.BID with '3000' fallback, BANKID fallback ladder,
+  QFX INTU.USERID stable per account. Still need golden-master
+  fixtures per template.
 - Admin, audit, export, and review UIs are missing dialog / preview /
   listing surfaces.
 - Release pipeline lacks cosign signing, syft SBOM, CHANGELOG.
