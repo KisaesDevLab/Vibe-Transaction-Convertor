@@ -19,10 +19,10 @@ just whether the happy path runs. Acceptance gauntlet: `pnpm acceptance`
 | 9     | PDF Upload, Storage, Hashing              | ⚠      | `dc560c7`   | no ZIP batch; no MIME sniffing; no .tmp 1h cleanup             |
 | 10    | PDF Pre-Processing & Routing              | ⚠      | `5c8b41b`   | no fixture suite; no per-page timeouts; no force-OCR flag      |
 | 11    | GLM-OCR HTTP Client                       | ⚠      | `c76d8cf`   | in-memory cache (spec: Redis); no version probe; no breaker    |
-| 12    | LLM Extractor                             | ⚠      | `<next>`    | 4 of 10 exemplars; token budget; cleanup; flat schema remains  |
-| 13    | LLM Provider Abstraction                  | ⚠      | `<next>`    | dateFormatOverride wired; no 60-s cache; no @anthropic-ai/sdk  |
+| 12    | LLM Extractor                             | ⚠      | `c403118`   | 4 of 10 exemplars; token budget; cleanup; flat schema remains  |
+| 13    | LLM Provider Abstraction                  | ⚠      | `c403118`   | dateFormatOverride wired; no 60-s cache; no @anthropic-ai/sdk  |
 | 14    | Multi-Account Auto-Split                  | ⚠      | `9e34173`   | detection only — never splits into multiple statements         |
-| 15    | BullMQ Extraction Pipeline                | ⚠      | `<next>`    | locale-gate now wired; no SSE progress; no cancel              |
+| 15    | BullMQ Extraction Pipeline                | ⚠      | `c403118`   | locale-gate now wired; no SSE progress; no cancel              |
 | 16    | Golden Rule Reconciler & Repair Pass      | ⚠      | `9e34173`   | repair is heuristic (spec: LLM 2nd pass); no findSuspectRows   |
 | 17    | TRNTYPE Inference + FITID Generator       | ⚠      | `702449e`   | rule list + isCreditCard wired; no docs/extraction.md          |
 | 18    | Statement & Transaction Review UI         | ⚠      | `d22cccd`   | no global /statements; no full-detail header                   |
@@ -57,8 +57,9 @@ What's missing is **breadth, polish and several spec invariants**:
 - Frontend stack is raw HTML+Tailwind (CLAUDE.md locks shadcn/Radix).
 - No fixture corpus / golden-master files; no Playwright; no React
   Testing Library.
-- LLM extraction is wired but thin — 1 of 10 exemplars, flat schema,
-  no token budget, no LLM-driven repair pass.
+- LLM extraction is wired but thin — 4 of 10 exemplars, flat schema
+  (still pending nesting refactor), no LLM-driven repair pass.
+  Token budget + markdown cleanup landed in `c403118`.
 - Multi-account detection works but does not split into multiple
   statement rows (no `page_range` column, no confirm-split route).
 - ~~Exporter byte shapes diverge from spec.~~ Resolved 2026-05-05 in
