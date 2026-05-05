@@ -20,6 +20,7 @@ import {
   type EngineKey,
 } from '../services/engines.js';
 import { buildProvider, invalidateProviderCache } from '../services/llm-provider.js';
+import { clearPricing, listPricings, setPricing } from '../services/pricing.js';
 import { AnthropicProvider, probeGlmOcrHealth } from '@vibe-tx-converter/extractor';
 import { extractionQueue } from '../jobs/queues.js';
 import { logger } from '../lib/logger.js';
@@ -284,6 +285,81 @@ export const adminRouter = (): Router => {
         ok: health.ok,
         detail: health.detail ?? null,
       });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // Operator-managed Anthropic pricing. Per-million-token USD figures
+  // get converted to micros server-side (1 USD = 1_000_000 micros) so
+  // the cost-calc path stays integer-clean.
+  router.get('/llm-provider/pricing', async (_req, res, next) => {
+    try {
+      const rows = await listPricings(db);
+      res.json({
+        rows: rows.map((r) => ({
+          model: r.model,
+          source: r.source,
+          inputPerMTokenMicros: r.inputPerMTokenMicros.toString(),
+          outputPerMTokenMicros: r.outputPerMTokenMicros.toString(),
+          inputPerMTokenUsd: Number(r.inputPerMTokenMicros) / 1_000_000,
+          outputPerMTokenUsd: Number(r.outputPerMTokenMicros) / 1_000_000,
+        })),
+      });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.post('/llm-provider/pricing', async (req, res, next) => {
+    try {
+      const body = req.body ?? {};
+      const model = String(body.model ?? '').trim();
+      const inputUsd = Number.parseFloat(String(body.inputPerMTokenUsd ?? ''));
+      const outputUsd = Number.parseFloat(String(body.outputPerMTokenUsd ?? ''));
+      if (!Number.isFinite(inputUsd) || !Number.isFinite(outputUsd)) {
+        throw new ValidationError('inputPerMTokenUsd and outputPerMTokenUsd must be numbers');
+      }
+      if (inputUsd < 0 || outputUsd < 0) {
+        throw new ValidationError('prices must be non-negative');
+      }
+      // 1 USD = 1_000_000 micros. Round to int micros to keep storage
+      // BigInt-clean.
+      const inputMicros = BigInt(Math.round(inputUsd * 1_000_000));
+      const outputMicros = BigInt(Math.round(outputUsd * 1_000_000));
+      try {
+        await setPricing(db, model, inputMicros, outputMicros, req.user!.id);
+      } catch (err) {
+        throw new ValidationError((err as Error).message);
+      }
+      await writeAudit(db, {
+        actorUserId: req.user!.id,
+        entityType: 'system_settings',
+        entityId: `llm.pricing.anthropic.${model}`,
+        action: 'pricing.set',
+        payload: { model, inputUsd, outputUsd },
+      });
+      res.json({ ok: true });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.delete('/llm-provider/pricing/:model', async (req, res, next) => {
+    try {
+      const model = String(req.params.model);
+      if (!/^claude-[a-z0-9-]+$/i.test(model)) {
+        throw new ValidationError(`unsafe model id: ${model}`);
+      }
+      await clearPricing(db, model);
+      await writeAudit(db, {
+        actorUserId: req.user!.id,
+        entityType: 'system_settings',
+        entityId: `llm.pricing.anthropic.${model}`,
+        action: 'pricing.clear',
+        payload: { model },
+      });
+      res.json({ ok: true });
     } catch (err) {
       next(err);
     }

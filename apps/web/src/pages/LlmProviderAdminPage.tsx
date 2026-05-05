@@ -269,6 +269,8 @@ export function LlmProviderAdminPage() {
         />
       ) : null}
 
+      {provider.data ? <PricingSection currentModel={provider.data.anthropicModel} /> : null}
+
       {provider.data ? (
         <section className="rounded-lg border border-surface-muted bg-white p-4">
           <h2 className="text-base font-medium">Monthly spend cap</h2>
@@ -426,6 +428,226 @@ function ModelSection({
           </div>
         ) : null}
       </div>
+    </section>
+  );
+}
+
+// Anthropic pricing editor. Lets operators add or override per-model
+// per-million-token USD prices so the cost rollup tracks reality even
+// for models that aren't yet in the curated default table. Curated
+// rows show the default; an operator-set override-row replaces the
+// default for that model. Pure-operator rows (no default) get a Delete.
+interface PricingApiRow {
+  model: string;
+  source: 'default' | 'operator' | 'operator-override';
+  inputPerMTokenMicros: string;
+  outputPerMTokenMicros: string;
+  inputPerMTokenUsd: number;
+  outputPerMTokenUsd: number;
+}
+
+function PricingSection({ currentModel }: { currentModel: string | null }) {
+  const qc = useQueryClient();
+  const toast = useToast();
+  const list = useQuery({
+    queryKey: ['admin', 'llm-pricing'],
+    queryFn: () => api.get<{ rows: PricingApiRow[] }>('/api/admin/llm-provider/pricing'),
+  });
+
+  const save = useMutation({
+    mutationFn: (input: { model: string; inputPerMTokenUsd: number; outputPerMTokenUsd: number }) =>
+      api.post('/api/admin/llm-provider/pricing', input),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['admin', 'llm-pricing'] });
+      qc.invalidateQueries({ queryKey: ['admin', 'llm-cost'] });
+    },
+  });
+  const remove = useMutation({
+    mutationFn: (model: string) =>
+      api.delete(`/api/admin/llm-provider/pricing/${encodeURIComponent(model)}`),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['admin', 'llm-pricing'] });
+      qc.invalidateQueries({ queryKey: ['admin', 'llm-cost'] });
+    },
+  });
+
+  const [adding, setAdding] = useState(false);
+  const [newModel, setNewModel] = useState('');
+  const [newInput, setNewInput] = useState('');
+  const [newOutput, setNewOutput] = useState('');
+
+  const onAdd = async (): Promise<void> => {
+    const model = newModel.trim();
+    const inputUsd = Number.parseFloat(newInput);
+    const outputUsd = Number.parseFloat(newOutput);
+    if (!model.match(/^claude-/i)) {
+      toast.error('Model id must start with claude-');
+      return;
+    }
+    if (
+      !Number.isFinite(inputUsd) ||
+      !Number.isFinite(outputUsd) ||
+      inputUsd < 0 ||
+      outputUsd < 0
+    ) {
+      toast.error('Prices must be non-negative numbers');
+      return;
+    }
+    try {
+      await save.mutateAsync({
+        model,
+        inputPerMTokenUsd: inputUsd,
+        outputPerMTokenUsd: outputUsd,
+      });
+      toast.success(`Pricing saved for ${model}`);
+      setNewModel('');
+      setNewInput('');
+      setNewOutput('');
+      setAdding(false);
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : 'save failed');
+    }
+  };
+
+  const onClear = async (model: string): Promise<void> => {
+    if (
+      !window.confirm(
+        `Clear operator pricing for ${model}? Curated default will resume if one exists.`,
+      )
+    )
+      return;
+    try {
+      await remove.mutateAsync(model);
+      toast.success(`Pricing cleared for ${model}`);
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : 'clear failed');
+    }
+  };
+
+  return (
+    <section className="rounded-lg border border-surface-muted bg-white p-4">
+      <header className="flex items-baseline justify-between gap-2">
+        <h2 className="text-base font-medium">Pricing</h2>
+        <button
+          type="button"
+          onClick={() => setAdding((v) => !v)}
+          className="text-xs text-accent hover:underline"
+        >
+          {adding ? 'Cancel' : '+ Add / override'}
+        </button>
+      </header>
+      <p className="mt-1 text-xs text-ink-subtle">
+        Per-million-token USD prices. Operator-set values override the curated defaults. Models not
+        in this table accumulate token counts but don&apos;t contribute to cost rollups (treated as
+        $0).
+      </p>
+
+      {adding ? (
+        <div className="mt-3 grid gap-2 rounded-md border border-surface-muted bg-surface-subtle p-3 sm:grid-cols-[2fr_1fr_1fr_auto]">
+          <input
+            type="text"
+            placeholder="claude-opus-5-0"
+            value={newModel}
+            onChange={(e) => setNewModel(e.target.value)}
+            className="rounded-md border border-surface-muted px-2 py-1.5 text-sm font-mono"
+          />
+          <input
+            type="number"
+            min="0"
+            step="0.01"
+            placeholder="Input $/M"
+            value={newInput}
+            onChange={(e) => setNewInput(e.target.value)}
+            className="rounded-md border border-surface-muted px-2 py-1.5 text-sm tabular-nums"
+          />
+          <input
+            type="number"
+            min="0"
+            step="0.01"
+            placeholder="Output $/M"
+            value={newOutput}
+            onChange={(e) => setNewOutput(e.target.value)}
+            className="rounded-md border border-surface-muted px-2 py-1.5 text-sm tabular-nums"
+          />
+          <button
+            type="button"
+            onClick={() => void onAdd()}
+            disabled={save.isPending || !newModel.trim() || !newInput.trim() || !newOutput.trim()}
+            className="rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-accent-fg disabled:opacity-50"
+          >
+            {save.isPending ? 'Saving…' : 'Save'}
+          </button>
+        </div>
+      ) : null}
+
+      {list.isPending ? (
+        <p className="mt-2 text-sm text-ink-muted">Loading…</p>
+      ) : (
+        <div className="mt-3 overflow-hidden rounded-md border border-surface-muted">
+          <table className="w-full text-sm">
+            <thead className="bg-surface-subtle text-xs uppercase tracking-wide text-ink-muted">
+              <tr>
+                <th className="px-3 py-2 text-left">Model</th>
+                <th className="px-3 py-2 text-right">Input $/M</th>
+                <th className="px-3 py-2 text-right">Output $/M</th>
+                <th className="px-3 py-2 text-left">Source</th>
+                <th className="px-3 py-2"></th>
+              </tr>
+            </thead>
+            <tbody>
+              {list.data?.rows.map((r) => (
+                <tr
+                  key={r.model}
+                  className={`border-t border-surface-muted ${
+                    r.model === currentModel ? 'bg-accent/5' : ''
+                  }`}
+                >
+                  <td className="px-3 py-2 font-mono text-xs">
+                    {r.model}
+                    {r.model === currentModel ? (
+                      <span className="ml-2 rounded bg-accent/20 px-1 py-0.5 text-[10px] font-medium text-accent">
+                        active
+                      </span>
+                    ) : null}
+                  </td>
+                  <td className="px-3 py-2 text-right tabular-nums">
+                    ${r.inputPerMTokenUsd.toFixed(2)}
+                  </td>
+                  <td className="px-3 py-2 text-right tabular-nums">
+                    ${r.outputPerMTokenUsd.toFixed(2)}
+                  </td>
+                  <td className="px-3 py-2 text-xs text-ink-muted">
+                    {r.source === 'default'
+                      ? 'curated'
+                      : r.source === 'operator-override'
+                        ? 'override (curated exists)'
+                        : 'operator-set'}
+                  </td>
+                  <td className="px-3 py-2 text-right">
+                    {r.source !== 'default' ? (
+                      <button
+                        type="button"
+                        onClick={() => void onClear(r.model)}
+                        disabled={remove.isPending}
+                        className="rounded-md border border-danger px-2 py-1 text-xs text-danger hover:bg-danger/5 disabled:opacity-50"
+                      >
+                        Clear
+                      </button>
+                    ) : null}
+                  </td>
+                </tr>
+              ))}
+              {list.data?.rows.length === 0 ? (
+                <tr>
+                  <td colSpan={5} className="px-3 py-6 text-center text-xs text-ink-muted">
+                    No pricing rows. Add one above.
+                  </td>
+                </tr>
+              ) : null}
+            </tbody>
+          </table>
+        </div>
+      )}
     </section>
   );
 }

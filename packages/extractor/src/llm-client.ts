@@ -171,12 +171,18 @@ export class LocalGatewayProvider implements LlmProvider {
 
 // ---- Anthropic provider -----------------------------------------------------
 
-const ANTHROPIC_PRICE_TABLE: Record<
-  string,
-  { inputPerMTokenMicros: bigint; outputPerMTokenMicros: bigint }
-> = {
-  // Approximate published prices in micro-USD per million tokens.
-  // The admin-settings page (Phase 26) will let operators override.
+export interface ModelPriceRow {
+  inputPerMTokenMicros: bigint;
+  outputPerMTokenMicros: bigint;
+}
+
+export type AnthropicPriceTable = Record<string, ModelPriceRow>;
+
+// Curated baseline. Approximate published prices in micro-USD per
+// million tokens. Operators can override or add models from
+// /admin/llm-provider; the merged map (operator overrides win) is
+// passed into AnthropicProvider via constructor opts.
+export const ANTHROPIC_PRICE_TABLE_DEFAULT: AnthropicPriceTable = {
   'claude-opus-4-7': { inputPerMTokenMicros: 15_000_000n, outputPerMTokenMicros: 75_000_000n },
   'claude-sonnet-4-6': { inputPerMTokenMicros: 3_000_000n, outputPerMTokenMicros: 15_000_000n },
   'claude-haiku-4-5-20251001': {
@@ -189,8 +195,9 @@ export const computeAnthropicCostMicros = (
   model: string,
   inputTokens: number,
   outputTokens: number,
+  table: AnthropicPriceTable = ANTHROPIC_PRICE_TABLE_DEFAULT,
 ): bigint => {
-  const row = ANTHROPIC_PRICE_TABLE[model];
+  const row = table[model];
   if (!row) return 0n;
   const inMicros = (BigInt(inputTokens) * row.inputPerMTokenMicros) / 1_000_000n;
   const outMicros = (BigInt(outputTokens) * row.outputPerMTokenMicros) / 1_000_000n;
@@ -203,6 +210,10 @@ export interface AnthropicProviderOptions {
   model?: string | undefined;
   timeoutMs?: number | undefined;
   fetcher?: typeof fetch | undefined;
+  // Operator-mergeable price table. When set, replaces the curated
+  // defaults. Used by buildProvider to pass DB-backed pricing through
+  // without coupling the leaf extractor package to the API layer.
+  priceTable?: AnthropicPriceTable | undefined;
 }
 
 export class AnthropicProvider implements LlmProvider {
@@ -212,6 +223,7 @@ export class AnthropicProvider implements LlmProvider {
   private model: string;
   private timeoutMs: number;
   private fetcher: typeof fetch;
+  private priceTable: AnthropicPriceTable;
 
   constructor(opts: AnthropicProviderOptions) {
     if (!opts.apiKey) throw new Error('AnthropicProvider requires an API key');
@@ -224,6 +236,7 @@ export class AnthropicProvider implements LlmProvider {
     this.model = opts.model ?? process.env.ANTHROPIC_MODEL ?? 'claude-sonnet-4-6';
     this.timeoutMs = opts.timeoutMs ?? Number(process.env.LLM_TIMEOUT_MS ?? 60_000);
     this.fetcher = opts.fetcher ?? fetch;
+    this.priceTable = opts.priceTable ?? ANTHROPIC_PRICE_TABLE_DEFAULT;
   }
 
   async health(): Promise<{ ok: boolean; detail?: string }> {
@@ -338,7 +351,12 @@ export class AnthropicProvider implements LlmProvider {
           outputTokens,
           ms: Date.now() - start,
           model: this.model,
-          costMicros: computeAnthropicCostMicros(this.model, inputTokens, outputTokens),
+          costMicros: computeAnthropicCostMicros(
+            this.model,
+            inputTokens,
+            outputTokens,
+            this.priceTable,
+          ),
         },
       };
     } finally {

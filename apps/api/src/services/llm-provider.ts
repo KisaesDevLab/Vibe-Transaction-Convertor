@@ -9,6 +9,7 @@ import {
 import type { Db } from '../db/client.js';
 import { systemSettings } from '../db/schema.js';
 import { unwrapSecret } from '../lib/secrets.js';
+import { getMergedPriceTable } from './pricing.js';
 
 const KEY_PROVIDER = 'llm.provider';
 const KEY_ANTHROPIC_KEY = 'llm.anthropic.api_key';
@@ -69,7 +70,10 @@ const constructProvider = async (db: Db): Promise<LlmProvider> => {
   }
   const modelRow = await readSetting(db, KEY_ANTHROPIC_MODEL);
   const model = modelRow?.valuePlaintext ?? process.env.ANTHROPIC_MODEL ?? 'claude-sonnet-4-6';
-  return new AnthropicProvider({ apiKey, model });
+  // Merge curated defaults + operator overrides so worker cost rollups
+  // include any models the operator added on /admin/llm-provider.
+  const priceTable = await getMergedPriceTable(db);
+  return new AnthropicProvider({ apiKey, model, priceTable });
 };
 
 export const buildProvider = async (db: Db): Promise<LlmProvider> => {
