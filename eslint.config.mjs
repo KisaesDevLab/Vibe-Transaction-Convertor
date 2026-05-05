@@ -35,6 +35,7 @@ export default [
     },
     rules: {
       'no-unused-vars': 'off',
+      'no-redeclare': 'off',
       '@typescript-eslint/no-unused-vars': [
         'error',
         { argsIgnorePattern: '^_', varsIgnorePattern: '^_' },
@@ -73,8 +74,14 @@ export default [
     plugins: { drizzle },
     rules: {
       'no-console': 'error',
-      'drizzle/enforce-delete-with-where': 'error',
-      'drizzle/enforce-update-with-where': 'error',
+      'drizzle/enforce-delete-with-where': [
+        'error',
+        { drizzleObjectName: ['db', 'tx'] },
+      ],
+      'drizzle/enforce-update-with-where': [
+        'error',
+        { drizzleObjectName: ['db', 'tx'] },
+      ],
     },
   },
   {

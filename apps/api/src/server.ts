@@ -12,6 +12,7 @@ import { csrf, csrfTokenHandler } from './middleware/csrf.js';
 import { unauthRateLimiter } from './middleware/rate-limit.js';
 import { requestId } from './middleware/request-id.js';
 import { authRouter, usersRouter } from './routes/auth.js';
+import { companiesRouter } from './routes/companies.js';
 import { fidirRouter } from './routes/fidir.js';
 import { healthRouter } from './routes/health.js';
 import { versionRouter } from './routes/version.js';
@@ -74,6 +75,7 @@ export const createApp = (): Express => {
   // Authenticated routes.
   app.use('/api/users', requireAuth, usersRouter());
   app.use('/api/fidir', requireAuth, fidirRouter());
+  app.use('/api/companies', requireAuth, companiesRouter());
 
   app.use(notFoundHandler);
   app.use(errorHandler);

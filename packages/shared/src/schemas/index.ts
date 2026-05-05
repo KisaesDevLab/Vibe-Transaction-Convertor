@@ -1,3 +1,3 @@
-// Re-exports for shared Zod schemas. Individual schema files (company,
-// account, statement, transaction, extraction, export) land in later phases.
-export {} from 'zod';
+// Aggregate Zod schemas. Per-entity schema files land as the matching phase
+// is built out (company, account, statement, transaction, extraction, export).
+export * as company from './company.js';
