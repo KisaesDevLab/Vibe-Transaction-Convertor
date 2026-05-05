@@ -27,6 +27,7 @@ const GROUPS: Group[] = [
     title: 'Anywhere',
     rows: [
       { keys: ['?'], description: 'Show this overlay' },
+      { keys: ['/'], description: 'Focus the search field on the current page' },
       { keys: ['Esc'], description: 'Close overlay or cancel current edit' },
     ],
   },
@@ -51,6 +52,21 @@ export function ShortcutOverlay() {
       if (e.key === '?' && !isEditableTarget(e.target)) {
         e.preventDefault();
         setOpen((v) => !v);
+        return;
+      }
+      // "/" jumps focus to the page's search field. Pages opt in by
+      // marking their input with [data-focus="search"] or by using
+      // a native <input type="search">. We swallow the keystroke so
+      // the "/" doesn't end up in the input itself.
+      if (e.key === '/' && !isEditableTarget(e.target)) {
+        const el =
+          document.querySelector<HTMLInputElement>('[data-focus="search"]') ??
+          document.querySelector<HTMLInputElement>('input[type="search"]');
+        if (el) {
+          e.preventDefault();
+          el.focus();
+          el.select();
+        }
         return;
       }
       if (e.key === 'Escape' && open) {

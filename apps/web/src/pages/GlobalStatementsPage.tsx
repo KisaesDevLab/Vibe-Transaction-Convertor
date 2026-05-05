@@ -35,6 +35,14 @@ export function GlobalStatementsPage() {
   const until = params.get('until') ?? '';
   const status = params.get('status') ?? '';
   const page = Math.max(0, Number.parseInt(params.get('page') ?? '0', 10) || 0);
+  // Default sort is "newest first" (createdAt desc). The URL is the
+  // source of truth so a deep-link or back-button restores order.
+  const sortField = (params.get('sort') ?? 'createdAt') as
+    | 'createdAt'
+    | 'periodEnd'
+    | 'pages'
+    | 'status';
+  const sortDir = (params.get('dir') ?? 'desc') as 'asc' | 'desc';
 
   const companies = useCompanies();
   const accounts = useAccounts(companyId);
@@ -53,9 +61,25 @@ export function GlobalStatementsPage() {
     if (since) rows = rows.filter((r) => r.periodEnd === null || r.periodEnd >= since);
     if (until) rows = rows.filter((r) => r.periodStart === null || r.periodStart <= until);
     if (status) rows = rows.filter((r) => r.status === status);
-    rows = [...rows].sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
+    const dir = sortDir === 'asc' ? 1 : -1;
+    const cmpString = (a: string | null, b: string | null): number => {
+      // Nulls sink to the bottom regardless of direction so "no
+      // period yet" rows don't crowd the top when sorting ascending.
+      if (a === null && b === null) return 0;
+      if (a === null) return 1;
+      if (b === null) return -1;
+      return a < b ? -1 : a > b ? 1 : 0;
+    };
+    rows = [...rows].sort((a, b) => {
+      let cmp = 0;
+      if (sortField === 'createdAt') cmp = cmpString(a.createdAt, b.createdAt);
+      else if (sortField === 'periodEnd') cmp = cmpString(a.periodEnd, b.periodEnd);
+      else if (sortField === 'status') cmp = cmpString(a.status, b.status);
+      else if (sortField === 'pages') cmp = a.sourcePdfPages - b.sourcePdfPages;
+      return cmp * dir;
+    });
     return rows;
-  }, [list.data, since, until, status]);
+  }, [list.data, since, until, status, sortField, sortDir]);
 
   const pageRows = filtered.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
   const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
@@ -69,6 +93,22 @@ export function GlobalStatementsPage() {
     sp.delete('page'); // reset paging on every filter change
     setParams(sp);
   };
+
+  // Header click → toggle dir if same column, else switch column and
+  // start descending. Sorting does not reset paging — same rows, just
+  // reordered.
+  const onHeaderClick = (field: typeof sortField): void => {
+    const sp = new URLSearchParams(params);
+    if (sortField === field) {
+      sp.set('dir', sortDir === 'asc' ? 'desc' : 'asc');
+    } else {
+      sp.set('sort', field);
+      sp.set('dir', 'desc');
+    }
+    setParams(sp);
+  };
+  const arrow = (field: typeof sortField): string =>
+    sortField === field ? (sortDir === 'asc' ? ' ▲' : ' ▼') : '';
 
   return (
     <section className="mx-auto max-w-6xl space-y-4">
@@ -157,11 +197,43 @@ export function GlobalStatementsPage() {
           <table className="w-full text-sm">
             <thead className="bg-surface-subtle text-xs uppercase tracking-wide text-ink-muted">
               <tr>
-                <th className="px-3 py-2 text-left">Period</th>
-                <th className="px-3 py-2 text-left">Pages</th>
-                <th className="px-3 py-2 text-left">Status</th>
+                <th className="px-3 py-2 text-left">
+                  <button
+                    type="button"
+                    onClick={() => onHeaderClick('periodEnd')}
+                    className="font-inherit hover:text-ink"
+                  >
+                    Period{arrow('periodEnd')}
+                  </button>
+                </th>
+                <th className="px-3 py-2 text-left">
+                  <button
+                    type="button"
+                    onClick={() => onHeaderClick('pages')}
+                    className="font-inherit hover:text-ink"
+                  >
+                    Pages{arrow('pages')}
+                  </button>
+                </th>
+                <th className="px-3 py-2 text-left">
+                  <button
+                    type="button"
+                    onClick={() => onHeaderClick('status')}
+                    className="font-inherit hover:text-ink"
+                  >
+                    Status{arrow('status')}
+                  </button>
+                </th>
                 <th className="px-3 py-2 text-left">Recon</th>
-                <th className="px-3 py-2 text-left">Uploaded</th>
+                <th className="px-3 py-2 text-left">
+                  <button
+                    type="button"
+                    onClick={() => onHeaderClick('createdAt')}
+                    className="font-inherit hover:text-ink"
+                  >
+                    Uploaded{arrow('createdAt')}
+                  </button>
+                </th>
                 <th className="px-3 py-2"></th>
               </tr>
             </thead>

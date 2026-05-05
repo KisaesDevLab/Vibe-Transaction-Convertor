@@ -8,6 +8,7 @@ import {
   useUpdateCompany,
   type Company,
 } from '../hooks/useCompanies';
+import { DeleteConfirmDialog } from '../components/DeleteConfirmDialog';
 import { useToast } from '../components/Toast';
 import { ApiError } from '../lib/api';
 
@@ -157,6 +158,7 @@ function CompanyRow({ company }: { company: Company }) {
   const update = useUpdateCompany();
   const del = useDeleteCompany();
   const [error, setError] = useState<string | null>(null);
+  const [deleteOpen, setDeleteOpen] = useState(false);
 
   const onSave = async (e: FormEvent): Promise<void> => {
     e.preventDefault();
@@ -169,12 +171,11 @@ function CompanyRow({ company }: { company: Company }) {
     }
   };
 
-  const onDelete = async (): Promise<void> => {
+  const confirmDelete = async (): Promise<void> => {
     setError(null);
-    const typed = window.prompt(`Type the company name to confirm deletion: "${company.name}"`);
-    if (typed !== company.name) return;
     try {
       await del.mutateAsync({ id: company.id, force: company.accountCount > 0 });
+      setDeleteOpen(false);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'delete failed');
     }
@@ -233,7 +234,7 @@ function CompanyRow({ company }: { company: Company }) {
               </button>
               <button
                 type="button"
-                onClick={onDelete}
+                onClick={() => setDeleteOpen(true)}
                 disabled={del.isPending}
                 className="rounded-md border border-danger px-3 py-1.5 text-sm text-danger hover:bg-danger/5 disabled:opacity-50"
               >
@@ -248,6 +249,19 @@ function CompanyRow({ company }: { company: Company }) {
           {error}
         </p>
       ) : null}
+      <DeleteConfirmDialog
+        open={deleteOpen}
+        title={`Delete company "${company.name}"?`}
+        description={
+          company.accountCount > 0
+            ? `This will also delete all ${company.accountCount} account${company.accountCount === 1 ? '' : 's'} under it, and every statement / export they own. The audit log row stays.`
+            : 'The company has no accounts; this is reversible only via a backup restore.'
+        }
+        confirmText={company.name}
+        busy={del.isPending}
+        onClose={() => setDeleteOpen(false)}
+        onConfirm={confirmDelete}
+      />
     </li>
   );
 }

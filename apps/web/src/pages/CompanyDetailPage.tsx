@@ -4,7 +4,8 @@ import { Link, useNavigate, useParams } from 'react-router-dom';
 import { ACCOUNT_TYPE_LABELS } from '@vibe-tx-converter/shared';
 
 import { AccountFormDialog } from '../components/AccountFormDialog';
-import { useAccounts, useDeleteAccount } from '../hooks/useAccounts';
+import { DeleteConfirmDialog } from '../components/DeleteConfirmDialog';
+import { useAccounts, useDeleteAccount, type Account } from '../hooks/useAccounts';
 import { useCompany, useDeleteCompany, useUpdateCompany } from '../hooks/useCompanies';
 import { ApiError } from '../lib/api';
 
@@ -22,6 +23,9 @@ export function CompanyDetailPage() {
   const [editOpen, setEditOpen] = useState(false);
   const [editName, setEditName] = useState('');
   const [confirmDelete, setConfirmDelete] = useState('');
+  // Active per-account delete dialog. Holds the row so the dialog
+  // can show the account nickname in the confirmation phrase.
+  const [pendingDelete, setPendingDelete] = useState<Account | null>(null);
 
   const onEdit = (): void => {
     setEditName(company?.name ?? '');
@@ -223,14 +227,9 @@ export function CompanyDetailPage() {
               </div>
               <button
                 type="button"
-                onClick={async () => {
-                  if (!window.confirm(`Delete "${a.nickname}"?`)) return;
+                onClick={() => {
                   setError(null);
-                  try {
-                    await del.mutateAsync({ id: a.id });
-                  } catch (err) {
-                    setError(err instanceof ApiError ? err.message : 'delete failed');
-                  }
+                  setPendingDelete(a);
                 }}
                 className="rounded-md border border-danger px-3 py-1.5 text-sm text-danger hover:bg-danger/5"
               >
@@ -242,6 +241,24 @@ export function CompanyDetailPage() {
       )}
 
       {open ? <AccountFormDialog companyId={companyId} onClose={() => setOpen(false)} /> : null}
+
+      <DeleteConfirmDialog
+        open={pendingDelete !== null}
+        title={`Delete account "${pendingDelete?.nickname ?? ''}"?`}
+        description="All statements, transactions, and exports linked to this account will be removed. The audit log row stays — audit_log is append-only."
+        confirmText={pendingDelete?.nickname ?? 'DELETE'}
+        busy={del.isPending}
+        onClose={() => setPendingDelete(null)}
+        onConfirm={async () => {
+          if (!pendingDelete) return;
+          try {
+            await del.mutateAsync({ id: pendingDelete.id });
+            setPendingDelete(null);
+          } catch (err) {
+            setError(err instanceof ApiError ? err.message : 'delete failed');
+          }
+        }}
+      />
     </section>
   );
 }
