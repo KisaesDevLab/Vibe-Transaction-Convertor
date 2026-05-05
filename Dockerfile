@@ -2,7 +2,7 @@
 
 # Vibe Transactions Converter — multi-stage build (Phase 28).
 
-ARG NODE_VERSION=20
+ARG NODE_VERSION=24
 
 # ----- builder ----------------------------------------------------------------
 FROM node:${NODE_VERSION}-bookworm-slim AS builder
