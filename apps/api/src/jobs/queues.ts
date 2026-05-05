@@ -54,8 +54,11 @@ export const maintenanceQueue = (): Queue => {
 // that re-extractions of the same statement collapse, but each split
 // child of a multi-account PDF gets its own slot. (Statements are
 // created upstream with their own UUIDs.)
+//
+// BullMQ 5.76+ rejects custom job IDs containing ":". Use a hyphen
+// separator instead — same idempotency contract.
 export const enqueueExtraction = async (data: ExtractionJobData): Promise<void> => {
-  const id = `extract:${data.statementId}`;
+  const id = `extract-${data.statementId}`;
   await extractionQueue().add('extract', data, { jobId: id });
 };
 
