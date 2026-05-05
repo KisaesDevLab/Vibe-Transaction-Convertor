@@ -104,12 +104,13 @@ export function ReconciliationWidget({
             <textarea
               rows={3}
               required
-              minLength={5}
+              minLength={30}
               className="w-full rounded-md border border-surface-muted px-3 py-2 text-sm"
               value={reason}
               onChange={(e) => setReason(e.target.value)}
-              placeholder="Reason (≥ 5 characters): e.g. PDF skipped a mid-period adjustment that's documented in our records"
+              placeholder="Reason (≥ 30 characters): describe what you reconciled and why — e.g. 'PDF skipped a mid-period adjustment for the wire from CompanyX, documented in 2026-04 internal memo.'"
             />
+            <p className="text-xs text-ink-subtle">{reason.trim().length} / 30 characters</p>
             <input
               type="text"
               required
@@ -129,7 +130,7 @@ export function ReconciliationWidget({
               <button
                 type="submit"
                 disabled={
-                  reason.trim().length < 5 || confirm !== 'EXPORT ANYWAY' || override.isPending
+                  reason.trim().length < 30 || confirm !== 'EXPORT ANYWAY' || override.isPending
                 }
                 className="rounded-md bg-danger px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
               >

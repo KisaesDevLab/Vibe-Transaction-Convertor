@@ -54,6 +54,66 @@ export const userPromptFor = (markdown: string, opts: UserPromptOptions = {}): s
   );
 };
 
+// Phase 16 item 6: repair-pass prompt. After the first extract fails to
+// reconcile (or has flagged suspect rows), we send a SECOND LLM call
+// containing the original markdown plus the failed transaction list and
+// a precise hint at what's wrong. The LLM can re-read the markdown and
+// emit a corrected transaction list under the same schema.
+export interface RepairPromptInput {
+  markdown: string;
+  attemptedTransactions: Array<{
+    posted_date: string;
+    description: string;
+    amount_cents: number | bigint;
+    running_balance_cents?: number | bigint | null;
+  }>;
+  deltaCents: bigint; // closing - (opening + sum), nonzero
+  suspectRowIndices: number[];
+  openingBalanceCents: number | bigint;
+  closingBalanceCents: number | bigint;
+}
+
+export const repairPromptFor = (input: RepairPromptInput): string => {
+  const txTable = input.attemptedTransactions
+    .map((t, i) => {
+      const flag = input.suspectRowIndices.includes(i) ? ' ← SUSPECT' : '';
+      const rb =
+        t.running_balance_cents != null
+          ? `, running=${formatCents(BigInt(t.running_balance_cents))}`
+          : '';
+      return `[${i}] ${t.posted_date}  ${formatCents(BigInt(t.amount_cents))}  ${t.description}${rb}${flag}`;
+    })
+    .join('\n');
+
+  return (
+    `Your prior extraction did not reconcile. Re-read the markdown below ` +
+    `and emit a corrected transaction list.\n\n` +
+    `Opening: ${formatCents(BigInt(input.openingBalanceCents))}\n` +
+    `Closing: ${formatCents(BigInt(input.closingBalanceCents))}\n` +
+    `Delta (closing - opening - sum): ${formatCents(input.deltaCents)} ` +
+    `→ your sum is off by exactly this amount.\n\n` +
+    `Attempted rows:\n${txTable}\n\n` +
+    `Likely culprits, in priority order:\n` +
+    `1. A debit was emitted as a credit (or vice versa) — check signs.\n` +
+    `2. A duplicate row was emitted (header/footer line picked up twice).\n` +
+    `3. A row was missed (look for indented continuation lines under a date).\n` +
+    `4. An amount has the wrong magnitude (10x error from a misplaced decimal).\n\n` +
+    `${input.suspectRowIndices.length > 0 ? `The rows marked SUSPECT have running-balance values that don't match the prior row + this row's amount. Inspect them first.\n\n` : ''}` +
+    `Re-emit the FULL transaction list (not a diff), under the same schema. ` +
+    `If you still cannot reconcile, emit your best-guess corrections and ` +
+    `set "notes" explaining what's irreducibly off.\n\n` +
+    `=== STATEMENT MARKDOWN ===\n${input.markdown}\n=== END ===`
+  );
+};
+
+const formatCents = (cents: bigint): string => {
+  const negative = cents < 0n;
+  const abs = negative ? -cents : cents;
+  const dollars = abs / 100n;
+  const remainder = abs % 100n;
+  return `${negative ? '-' : ''}$${dollars}.${remainder.toString().padStart(2, '0')}`;
+};
+
 // Phase 12 item 11: rough token estimator (4 chars per token, conservative)
 // for prompt-budget enforcement. We don't ship a tokenizer (cl100k_base
 // pulls in 1MB+); the 4:1 heuristic is within ~10% of the real count for

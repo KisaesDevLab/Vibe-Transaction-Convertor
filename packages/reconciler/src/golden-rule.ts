@@ -6,12 +6,50 @@
 export interface ReconcileInput {
   openingBalanceCents: bigint;
   closingBalanceCents: bigint;
-  transactions: Array<{ amountCents: bigint }>;
+  transactions: Array<{ amountCents: bigint; runningBalanceCents?: bigint | null }>;
   // Optional period bounds for defense-in-depth (ADR-014).
   periodStart?: string | null | undefined; // YYYY-MM-DD
   periodEnd?: string | null | undefined; // YYYY-MM-DD
   transactionDates?: string[] | undefined; // posted_date for each row, in order
 }
+
+// Phase 16 item 3: a row is "suspect" when its running balance disagrees
+// with the prior row's runningBalance + this row's amount. Useful both
+// for the repair-pass prompt (give the LLM a precise hint) and for the
+// review UI (surface a per-row "off by $X" badge).
+export interface SuspectRow {
+  index: number;
+  expectedRunningCents: bigint;
+  actualRunningCents: bigint;
+  deltaCents: bigint;
+}
+
+export const findSuspectRows = (
+  openingBalanceCents: bigint,
+  txs: Array<{ amountCents: bigint; runningBalanceCents?: bigint | null }>,
+): SuspectRow[] => {
+  const out: SuspectRow[] = [];
+  let priorRunning = openingBalanceCents;
+  for (let i = 0; i < txs.length; i += 1) {
+    const tx = txs[i]!;
+    const expected = priorRunning + tx.amountCents;
+    if (tx.runningBalanceCents !== null && tx.runningBalanceCents !== undefined) {
+      const delta = tx.runningBalanceCents - expected;
+      if (delta !== 0n) {
+        out.push({
+          index: i,
+          expectedRunningCents: expected,
+          actualRunningCents: tx.runningBalanceCents,
+          deltaCents: delta,
+        });
+      }
+      priorRunning = tx.runningBalanceCents;
+    } else {
+      priorRunning = expected;
+    }
+  }
+  return out;
+};
 
 export type ReconciliationStatus = 'verified' | 'discrepancy' | 'failed';
 

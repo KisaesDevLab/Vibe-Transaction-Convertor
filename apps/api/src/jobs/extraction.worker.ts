@@ -8,10 +8,11 @@ import {
   extractTextLayerFromBuffer,
   ocrPdfPages,
   rasterizePdf,
+  repairPromptFor,
   routePdf,
   type ExtractionMethod,
 } from '@vibe-tx-converter/extractor';
-import { reconcileGoldenRule, repairPass } from '@vibe-tx-converter/reconciler';
+import { findSuspectRows, reconcileGoldenRule, repairPass } from '@vibe-tx-converter/reconciler';
 import {
   assignSeqInDay,
   computeFitid,
@@ -185,13 +186,115 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
   let reconciled = reconcileGoldenRule({
     openingBalanceCents: openingCents,
     closingBalanceCents: closingCents,
-    transactions: effectiveTxs.map((t) => ({ amountCents: t.amountCents })),
+    transactions: effectiveTxs.map((t) => ({
+      amountCents: t.amountCents,
+      runningBalanceCents: t.runningBalanceCents,
+    })),
     periodStart: result.data.period_start,
     periodEnd: result.data.period_end,
     transactionDates: effectiveTxs.map((t) => t.postedDate),
   });
 
   let repairApplied: string | null = null;
+
+  // Phase 16 #6: LLM-driven repair pass FIRST. When reconcile fails, send
+  // the markdown back to the LLM with the failed transaction list and the
+  // delta. The LLM re-reads the markdown and returns a corrected list. We
+  // commit it only if the second reconcile actually verifies. Falls
+  // through to the heuristic repair below on failure.
+  if (reconciled.status === 'discrepancy') {
+    const suspects = findSuspectRows(
+      openingCents,
+      effectiveTxs.map((t) => ({
+        amountCents: t.amountCents,
+        runningBalanceCents: t.runningBalanceCents,
+      })),
+    );
+    const repairPrompt = repairPromptFor({
+      markdown,
+      attemptedTransactions: effectiveTxs.map((t) => ({
+        posted_date: t.postedDate,
+        description: t.description,
+        amount_cents: t.amountCents,
+        running_balance_cents: t.runningBalanceCents,
+      })),
+      deltaCents: reconciled.deltaCents,
+      suspectRowIndices: suspects.map((s) => s.index),
+      openingBalanceCents: openingCents,
+      closingBalanceCents: closingCents,
+    });
+    try {
+      const repairResult = await provider.extract(repairPrompt, {
+        schema: schemas.extraction.ExtractionJsonSchema,
+        ...(dateFormatOverride ? { dateFormatOverride } : {}),
+      });
+      const repairedTxs = repairResult.data.transactions.map((t, idx) => ({
+        postedDate: t.posted_date,
+        description: t.description,
+        amountCents: BigInt(t.amount_cents),
+        runningBalanceCents:
+          t.running_balance_cents !== undefined && t.running_balance_cents !== null
+            ? BigInt(t.running_balance_cents)
+            : null,
+        checkNumber: t.check_number ?? null,
+        trntypeHint: t.trntype,
+        sourcePage: t.source_page,
+        confidence: t.confidence ?? 1,
+        sourceLine: idx,
+      }));
+      const verifyAfterLlmRepair = reconcileGoldenRule({
+        openingBalanceCents: openingCents,
+        closingBalanceCents: closingCents,
+        transactions: repairedTxs.map((t) => ({
+          amountCents: t.amountCents,
+          runningBalanceCents: t.runningBalanceCents,
+        })),
+        periodStart: result.data.period_start,
+        periodEnd: result.data.period_end,
+        transactionDates: repairedTxs.map((t) => t.postedDate),
+      });
+      if (verifyAfterLlmRepair.status === 'verified') {
+        effectiveTxs = repairedTxs;
+        reconciled = verifyAfterLlmRepair;
+        repairApplied = `llm-repair (${repairedTxs.length} rows)`;
+        logger.info(
+          {
+            stmtId,
+            originalCount: result.data.transactions.length,
+            repairedCount: repairedTxs.length,
+          },
+          'reconcile repair applied via LLM second pass',
+        );
+        // Roll up the second-call telemetry.
+        await db
+          .update(statements)
+          .set({
+            llmInputTokens:
+              (result.telemetry.inputTokens ?? 0) + (repairResult.telemetry.inputTokens ?? 0),
+            llmOutputTokens:
+              (result.telemetry.outputTokens ?? 0) + (repairResult.telemetry.outputTokens ?? 0),
+            llmCallCount: 2,
+            llmCostMicros: result.telemetry.costMicros + repairResult.telemetry.costMicros,
+            updatedAt: sql`now()`,
+          })
+          .where(eq(statements.id, stmtId));
+      } else {
+        logger.info(
+          { stmtId, deltaAfterRepair: verifyAfterLlmRepair.deltaCents.toString() },
+          'LLM repair did not verify — falling through to heuristic repair',
+        );
+      }
+    } catch (err) {
+      logger.warn(
+        { stmtId, err: (err as Error).message },
+        'LLM repair pass threw — falling through',
+      );
+    }
+  }
+
+  // Heuristic repair (sign-flip / drop-row) as a last resort if the LLM
+  // pass also failed. Cheaper than escalating to the user but only fixes
+  // a narrow class of discrepancies.
   if (reconciled.status === 'discrepancy') {
     const candidate = repairPass(
       effectiveTxs.map((t) => ({ amountCents: t.amountCents, description: t.description })),

@@ -7,6 +7,7 @@ import { ForbiddenError, NotFoundError, ValidationError } from '../lib/errors.js
 import { requireAdmin } from '../middleware/auth.js';
 import { writeAudit } from '../services/audit.js';
 import { overrideReconciliation } from '../services/exports.js';
+import { recomputeReconciliation } from '../services/reconciliation.js';
 import { computeFitid, inferTrntype, normalizeDescription } from '@vibe-tx-converter/exporters';
 import { enqueueExtraction } from '../jobs/queues.js';
 
@@ -130,6 +131,8 @@ export const statementsRouter = (): Router => {
         action: 'transaction.update',
         payload: { ...next, amountCents: next.amountCents?.toString() } as Record<string, unknown>,
       });
+      // Phase 16 #16: a manual edit may flip a discrepancy → verified.
+      await recomputeReconciliation(db, tx.statementId);
       res.json(serializeBigint(updated!));
     } catch (err) {
       next(err);
@@ -140,7 +143,13 @@ export const statementsRouter = (): Router => {
     try {
       const id = String(req.params.id);
       const reason = String(req.body?.reason ?? '').trim();
-      if (reason.length < 5) throw new ValidationError('reason must be at least 5 characters');
+      // Phase 16 #17: forensic-grade audit trail demands a real
+      // explanation. 30 chars filters out one-word "ok" overrides.
+      if (reason.length < 30) {
+        throw new ValidationError(
+          'reason must be at least 30 characters — describe what you reconciled and why',
+        );
+      }
       await overrideReconciliation(db, req.user!, id, reason);
       res.json({ ok: true });
     } catch (err) {
@@ -212,14 +221,16 @@ export const statementsRouter = (): Router => {
         action: 'transaction.admin-insert',
         payload: { statementId, postedDate, amountCents: amountCents.toString() },
       });
+      // Phase 16 #16: adding a missing row may flip a discrepancy.
+      await recomputeReconciliation(db, statementId);
       res.status(201).json(serializeBigint(created));
     } catch (err) {
       next(err);
     }
   });
 
-  // Admin: delete a transaction. Recompute reconciliation lazily — the
-  // review widget recalculates from the live tx list.
+  // Admin: delete a transaction. Triggers a reconciliation recompute so
+  // the review page reflects the new sum without a manual refresh.
   router.delete('/transactions/:txId', requireAdmin, async (req, res, next) => {
     try {
       const txId = String(req.params.txId);
@@ -234,7 +245,21 @@ export const statementsRouter = (): Router => {
         action: 'transaction.admin-delete',
         payload: { statementId: tx.statementId, fitid: tx.fitid },
       });
+      await recomputeReconciliation(db, tx.statementId);
       res.status(204).end();
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // Phase 16 #15: explicit recompute endpoint. Useful after bulk edits
+  // or when the reviewer wants to confirm the live reconciler state.
+  router.post('/:id/recompute-reconciliation', async (req, res, next) => {
+    try {
+      const id = String(req.params.id);
+      const result = await recomputeReconciliation(db, id);
+      if (!result) throw new NotFoundError(`statement ${id}`);
+      res.json({ status: result.status, deltaCents: result.deltaCents.toString() });
     } catch (err) {
       next(err);
     }

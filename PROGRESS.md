@@ -23,7 +23,7 @@ just whether the happy path runs. Acceptance gauntlet: `pnpm acceptance`
 | 13    | LLM Provider Abstraction                  | ⚠      | `c403118`   | dateFormatOverride wired; no 60-s cache; no @anthropic-ai/sdk  |
 | 14    | Multi-Account Auto-Split                  | ⚠      | `9e34173`   | detection only — never splits into multiple statements         |
 | 15    | BullMQ Extraction Pipeline                | ⚠      | `c403118`   | locale-gate now wired; no SSE progress; no cancel              |
-| 16    | Golden Rule Reconciler & Repair Pass      | ⚠      | `9e34173`   | repair is heuristic (spec: LLM 2nd pass); no findSuspectRows   |
+| 16    | Golden Rule Reconciler & Repair Pass      | ⚠      | `<next>`    | LLM repair + suspect rows + auto-recompute; no LLM-pass tests  |
 | 17    | TRNTYPE Inference + FITID Generator       | ⚠      | `702449e`   | rule list + isCreditCard wired; no docs/extraction.md          |
 | 18    | Statement & Transaction Review UI         | ⚠      | `d22cccd`   | no global /statements; no full-detail header                   |
 | 19    | PDF Viewer with Bounding-Box Highlighting | ⚠      | `9a1fc2f`   | PDF→txn click selection not wired                              |
@@ -50,7 +50,7 @@ The **core happy path works end-to-end**: register first admin → create
 company → add account with bank-picker → upload PDF → BullMQ worker
 analyzes / extracts / reconciles → review grid with inline edits and
 PDF viewer → export to CSV/OFX/QBO/QFX → audit-log every mutation. The
-acceptance suite is green (125 unit + supertests pass, build clean).
+acceptance suite is green (128 unit + supertests pass, build clean).
 
 What's missing is **breadth, polish and several spec invariants**:
 

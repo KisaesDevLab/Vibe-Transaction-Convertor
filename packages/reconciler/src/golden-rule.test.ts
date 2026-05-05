@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { reconcileGoldenRule, repairPass } from './golden-rule.js';
+import { findSuspectRows, reconcileGoldenRule, repairPass } from './golden-rule.js';
 
 describe('reconcileGoldenRule', () => {
   it('verified when balances tie', () => {
@@ -59,5 +59,36 @@ describe('repairPass', () => {
   it('returns null when no rule applies', () => {
     const txs = [{ amountCents: 5n }, { amountCents: 7n }];
     expect(repairPass(txs, 999n)).toBeNull();
+  });
+});
+
+describe('findSuspectRows', () => {
+  it('returns no suspects when running balances chain correctly', () => {
+    const out = findSuspectRows(100_000n, [
+      { amountCents: -5_000n, runningBalanceCents: 95_000n },
+      { amountCents: 10_000n, runningBalanceCents: 105_000n },
+      { amountCents: -1_000n, runningBalanceCents: 104_000n },
+    ]);
+    expect(out).toEqual([]);
+  });
+
+  it('flags exactly the row whose running balance is off', () => {
+    const out = findSuspectRows(100_000n, [
+      { amountCents: -5_000n, runningBalanceCents: 95_000n },
+      { amountCents: 10_000n, runningBalanceCents: 105_007n }, // off by 7
+      { amountCents: -1_000n, runningBalanceCents: 104_007n },
+    ]);
+    expect(out).toHaveLength(1);
+    expect(out[0]?.index).toBe(1);
+    expect(out[0]?.deltaCents).toBe(7n);
+  });
+
+  it('skips rows that omit running balance entirely', () => {
+    const out = findSuspectRows(100_000n, [
+      { amountCents: -5_000n },
+      { amountCents: 10_000n, runningBalanceCents: 105_000n },
+    ]);
+    // First row has no running balance to check; second matches.
+    expect(out).toEqual([]);
   });
 });
