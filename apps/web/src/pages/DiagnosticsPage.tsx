@@ -31,6 +31,20 @@ interface ReadyCheck {
   >;
 }
 
+// /api/admin/maintenance/queue-stats response. When Redis is not
+// configured the server returns { redis: 'unconfigured' } with no
+// counts — the card renders a clear empty state instead of zeros.
+interface QueueStats {
+  redis: 'configured' | 'unconfigured';
+  extraction?: {
+    waiting: number;
+    active: number;
+    delayed: number;
+    completed: number;
+    failed: number;
+  };
+}
+
 const fmtUptime = (seconds: number): string => {
   const h = Math.floor(seconds / 3600);
   const m = Math.floor((seconds % 3600) / 60);
@@ -63,6 +77,11 @@ export function DiagnosticsPage() {
   const ready = useQuery({
     queryKey: ['health', 'ready'],
     queryFn: () => api.get<ReadyCheck>('/api/health/ready'),
+    refetchInterval: 5_000,
+  });
+  const queue = useQuery({
+    queryKey: ['admin', 'queue-stats'],
+    queryFn: () => api.get<QueueStats>('/api/admin/maintenance/queue-stats'),
     refetchInterval: 5_000,
   });
 
@@ -129,6 +148,36 @@ export function DiagnosticsPage() {
             ))}
           </ul>
         ) : null}
+      </section>
+
+      <section className="rounded-lg border border-surface-muted bg-white p-4">
+        <h2 className="text-base font-medium">Extraction queue</h2>
+        {queue.data?.redis === 'unconfigured' ? (
+          <p className="mt-2 text-sm text-ink-muted">
+            REDIS_URL not set — queue is in-process and stats are unavailable.
+          </p>
+        ) : queue.data?.extraction ? (
+          <dl className="mt-3 grid grid-cols-2 gap-2 text-sm sm:grid-cols-5">
+            {(
+              [
+                ['waiting', 'text-ink-muted'],
+                ['active', 'text-emerald-700'],
+                ['delayed', 'text-amber-700'],
+                ['completed', 'text-ink-muted'],
+                ['failed', 'text-red-700'],
+              ] as const
+            ).map(([k, cls]) => (
+              <div key={k}>
+                <dt className="text-ink-muted capitalize">{k}</dt>
+                <dd className={`font-mono text-lg ${cls}`}>
+                  {queue.data!.extraction![k].toLocaleString()}
+                </dd>
+              </div>
+            ))}
+          </dl>
+        ) : (
+          <p className="mt-2 text-sm text-ink-muted">Loading…</p>
+        )}
       </section>
 
       <section className="rounded-lg border border-surface-muted bg-white p-4">

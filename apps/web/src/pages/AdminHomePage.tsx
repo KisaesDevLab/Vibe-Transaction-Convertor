@@ -15,6 +15,29 @@ interface FidirStatus {
   lastRefreshedAt: string | null;
 }
 
+interface FailedStatement {
+  id: string;
+  accountId: string;
+  status: string;
+  errorMessage: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+interface RecentActivityRow {
+  id: string;
+  at: string;
+  actorEmail: string | null;
+  actorDisplayName: string | null;
+  entityType: string;
+  action: string;
+}
+
+interface RecentActivityResp {
+  rows: RecentActivityRow[];
+  total: number;
+}
+
 export function AdminHomePage() {
   const qc = useQueryClient();
   const provider = useQuery({
@@ -25,6 +48,33 @@ export function AdminHomePage() {
     queryKey: ['admin', 'fidir', 'status'],
     queryFn: () => api.get<FidirStatus>('/api/admin/fidir/status'),
   });
+  // Last 10 audit events. The audit endpoint is admin-only and the
+  // AdminHomePage is mounted behind <AdminGate/>, so we don't gate
+  // again. Stale-while-revalidate keeps the list current without
+  // hammering the API on tab switches.
+  const activity = useQuery({
+    queryKey: ['admin', 'recent-activity'],
+    queryFn: () => api.get<RecentActivityResp>('/api/audit', { limit: '10', mutationsOnly: '1' }),
+    staleTime: 15_000,
+  });
+  // Fetch all statements and filter client-side. With <5k statements
+  // this is fast; if the firm grows past that we can add a status
+  // filter to GET /api/statements. Polled because failed jobs come
+  // from the worker, not user interaction.
+  const allStmts = useQuery({
+    queryKey: ['statements', 'all-for-failed-widget'],
+    queryFn: () => api.get<FailedStatement[]>('/api/statements'),
+    refetchInterval: 30_000,
+  });
+  const reExtract = useMutation({
+    mutationFn: (statementId: string) =>
+      api.post<{ ok: boolean }>(`/api/statements/${statementId}/re-extract`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['statements', 'all-for-failed-widget'] }),
+  });
+  const failedRows = (allStmts.data ?? [])
+    .filter((s) => s.status === 'failed')
+    .sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1))
+    .slice(0, 5);
   const switchProvider = useMutation({
     mutationFn: (p: 'local' | 'anthropic') => api.post('/api/admin/llm-provider', { provider: p }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'llm-provider'] }),
@@ -157,6 +207,73 @@ export function AdminHomePage() {
             </form>
           </>
         ) : null}
+      </section>
+
+      {failedRows.length > 0 ? (
+        <section className="rounded-lg border border-red-300 bg-red-50/40 p-4">
+          <h2 className="text-lg font-medium text-red-900">
+            Failed extractions ({failedRows.length})
+          </h2>
+          <ul className="mt-2 divide-y divide-red-200 text-sm">
+            {failedRows.map((s) => (
+              <li key={s.id} className="flex items-start justify-between gap-3 py-2">
+                <div className="min-w-0 flex-1">
+                  <Link to={`/statements/${s.id}`} className="font-mono text-xs hover:underline">
+                    {s.id.slice(0, 8)}
+                  </Link>
+                  <p className="text-xs text-red-900/80">
+                    {s.errorMessage ?? 'No error message recorded.'}
+                  </p>
+                  <p className="text-[11px] text-ink-subtle">
+                    {new Date(s.updatedAt).toLocaleString()}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => reExtract.mutate(s.id)}
+                  disabled={reExtract.isPending}
+                  className="rounded-md border border-red-300 bg-white px-2 py-1 text-xs text-red-900 hover:bg-red-100 disabled:opacity-50"
+                >
+                  {reExtract.isPending && reExtract.variables === s.id ? '…' : 'Re-extract'}
+                </button>
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
+
+      <section className="rounded-lg border border-surface-muted bg-white p-4">
+        <div className="flex items-center justify-between">
+          <h2 className="text-lg font-medium">Recent activity</h2>
+          <Link to="/admin/audit" className="text-xs text-accent hover:underline">
+            Full audit log →
+          </Link>
+        </div>
+        {activity.isPending ? (
+          <p className="mt-2 text-sm text-ink-muted">Loading…</p>
+        ) : !activity.data || activity.data.rows.length === 0 ? (
+          <p className="mt-2 text-sm text-ink-muted">No mutations recorded yet.</p>
+        ) : (
+          <ol className="mt-3 divide-y divide-surface-muted text-xs">
+            {activity.data.rows.map((r) => (
+              <li key={r.id} className="flex items-baseline gap-2 py-1.5">
+                <span className="font-mono tabular-nums text-ink-muted">
+                  {new Date(r.at).toLocaleString(undefined, {
+                    month: 'short',
+                    day: 'numeric',
+                    hour: '2-digit',
+                    minute: '2-digit',
+                  })}
+                </span>
+                <span className="font-mono">{r.action}</span>
+                <span className="text-ink-subtle">on {r.entityType}</span>
+                <span className="ml-auto text-ink-subtle">
+                  {r.actorDisplayName ?? r.actorEmail ?? 'system'}
+                </span>
+              </li>
+            ))}
+          </ol>
+        )}
       </section>
 
       <section className="rounded-lg border border-surface-muted bg-white p-4">

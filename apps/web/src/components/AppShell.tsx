@@ -3,6 +3,7 @@ import { NavLink } from 'react-router-dom';
 
 import { useLogout, useMe } from '../hooks/useAuth';
 import { cn } from '../lib/cn';
+import { ShortcutOverlay } from './ShortcutOverlay';
 
 const NAV: Array<{ to: string; label: string; adminOnly?: boolean }> = [
   { to: '/companies', label: 'Companies' },
@@ -48,18 +49,28 @@ export function AppShell({ children }: { children: ReactNode }) {
           <div className="text-sm text-ink-muted">
             {me.data ? `${me.data.displayName} · ${me.data.role}` : null}
           </div>
-          <button
-            type="button"
-            className="rounded-md border border-surface-muted px-3 py-1 text-sm hover:bg-surface-subtle"
-            onClick={() =>
-              logout.mutate(undefined, { onSuccess: () => window.location.assign('/login') })
-            }
-          >
-            Sign out
-          </button>
+          <div className="flex items-center gap-2">
+            <span className="hidden text-xs text-ink-subtle md:inline" title="Keyboard shortcuts">
+              Press{' '}
+              <kbd className="rounded border border-surface-muted bg-surface-subtle px-1 font-mono text-[11px]">
+                ?
+              </kbd>{' '}
+              for shortcuts
+            </span>
+            <button
+              type="button"
+              className="rounded-md border border-surface-muted px-3 py-1 text-sm hover:bg-surface-subtle"
+              onClick={() =>
+                logout.mutate(undefined, { onSuccess: () => window.location.assign('/login') })
+              }
+            >
+              Sign out
+            </button>
+          </div>
         </header>
         <main className="flex-1 overflow-auto p-6">{children}</main>
       </div>
+      <ShortcutOverlay />
     </div>
   );
 }
