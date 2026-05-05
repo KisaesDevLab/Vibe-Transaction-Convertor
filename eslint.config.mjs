@@ -121,6 +121,7 @@ export default [
         cancelAnimationFrame: 'readonly',
         ResizeObserver: 'readonly',
         globalThis: 'readonly',
+        RequestInit: 'readonly',
         React: 'readonly',
         Node: 'readonly',
         Element: 'readonly',

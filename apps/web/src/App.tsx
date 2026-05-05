@@ -13,6 +13,7 @@ import { AuditLogPage } from './pages/AuditLogPage';
 import { BackupAdminPage } from './pages/BackupAdminPage';
 import { DiagnosticsPage } from './pages/DiagnosticsPage';
 import { EnginesAdminPage } from './pages/EnginesAdminPage';
+import { ExportPage } from './pages/ExportPage';
 import { MaintenanceAdminPage } from './pages/MaintenanceAdminPage';
 import { StatementReviewPage } from './pages/StatementReviewPage';
 import { StatementsListPage } from './pages/StatementsListPage';
@@ -35,6 +36,7 @@ export function App() {
                 <Route path="/accounts/:accountId" element={<AccountDetailPage />} />
                 <Route path="/accounts/:accountId/statements" element={<StatementsListPage />} />
                 <Route path="/statements/:statementId" element={<StatementReviewPage />} />
+                <Route path="/statements/:statementId/export" element={<ExportPage />} />
                 <Route path="/statements" element={<Placeholder title="Statements" />} />
                 <Route
                   path="/admin"

@@ -202,6 +202,12 @@ export function StatementReviewPage() {
               {reExtract.isPending ? 'Enqueueing…' : 'Re-extract'}
             </button>
           ) : null}
+          <Link
+            to={`/statements/${statementId}/export`}
+            className="rounded-md border border-surface-muted px-3 py-1.5 text-sm hover:bg-surface-subtle"
+          >
+            Export…
+          </Link>
           <button
             type="button"
             disabled={exportBlocked}

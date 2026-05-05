@@ -162,6 +162,47 @@ export interface SplitResult {
   children: Array<{ id: string; accountId: string; pageRange: string }>;
 }
 
+export interface ExportJobSummary {
+  id: string;
+  format: string;
+  requestedAt: string;
+  requestedBy: string;
+  fileBytes: number;
+  intuBidUsed: string | null;
+  available: boolean;
+}
+
+export const useExportJobs = (statementId: string) =>
+  useQuery({
+    queryKey: ['exports', statementId],
+    queryFn: () => api.get<ExportJobSummary[]>(`/api/statements/${statementId}/exports`),
+    enabled: statementId.length > 0,
+  });
+
+export interface ExportPreview {
+  format: string;
+  filename: string;
+  contentType: string;
+  totalLines: number;
+  totalBytes: number;
+  previewLines: string[];
+  truncated: boolean;
+}
+
+export const useExportPreview = (statementId: string, format: string, allowOverride: boolean) =>
+  useQuery({
+    queryKey: ['export-preview', statementId, format, allowOverride],
+    queryFn: () =>
+      api.get<ExportPreview>(
+        `/api/statements/${statementId}/exports/${format}/preview`,
+        allowOverride ? { override: 'true' } : undefined,
+      ),
+    enabled: statementId.length > 0 && format.length > 0,
+    // Preview is purely a function of the persisted statement — cache
+    // a few minutes so flipping format toggles is snappy.
+    staleTime: 60_000,
+  });
+
 export const useSplitStatement = (statementId: string) => {
   const qc = useQueryClient();
   return useMutation({

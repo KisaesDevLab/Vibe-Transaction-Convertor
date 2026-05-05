@@ -6,11 +6,12 @@ import { join } from 'node:path';
 import { db } from '../db/client.js';
 import { auditLog, sessions } from '../db/schema.js';
 import { logger } from '../lib/logger.js';
+import { cleanupExpiredExports } from '../services/exports.js';
 
 import { QUEUE_MAINTENANCE, getJobConnection, maintenanceQueue } from './queues.js';
 
 interface MaintenanceJobData {
-  task: 'prune-sessions' | 'prune-audit' | 'clean-tmp';
+  task: 'prune-sessions' | 'prune-audit' | 'clean-tmp' | 'expire-exports';
 }
 
 const pruneSessions = async (): Promise<{ deleted: number }> => {
@@ -71,6 +72,8 @@ const processMaintenance = async (data: MaintenanceJobData): Promise<unknown> =>
       return pruneAudit();
     case 'clean-tmp':
       return cleanTmp();
+    case 'expire-exports':
+      return cleanupExpiredExports(db);
     default:
       throw new Error(`unknown maintenance task: ${(data as { task: string }).task}`);
   }
@@ -113,5 +116,11 @@ const scheduleRecurring = async (): Promise<void> => {
     'clean-tmp',
     { task: 'clean-tmp' },
     { repeat: { pattern: '*/30 * * * *' }, removeOnComplete: 50 },
+  );
+  // Phase 24 #21: nightly sweep of export files older than 30 days.
+  await q.add(
+    'expire-exports',
+    { task: 'expire-exports' },
+    { repeat: { pattern: '30 3 * * *' }, removeOnComplete: 50 },
   );
 };

@@ -1,4 +1,6 @@
 import { eq, sql } from 'drizzle-orm';
+import { mkdir, writeFile, unlink } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
 
 import { FALLBACK_INTU_BID } from '@vibe-tx-converter/shared';
 import {
@@ -17,6 +19,20 @@ import { accounts, exportJobs, statements, transactions } from '../db/schema.js'
 import { ConflictError, NotFoundError } from '../lib/errors.js';
 import type { Account, Statement, Transaction, User } from '../db/types.js';
 import { writeAudit } from './audit.js';
+
+// Phase 24 #7/#21: export bytes are persisted under
+// $DATA_DIR/exports/{statementId}/{exportJobId}.{ext} so re-downloads
+// don't re-render and the maintenance worker can sweep stale files
+// after 30 days. The directory is created on demand.
+export const exportFilePath = (
+  statementId: string,
+  jobId: string,
+  format: ExportFormat,
+): string => {
+  const dataDir = process.env.DATA_DIR ?? './data';
+  const ext = format.startsWith('csv-') ? 'csv' : format;
+  return join(dataDir, 'exports', statementId, `${jobId}.${ext}`);
+};
 
 export type ExportFormat =
   | 'csv-qbo3'
@@ -223,22 +239,67 @@ export const recordExportJob = async (
   actor: User,
   statementId: string,
   result: RenderedExport,
-): Promise<void> => {
-  await db.insert(exportJobs).values({
-    statementId,
-    format: result.format,
-    requestedBy: actor.id,
-    intuBidUsed: result.intuBidUsed ?? null,
-    filePath: '<inline>', // export bytes are streamed directly; nothing on disk
-    fileBytes: result.bytes.length,
-  });
+): Promise<{ id: string; filePath: string }> => {
+  // Insert the export_jobs row first to obtain the job UUID, then write
+  // the bytes under that UUID's path. We tolerate a write failure by
+  // rolling back the row — leaving an export_jobs entry pointing at a
+  // non-existent file would surface as a confusing 404 in the UI.
+  const [row] = await db
+    .insert(exportJobs)
+    .values({
+      statementId,
+      format: result.format,
+      requestedBy: actor.id,
+      intuBidUsed: result.intuBidUsed ?? null,
+      filePath: '<pending>',
+      fileBytes: result.bytes.length,
+    })
+    .returning({ id: exportJobs.id });
+  if (!row) throw new Error('export_jobs insert returned no row');
+  const path = exportFilePath(statementId, row.id, result.format);
+  try {
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(path, result.bytes);
+  } catch (err) {
+    await db.delete(exportJobs).where(eq(exportJobs.id, row.id));
+    throw err;
+  }
+  await db.update(exportJobs).set({ filePath: path }).where(eq(exportJobs.id, row.id));
   await writeAudit(db, {
     actorUserId: actor.id,
     entityType: 'statement',
     entityId: statementId,
     action: 'statement.export',
-    payload: { format: result.format, bytes: result.bytes.length },
+    payload: { format: result.format, bytes: result.bytes.length, exportJobId: row.id },
   });
+  return { id: row.id, filePath: path };
+};
+
+// Phase 24 #21: 30-day cleanup. Called from the maintenance worker.
+// Returns the count of files removed. Rows are kept so the audit log
+// stays intact; the file_path is replaced with '<expired>'.
+export const cleanupExpiredExports = async (
+  db: Db,
+  retentionDays = 30,
+): Promise<{ removed: number }> => {
+  const cutoff = sql`now() - (${retentionDays} || ' days')::interval`;
+  const stale = await db
+    .select({ id: exportJobs.id, filePath: exportJobs.filePath })
+    .from(exportJobs)
+    .where(
+      sql`${exportJobs.createdAt} < ${cutoff} AND ${exportJobs.filePath} NOT IN ('<expired>', '<pending>')`,
+    );
+  let removed = 0;
+  for (const job of stale) {
+    try {
+      await unlink(job.filePath);
+      removed += 1;
+    } catch {
+      // already gone
+    }
+    await db.update(exportJobs).set({ filePath: '<expired>' }).where(eq(exportJobs.id, job.id));
+  }
+  return { removed };
 };
 
 export const overrideReconciliation = async (
