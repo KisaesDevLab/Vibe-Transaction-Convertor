@@ -11,8 +11,8 @@ typecheck → lint → test → build).
 | 2     | Workspace, TS, Lint, Test Config             | ✅     | `0cf9a8b` | helpers + 18 tests passing          |
 | 3     | Database Schema & Migrations                 | ✅     | `894247d` | 10 tables + live smoke OK           |
 | 4     | API Scaffolding & Health                     | ✅     | `ae36853` | health/ready/version + 7 supertests |
-| 5     | FIDIR Mirror, Parser, Seeder                 | ✅     | _next_    | 127-bank starter + parser + routes  |
-| 6     | Auth & Session                               | ⏸      | —         |                                     |
+| 5     | FIDIR Mirror, Parser, Seeder                 | ✅     | `36c2ac8` | 127-bank starter + parser + routes  |
+| 6     | Auth & Session                               | ✅     | _next_    | argon2 + cookie sessions + admin    |
 | 7     | Companies CRUD (API + UI)                    | ⏸      | —         |                                     |
 | 8     | Accounts CRUD with Bank Picker               | ⏸      | —         |                                     |
 | 9     | PDF Upload, Storage, Hashing                 | ⏸      | —         |                                     |

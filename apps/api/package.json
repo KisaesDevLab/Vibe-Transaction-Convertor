@@ -23,6 +23,7 @@
     "@vibe-tx-converter/fidir": "workspace:*",
     "@vibe-tx-converter/reconciler": "workspace:*",
     "@vibe-tx-converter/shared": "workspace:*",
+    "argon2": "^0.41.0",
     "compression": "^1.7.4",
     "cookie-parser": "^1.4.6",
     "cors": "^2.8.5",

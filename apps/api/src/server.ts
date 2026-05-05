@@ -7,9 +7,11 @@ import { pinoHttp } from 'pino-http';
 
 import { logger } from './lib/logger.js';
 import { errorHandler, notFoundHandler } from './middleware/error-handler.js';
+import { loadSession, requireAuth } from './middleware/auth.js';
 import { csrf, csrfTokenHandler } from './middleware/csrf.js';
 import { unauthRateLimiter } from './middleware/rate-limit.js';
 import { requestId } from './middleware/request-id.js';
+import { authRouter, usersRouter } from './routes/auth.js';
 import { fidirRouter } from './routes/fidir.js';
 import { healthRouter } from './routes/health.js';
 import { versionRouter } from './routes/version.js';
@@ -59,15 +61,19 @@ export const createApp = (): Express => {
     }),
   );
 
-  // Rate limit unauthenticated routes; auth routes get their own limiter in Phase 6.
   app.use(unauthRateLimiter());
-
   app.use(csrf());
+  app.use(loadSession);
 
+  // Public routes — no requireAuth.
   app.get('/api/auth/csrf', csrfTokenHandler);
   app.use('/api/health', healthRouter());
   app.use('/api', versionRouter());
-  app.use('/api/fidir', fidirRouter());
+  app.use('/api/auth', authRouter());
+
+  // Authenticated routes.
+  app.use('/api/users', requireAuth, usersRouter());
+  app.use('/api/fidir', requireAuth, fidirRouter());
 
   app.use(notFoundHandler);
   app.use(errorHandler);
