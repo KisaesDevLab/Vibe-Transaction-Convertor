@@ -145,6 +145,13 @@ export function PdfViewer({ pdfHash, highlight, onPdfClick }: PdfViewerProps) {
     return pdfBboxToCss(highlight.bbox, pageGeom);
   }, [highlight, pageGeom, page]);
 
+  // pdf.js's worker transfers (not copies) the ArrayBuffer we hand it,
+  // detaching our cached pdfData after the first load. Memoize the
+  // file prop so react-pdf never re-issues the load on subsequent
+  // renders, and pass a fresh copy of the bytes to pdf.js so our
+  // pdfData stays usable for the Download button.
+  const fileForViewer = useMemo(() => (pdfData ? { data: pdfData.slice() } : null), [pdfData]);
+
   const onPageLoad = (pdfPage: { width: number; height: number }) => {
     // react-pdf reports pdf user-space dimensions on the PageProxy.
     requestAnimationFrame(() => {
@@ -274,7 +281,7 @@ export function PdfViewer({ pdfHash, highlight, onPdfClick }: PdfViewerProps) {
           </div>
         ) : (
           <Document
-            file={{ data: pdfData }}
+            file={fileForViewer}
             onLoadSuccess={({ numPages: n }) => setNumPages(n)}
             onLoadError={(err) => setError(err.message)}
             loading={null}
