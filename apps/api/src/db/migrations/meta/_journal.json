@@ -36,6 +36,20 @@
       "when": 1777937042574,
       "tag": "0004_multi_account_splits",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1777937042575,
+      "tag": "0005_intu_userid_override",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1777937042576,
+      "tag": "0006_page_range_split",
+      "breakpoints": true
     }
   ]
 }
