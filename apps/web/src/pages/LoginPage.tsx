@@ -1,8 +1,15 @@
-import { type FormEvent, useState } from 'react';
+import { type FormEvent, useEffect, useState } from 'react';
 import { Navigate, useNavigate } from 'react-router-dom';
 
 import { useLogin, useMe, useUsersExist } from '../hooks/useAuth';
 import { ApiError } from '../lib/api';
+
+// Parse the trailing "retry in Ns" hint from RateLimitError.
+// Returns 0 when no number is found, signalling "unknown duration".
+const parseRetryAfterSeconds = (msg: string): number => {
+  const m = /retry in (\d+)s/i.exec(msg);
+  return m ? Number.parseInt(m[1]!, 10) : 0;
+};
 
 export function LoginPage() {
   const me = useMe();
@@ -12,6 +19,16 @@ export function LoginPage() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
+  const [lockoutSec, setLockoutSec] = useState(0);
+
+  // Countdown ticks once per second until 0. We only keep the
+  // interval alive while there's time left, so a stuck timer can't
+  // outlive the lockout.
+  useEffect(() => {
+    if (lockoutSec <= 0) return;
+    const id = setInterval(() => setLockoutSec((s) => Math.max(0, s - 1)), 1000);
+    return () => clearInterval(id);
+  }, [lockoutSec]);
 
   if (me.data) return <Navigate to="/" replace />;
   if (usersExist.data && !usersExist.data.exists) return <Navigate to="/register" replace />;
@@ -23,9 +40,17 @@ export function LoginPage() {
       await login.mutateAsync({ email, password });
       navigate('/', { replace: true });
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'login failed');
+      if (err instanceof ApiError && err.status === 429) {
+        const sec = parseRetryAfterSeconds(err.message) || 60;
+        setLockoutSec(sec);
+        setError(err.message);
+      } else {
+        setError(err instanceof ApiError ? err.message : 'login failed');
+      }
     }
   };
+
+  const locked = lockoutSec > 0;
 
   return (
     <main className="min-h-screen grid place-items-center px-4">
@@ -64,16 +89,16 @@ export function LoginPage() {
 
         {error ? (
           <p role="alert" className="mt-3 text-sm text-danger">
-            {error}
+            {locked ? `Too many attempts — try again in ${lockoutSec}s.` : error}
           </p>
         ) : null}
 
         <button
           type="submit"
-          disabled={login.isPending}
+          disabled={login.isPending || locked}
           className="mt-6 w-full rounded-md bg-accent text-accent-fg font-medium py-2 disabled:opacity-50"
         >
-          {login.isPending ? 'Signing in…' : 'Sign in'}
+          {login.isPending ? 'Signing in…' : locked ? `Wait ${lockoutSec}s` : 'Sign in'}
         </button>
       </form>
     </main>

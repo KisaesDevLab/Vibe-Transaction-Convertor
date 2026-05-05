@@ -8,6 +8,7 @@
 import { useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 
+import { DeleteConfirmDialog } from '../components/DeleteConfirmDialog';
 import { EntityAuditLog } from '../components/EntityAuditLog';
 import { useToast } from '../components/Toast';
 import {
@@ -88,6 +89,9 @@ export function ExportPage() {
   const toast = useToast();
   const [selected, setSelected] = useState<Set<string>>(() => new Set(['csv-qbo3', 'qbo']));
   const [previewFormat, setPreviewFormat] = useState<string>('csv-qbo3');
+  // Active delete-export confirmation. null = none open. Holds the
+  // job context so the dialog can show what's being deleted.
+  const [pendingDelete, setPendingDelete] = useState<{ id: string; format: string } | null>(null);
 
   const overridden = stmt.data?.statement.reconciliationStatus === 'overridden';
   const allowOverride = overridden;
@@ -153,17 +157,12 @@ export function ExportPage() {
     }
   };
 
-  const onDeleteJob = async (jobId: string, fmt: string): Promise<void> => {
-    // Native confirm is enough here — this is admin-only and the
-    // action is reversible by re-exporting. Audit trail survives the
-    // delete (audit_log is append-only per ADR-013).
-    const ok = window.confirm(
-      `Delete this ${fmt} export? The file is removed from disk; the audit trail stays.`,
-    );
-    if (!ok) return;
+  const confirmDelete = async (): Promise<void> => {
+    if (!pendingDelete) return;
     try {
-      await deleteJob.mutateAsync(jobId);
-      toast.success(`Deleted ${fmt} export`);
+      await deleteJob.mutateAsync(pendingDelete.id);
+      toast.success(`Deleted ${pendingDelete.format} export`);
+      setPendingDelete(null);
     } catch (err) {
       toast.error(err instanceof ApiError ? err.message : 'delete failed');
     }
@@ -325,7 +324,7 @@ export function ExportPage() {
                         {isAdmin ? (
                           <button
                             type="button"
-                            onClick={() => void onDeleteJob(j.id, j.format)}
+                            onClick={() => setPendingDelete({ id: j.id, format: j.format })}
                             title="Delete this export (admin only)"
                             className="rounded-md border border-danger px-2 py-1 text-xs text-danger hover:bg-danger/10"
                           >
@@ -350,6 +349,15 @@ export function ExportPage() {
       {/* Audit trail — every render, re-download, override, and now
           delete is logged. Useful here for "who exported what when". */}
       <EntityAuditLog entityType="statement" entityId={statementId} title="Export audit log" />
+
+      <DeleteConfirmDialog
+        open={pendingDelete !== null}
+        title={`Delete ${pendingDelete?.format ?? ''} export?`}
+        description="The rendered file is removed from disk. The audit trail (record of when it was exported, by whom, and the bytes) stays — audit_log is append-only."
+        busy={deleteJob.isPending}
+        onClose={() => setPendingDelete(null)}
+        onConfirm={confirmDelete}
+      />
     </section>
   );
 }

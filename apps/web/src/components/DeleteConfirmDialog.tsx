@@ -10,6 +10,8 @@ export function DeleteConfirmDialog({
   description,
   preview,
   confirmText,
+  confirmButtonLabel,
+  busyLabel,
   busy,
   onClose,
   onConfirm,
@@ -22,6 +24,10 @@ export function DeleteConfirmDialog({
   // unlocks. Default 'DELETE' — use a more specific phrase for higher
   // stakes (e.g. the row count for bulk delete).
   confirmText?: string;
+  // Override the action button text for non-delete destructive flows
+  // (e.g. "Re-extract"). Defaults to "Delete".
+  confirmButtonLabel?: string;
+  busyLabel?: string;
   busy?: boolean;
   onClose: () => void;
   onConfirm: () => Promise<void> | void;
@@ -100,7 +106,7 @@ export function DeleteConfirmDialog({
             disabled={typed !== phrase || busy}
             className="rounded-md bg-danger px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
           >
-            {busy ? 'Deleting…' : 'Delete'}
+            {busy ? (busyLabel ?? 'Deleting…') : (confirmButtonLabel ?? 'Delete')}
           </button>
         </div>
       </form>

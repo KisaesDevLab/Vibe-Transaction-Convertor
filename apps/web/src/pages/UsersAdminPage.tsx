@@ -2,6 +2,7 @@ import { type FormEvent, useState } from 'react';
 import { Link } from 'react-router-dom';
 
 import { useAdminUsers, useCreateStaff, useResetPassword } from '../hooks/useUsers';
+import { useCopyToClipboard } from '../hooks/useCopyToClipboard';
 import { useToast } from '../components/Toast';
 import { ApiError } from '../lib/api';
 
@@ -23,6 +24,7 @@ export function UsersAdminPage() {
   const create = useCreateStaff();
   const reset = useResetPassword();
   const toast = useToast();
+  const copy = useCopyToClipboard();
   const [email, setEmail] = useState('');
   const [displayName, setDisplayName] = useState('');
   const [password, setPassword] = useState('');
@@ -177,7 +179,14 @@ export function UsersAdminPage() {
             <pre className="rounded-md bg-surface-subtle p-3 font-mono text-sm select-all">
               {resetTemp.temp}
             </pre>
-            <div className="flex justify-end">
+            <div className="flex items-center justify-between">
+              <button
+                type="button"
+                onClick={() => void copy(resetTemp.temp, 'Temporary password copied')}
+                className="rounded-md border border-surface-muted px-3 py-2 text-sm hover:bg-surface-subtle"
+              >
+                Copy
+              </button>
               <button
                 type="button"
                 onClick={() => setResetTemp(null)}

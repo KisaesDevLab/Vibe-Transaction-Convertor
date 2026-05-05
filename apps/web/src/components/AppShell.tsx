@@ -3,6 +3,7 @@ import { NavLink } from 'react-router-dom';
 
 import { useLogout, useMe } from '../hooks/useAuth';
 import { cn } from '../lib/cn';
+import { ErrorBoundary } from './ErrorBoundary';
 import { ShortcutOverlay } from './ShortcutOverlay';
 
 const NAV: Array<{ to: string; label: string; adminOnly?: boolean }> = [
@@ -68,7 +69,9 @@ export function AppShell({ children }: { children: ReactNode }) {
             </button>
           </div>
         </header>
-        <main className="flex-1 overflow-auto p-6">{children}</main>
+        <main className="flex-1 overflow-auto p-6">
+          <ErrorBoundary>{children}</ErrorBoundary>
+        </main>
       </div>
       <ShortcutOverlay />
     </div>

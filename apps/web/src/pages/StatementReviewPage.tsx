@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 
+import { DeleteConfirmDialog } from '../components/DeleteConfirmDialog';
 import { EntityAuditLog } from '../components/EntityAuditLog';
 import { LocaleConfirmBanner } from '../components/LocaleConfirmBanner';
 import { ReconciliationBadge, StatusBadge } from '../components/StatusBadge';
@@ -99,6 +100,7 @@ export function StatementReviewPage() {
   const toast = useToast();
   const [selectedTx, setSelectedTx] = useState<TransactionRow | null>(null);
   const [splitOpen, setSplitOpen] = useState(false);
+  const [reExtractOpen, setReExtractOpen] = useState(false);
   // Pull the parent account → company so the split modal can show only
   // accounts under the same company in the per-segment dropdowns.
   const parentAccount = useAccount(stmt.data?.statement.accountId ?? '');
@@ -188,20 +190,7 @@ export function StatementReviewPage() {
           {isAdmin ? (
             <button
               type="button"
-              onClick={async () => {
-                if (
-                  !window.confirm(
-                    'Re-extract this statement? Existing transactions will be discarded and the LLM will run again.',
-                  )
-                )
-                  return;
-                try {
-                  await reExtract.mutateAsync();
-                  toast.success('Re-extraction enqueued');
-                } catch (err) {
-                  toast.error(err instanceof ApiError ? err.message : 're-extract failed');
-                }
-              }}
+              onClick={() => setReExtractOpen(true)}
               disabled={reExtract.isPending}
               className="rounded-md border border-surface-muted px-3 py-1.5 text-sm hover:bg-surface-subtle disabled:opacity-50"
             >
@@ -465,6 +454,26 @@ export function StatementReviewPage() {
       {/* Embedded audit panel — admin-only, scoped to this statement.
           Useful when investigating discrepancies / overrides. */}
       <EntityAuditLog entityType="statement" entityId={s.id} />
+
+      <DeleteConfirmDialog
+        open={reExtractOpen}
+        title="Re-extract this statement?"
+        description="Existing transactions will be discarded and the LLM will run again from the source PDF. Any user edits and trntype overrides on the current rows are lost. The original PDF and audit trail are preserved."
+        confirmText="RE-EXTRACT"
+        confirmButtonLabel="Re-extract"
+        busyLabel="Enqueueing…"
+        busy={reExtract.isPending}
+        onClose={() => setReExtractOpen(false)}
+        onConfirm={async () => {
+          try {
+            await reExtract.mutateAsync();
+            toast.success('Re-extraction enqueued');
+            setReExtractOpen(false);
+          } catch (err) {
+            toast.error(err instanceof ApiError ? err.message : 're-extract failed');
+          }
+        }}
+      />
     </section>
   );
 }

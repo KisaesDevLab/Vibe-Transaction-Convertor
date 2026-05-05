@@ -7,6 +7,7 @@ import { EntityAuditLog } from '../components/EntityAuditLog';
 import { StatusBadge, ReconciliationBadge } from '../components/StatusBadge';
 import { UploadDropzone } from '../components/UploadDropzone';
 import { useToast } from '../components/Toast';
+import { useCopyToClipboard } from '../hooks/useCopyToClipboard';
 import {
   fetchRevealedAccount,
   useDeleteAccount,
@@ -27,6 +28,7 @@ export function AccountDetailPage() {
   const statements = useStatementsByAccount(accountId);
   const me = useMe();
   const toast = useToast();
+  const copy = useCopyToClipboard();
   const [revealedNumber, setRevealedNumber] = useState<string | null>(null);
   const [revealMsRemaining, setRevealMsRemaining] = useState<number>(0);
   const [editOpen, setEditOpen] = useState(false);
@@ -131,9 +133,19 @@ export function AccountDetailPage() {
           </span>
           {isAdmin ? (
             revealedNumber ? (
-              <span className="text-xs text-ink-subtle">
-                · re-masking in {Math.ceil(revealMsRemaining / 1000)}s
-              </span>
+              <>
+                <button
+                  type="button"
+                  onClick={() => void copy(revealedNumber, 'Account number copied')}
+                  className="text-xs text-accent hover:underline"
+                  title="Copy the revealed account number"
+                >
+                  copy
+                </button>
+                <span className="text-xs text-ink-subtle">
+                  · re-masking in {Math.ceil(revealMsRemaining / 1000)}s
+                </span>
+              </>
             ) : (
               <button
                 type="button"
