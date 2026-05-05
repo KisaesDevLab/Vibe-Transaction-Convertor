@@ -21,7 +21,7 @@ just whether the happy path runs. Acceptance gauntlet: `pnpm acceptance`
 | 11    | GLM-OCR HTTP Client                       | ⚠      | `c76d8cf`   | in-memory cache (spec: Redis); no version probe; no breaker    |
 | 12    | LLM Extractor                             | ⚠      | `c403118`   | 4 of 10 exemplars; token budget; cleanup; flat schema remains  |
 | 13    | LLM Provider Abstraction                  | ⚠      | `c403118`   | dateFormatOverride wired; no 60-s cache; no @anthropic-ai/sdk  |
-| 14    | Multi-Account Auto-Split                  | ⚠      | `<next>`    | real split via /split + page_range; no overlap-conflict tests  |
+| 14    | Multi-Account Auto-Split                  | ⚠      | `2c664d7`   | real split via /split + page_range; no overlap-conflict tests  |
 | 15    | BullMQ Extraction Pipeline                | ⚠      | `c403118`   | locale-gate now wired; no SSE progress; no cancel              |
 | 16    | Golden Rule Reconciler & Repair Pass      | ⚠      | `ec3de5c`   | LLM repair + suspect rows + auto-recompute; no LLM-pass tests  |
 | 17    | TRNTYPE Inference + FITID Generator       | ⚠      | `702449e`   | rule list + isCreditCard wired; no docs/extraction.md          |
