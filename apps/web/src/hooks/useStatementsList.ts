@@ -14,6 +14,13 @@ export interface StatementSummary {
   status: string;
   reconciliationStatus: string;
   llmProvider: 'local' | 'anthropic' | null;
+  llmModelVersion: string | null;
+  ocrEngineVersion: string | null;
+  extractionMethod: 'text' | 'ocr' | 'hybrid' | null;
+  sourceDateFormat: string | null;
+  sourceDateFormatConfidence: number | null;
+  sourceDateFormatUserConfirmed: boolean | null;
+  periodBoundsViolations: number;
   errorMessage: string | null;
   createdAt: string;
   updatedAt: string;
@@ -25,10 +32,14 @@ export interface TransactionRow {
   seqInDay: number;
   postedDate: string;
   description: string;
+  normalizedDescription: string;
   amountCents: string;
+  runningBalanceCents: string | null;
+  checkNumber: string | null;
   trntype: string;
   fitid: string;
   sourcePage: number;
+  sourceBboxJson: [number, number, number, number] | null;
   userEdited: boolean;
   confidence: number;
 }

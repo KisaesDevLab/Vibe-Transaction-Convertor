@@ -60,13 +60,16 @@ export function AdminHomePage() {
 
   return (
     <section className="mx-auto max-w-3xl space-y-8">
-      <header>
+      <header className="space-y-1">
         <h1 className="text-2xl font-semibold">Admin</h1>
-        <p className="text-sm text-ink-muted">
+        <nav className="flex flex-wrap gap-3 text-sm">
+          <Link to="/admin/users" className="text-accent hover:underline">
+            Users →
+          </Link>
           <Link to="/admin/audit" className="text-accent hover:underline">
             Audit log →
           </Link>
-        </p>
+        </nav>
       </header>
 
       <section className="rounded-lg border border-surface-muted bg-white p-4">

@@ -4,6 +4,7 @@ import { QueryClientProvider } from '@tanstack/react-query';
 import { BrowserRouter } from 'react-router-dom';
 
 import { App } from './App';
+import { ToastProvider } from './components/Toast';
 import { queryClient } from './lib/query';
 import './styles/index.css';
 
@@ -16,7 +17,9 @@ createRoot(rootElement).render(
   <StrictMode>
     <QueryClientProvider client={queryClient}>
       <BrowserRouter>
-        <App />
+        <ToastProvider>
+          <App />
+        </ToastProvider>
       </BrowserRouter>
     </QueryClientProvider>
   </StrictMode>,

@@ -12,6 +12,7 @@ import { AdminHomePage } from './pages/AdminHomePage';
 import { AuditLogPage } from './pages/AuditLogPage';
 import { StatementReviewPage } from './pages/StatementReviewPage';
 import { StatementsListPage } from './pages/StatementsListPage';
+import { UsersAdminPage } from './pages/UsersAdminPage';
 
 export function App() {
   return (
@@ -44,6 +45,14 @@ export function App() {
                   element={
                     <AdminGate>
                       <AuditLogPage />
+                    </AdminGate>
+                  }
+                />
+                <Route
+                  path="/admin/users"
+                  element={
+                    <AdminGate>
+                      <UsersAdminPage />
                     </AdminGate>
                   }
                 />

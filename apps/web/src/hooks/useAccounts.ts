@@ -42,6 +42,11 @@ export const useAccounts = (companyId: string) =>
     enabled: companyId.length > 0,
   });
 
+// Admin-only: fetch the unmasked account number. Each call audit-logs
+// the reveal action via the API.
+export const fetchRevealedAccount = (id: string): Promise<Account> =>
+  api.get<Account>(`/api/accounts/${id}`, { reveal: 'true' });
+
 export const useCreateAccount = (companyId: string) => {
   const qc = useQueryClient();
   return useMutation({

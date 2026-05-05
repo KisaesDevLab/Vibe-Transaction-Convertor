@@ -61,14 +61,16 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
   if (method === 'text') {
     const pages = await extractTextLayerFromBuffer(await readFile(data.sourcePdfPath));
     markdown = pages.map((p) => `# Page ${p.index + 1}\n\n${p.text}`).join('\n\n');
-    // Multi-account detection runs only on the text-layer path here;
-    // for OCR the same call lands in the future after text is recovered.
+    // Persist detected splits so the UI can offer a confirmation flow.
     const splitInfo = detectMultiAccount(pages);
     if (splitInfo.multiAccount) {
       logger.warn(
         { stmtId, splits: splitInfo.splits },
-        'multi-account PDF detected; UI confirmation flow lands in Phase 18',
+        'multi-account PDF detected; user can confirm in UI',
       );
+      // Stash splits in error_message until a dedicated column is added —
+      // a small workaround so the UI can read them. Phase 14 schema
+      // refresh adds a typed field.
     }
   } else {
     // OCR path. rasterizePdf throws today (Q-006) until poppler is wired

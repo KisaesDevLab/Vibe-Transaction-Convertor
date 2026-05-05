@@ -1,13 +1,14 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 
-import { decimalString, formatUsd, parseDecimalToCents } from '@vibe-tx-converter/shared';
-
+import { ReconciliationBadge, StatusBadge } from '../components/StatusBadge';
+import { ReconciliationWidget } from '../components/ReconciliationWidget';
+import { TransactionGrid } from '../components/TransactionGrid';
+import { PdfViewer } from '../components/PdfViewer';
+import { useToast } from '../components/Toast';
 import {
-  useOverrideReconciliation,
   useStatement,
   useUpdateTransaction,
-  type TransactionPatch,
   type TransactionRow,
 } from '../hooks/useStatementsList';
 import { ApiError } from '../lib/api';
@@ -40,7 +41,11 @@ const downloadExport = async (
     },
   });
   if (!res.ok) {
-    const body = await res.json().catch(() => ({ message: `HTTP ${res.status}` }));
+    const body = (await res.json().catch(() => ({ message: `HTTP ${res.status}` }))) as {
+      message?: string;
+      code?: string;
+      details?: unknown;
+    };
     throw new ApiError(res.status, body);
   }
   const blob = await res.blob();
@@ -58,54 +63,95 @@ export function StatementReviewPage() {
   const { statementId = '' } = useParams();
   const stmt = useStatement(statementId);
   const update = useUpdateTransaction(statementId);
-  const override = useOverrideReconciliation(statementId);
-  const [error, setError] = useState<string | null>(null);
-  const [overrideOpen, setOverrideOpen] = useState(false);
-  const [overrideReason, setOverrideReason] = useState('');
+  const toast = useToast();
+  const [selectedTx, setSelectedTx] = useState<TransactionRow | null>(null);
 
-  if (stmt.isPending) return <p className="text-sm text-ink-muted">Loading…</p>;
+  const txSumCents = useMemo<bigint>(() => {
+    if (!stmt.data) return 0n;
+    return stmt.data.transactions.reduce<bigint>((acc, t) => acc + BigInt(t.amountCents), 0n);
+  }, [stmt.data]);
+
+  if (stmt.isPending) {
+    return (
+      <div className="space-y-3">
+        <div className="h-8 w-1/3 animate-pulse rounded bg-surface-muted" />
+        <div className="h-32 animate-pulse rounded bg-surface-muted" />
+      </div>
+    );
+  }
   if (!stmt.data) return <p>Statement not found</p>;
 
   const s = stmt.data.statement;
   const txs = stmt.data.transactions;
-  const isDiscrepancy = s.reconciliationStatus === 'discrepancy';
+  const exportable =
+    s.reconciliationStatus === 'verified' || s.reconciliationStatus === 'overridden';
+  const exportBlocked = !exportable || s.status === 'awaiting-locale-confirmation';
 
   const onExport = async (format: string): Promise<void> => {
-    setError(null);
     try {
-      await downloadExport(statementId, format, isDiscrepancy);
+      await downloadExport(statementId, format, s.reconciliationStatus === 'overridden');
+      toast.success(`Downloaded ${format}`);
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'export failed');
+      toast.error(err instanceof ApiError ? err.message : 'export failed');
     }
   };
 
   return (
-    <section className="mx-auto max-w-6xl">
+    <section className="mx-auto max-w-7xl space-y-4">
       <Link
         to={`/accounts/${s.accountId}/statements`}
         className="text-sm text-ink-muted hover:text-ink"
       >
         ← Statements
       </Link>
-      <header className="mt-2 mb-6 flex items-end justify-between">
+
+      <header className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <h1 className="text-2xl font-semibold">
             {s.periodStart && s.periodEnd
               ? `${s.periodStart} → ${s.periodEnd}`
               : `Statement ${s.id.slice(0, 8)}`}
           </h1>
-          <p className="text-sm text-ink-muted">
-            {txs.length} transactions · status {s.status} ·{' '}
-            <ReconBadge status={s.reconciliationStatus} />
-          </p>
+          <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-ink-subtle">
+            <StatusBadge status={s.status} />
+            <ReconciliationBadge
+              status={s.reconciliationStatus}
+              periodBoundsViolations={s.periodBoundsViolations}
+            />
+            {s.sourceDateFormat ? (
+              <span className="rounded bg-surface-subtle px-1.5 py-0.5">
+                Dates: {s.sourceDateFormat}
+                {s.sourceDateFormatConfidence !== null
+                  ? ` · conf ${(s.sourceDateFormatConfidence * 100).toFixed(0)}%`
+                  : ''}
+                {s.sourceDateFormatUserConfirmed ? ' ✓' : ''}
+              </span>
+            ) : null}
+            {s.llmProvider ? (
+              <span className="rounded bg-surface-subtle px-1.5 py-0.5">
+                LLM: {s.llmProvider} {s.llmModelVersion ?? ''}
+              </span>
+            ) : null}
+            {s.extractionMethod ? (
+              <span className="rounded bg-surface-subtle px-1.5 py-0.5">
+                Method: {s.extractionMethod}
+              </span>
+            ) : null}
+          </div>
         </div>
         <div className="flex flex-wrap gap-2">
           {FORMATS.map((f) => (
             <button
               key={f.value}
               type="button"
+              disabled={exportBlocked}
+              title={
+                exportBlocked
+                  ? 'Reconciliation is not verified — fix discrepancies or override before export'
+                  : ''
+              }
               onClick={() => void onExport(f.value)}
-              className="rounded-md border border-surface-muted px-3 py-1.5 text-sm hover:bg-surface-subtle"
+              className="rounded-md border border-surface-muted px-3 py-1.5 text-sm hover:bg-surface-subtle disabled:cursor-not-allowed disabled:opacity-50"
             >
               {f.label}
             </button>
@@ -113,209 +159,72 @@ export function StatementReviewPage() {
         </div>
       </header>
 
-      {isDiscrepancy ? (
-        <div className="mb-4 flex items-center justify-between rounded-md border border-danger/40 bg-danger/5 p-3 text-sm">
-          <span>
-            Golden Rule discrepancy — exports are blocked unless you click through an override.
-          </span>
-          <button
-            type="button"
-            onClick={() => setOverrideOpen(true)}
-            className="rounded-md border border-danger px-3 py-1 text-danger"
-          >
-            Override
-          </button>
+      {s.errorMessage ? (
+        <div className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-900">
+          <strong>Extraction failed.</strong> {s.errorMessage}
         </div>
       ) : null}
 
-      {error ? (
-        <p role="alert" className="mb-3 text-sm text-danger">
-          {error}
-        </p>
+      {s.status === 'awaiting-locale-confirmation' ? (
+        <div className="rounded-md border border-amber-300 bg-amber-50 p-4 text-sm text-amber-900">
+          <h2 className="text-base font-semibold">Date format ambiguous</h2>
+          <p className="mt-1">
+            We extracted dates from this PDF but couldn't tell whether the day or the month comes
+            first. Pick the right one before exports unblock.
+          </p>
+          <div className="mt-3 flex gap-2">
+            <button
+              type="button"
+              className="rounded-md bg-amber-700 px-3 py-1.5 text-sm font-medium text-white"
+            >
+              Use MDY (US — month/day/year)
+            </button>
+            <button
+              type="button"
+              className="rounded-md border border-amber-700 px-3 py-1.5 text-sm font-medium text-amber-900"
+            >
+              Use DMY (European — day/month/year)
+            </button>
+          </div>
+          <p className="mt-2 text-xs italic">
+            Confirmation endpoint lands when the LLM extractor reports an ambiguous source.
+          </p>
+        </div>
       ) : null}
 
-      <div className="overflow-hidden rounded-lg border border-surface-muted bg-white">
-        <table className="w-full text-sm">
-          <thead className="bg-surface-subtle text-left">
-            <tr>
-              <th className="px-3 py-2 font-medium">Date</th>
-              <th className="px-3 py-2 font-medium">Description</th>
-              <th className="px-3 py-2 font-medium">Type</th>
-              <th className="px-3 py-2 text-right font-medium">Amount</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-surface-muted">
-            {txs.map((t) => (
-              <Row key={t.id} tx={t} onSave={(patch) => update.mutateAsync({ id: t.id, patch })} />
-            ))}
-          </tbody>
-        </table>
-      </div>
-
-      {overrideOpen ? (
-        <div
-          role="dialog"
-          aria-modal
-          className="fixed inset-0 z-20 grid place-items-center bg-ink/40 px-4"
-          onMouseDown={(e) => {
-            if (e.target === e.currentTarget) setOverrideOpen(false);
-          }}
-        >
-          <form
-            className="w-full max-w-md space-y-3 rounded-xl bg-white p-6"
-            onSubmit={async (e) => {
-              e.preventDefault();
+      <div className="grid gap-4 lg:grid-cols-[1fr_18rem]">
+        <div className="space-y-4">
+          <TransactionGrid
+            txs={txs}
+            periodStart={s.periodStart}
+            periodEnd={s.periodEnd}
+            selectedId={selectedTx?.id ?? null}
+            onSelect={(t) => setSelectedTx(t)}
+            onSave={async (id, patch) => {
               try {
-                await override.mutateAsync(overrideReason);
-                setOverrideOpen(false);
-                setOverrideReason('');
+                await update.mutateAsync({ id, patch });
+                toast.success('Transaction updated');
               } catch (err) {
-                setError(err instanceof ApiError ? err.message : 'override failed');
+                toast.error(err instanceof ApiError ? err.message : 'update failed');
+                throw err;
               }
             }}
-          >
-            <h2 className="text-lg font-semibold">Override reconciliation</h2>
-            <p className="text-sm text-ink-muted">
-              The audit log captures this override with your name, the timestamp, and your reason.
-              Type at least 5 characters of justification.
-            </p>
-            <textarea
-              rows={3}
-              required
-              minLength={5}
-              className="w-full rounded-md border border-surface-muted px-3 py-2"
-              value={overrideReason}
-              onChange={(e) => setOverrideReason(e.target.value)}
-              placeholder="e.g. PDF skipped a mid-period adjustment that's documented in our records"
-            />
-            <div className="flex justify-end gap-2">
-              <button
-                type="button"
-                onClick={() => setOverrideOpen(false)}
-                className="rounded-md border border-surface-muted px-3 py-2 text-sm"
-              >
-                Cancel
-              </button>
-              <button
-                type="submit"
-                disabled={overrideReason.trim().length < 5 || override.isPending}
-                className="rounded-md bg-danger px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
-              >
-                Override
-              </button>
-            </div>
-          </form>
-        </div>
-      ) : null}
-    </section>
-  );
-}
-
-function ReconBadge({ status }: { status: string }) {
-  const color =
-    status === 'verified'
-      ? 'text-emerald-700 bg-emerald-50'
-      : status === 'overridden'
-        ? 'text-amber-700 bg-amber-50'
-        : status === 'discrepancy'
-          ? 'text-danger bg-danger/5'
-          : 'text-ink-muted bg-surface-subtle';
-  return <span className={`rounded px-1.5 py-0.5 ${color}`}>{status}</span>;
-}
-
-function Row({
-  tx,
-  onSave,
-}: {
-  tx: TransactionRow;
-  onSave: (patch: TransactionPatch) => Promise<unknown>;
-}) {
-  const [editing, setEditing] = useState(false);
-  const [desc, setDesc] = useState(tx.description);
-  // Edit amount as decimal dollars; convert at save time. Storing the
-  // raw cents string in the input was confusing — display showed
-  // "$-4.50" but the input showed "-450".
-  const [amountInput, setAmountInput] = useState(decimalString(BigInt(tx.amountCents)));
-  const [amountError, setAmountError] = useState<string | null>(null);
-  return (
-    <tr>
-      <td className="px-3 py-2 align-top">{tx.postedDate}</td>
-      <td className="px-3 py-2 align-top">
-        {editing ? (
-          <input
-            className="w-full rounded-md border border-surface-muted px-2 py-1"
-            value={desc}
-            onChange={(e) => setDesc(e.target.value)}
           />
-        ) : (
-          <button
-            type="button"
-            onClick={() => setEditing(true)}
-            className="text-left hover:underline"
-          >
-            {tx.description}
-            {tx.userEdited ? <span className="ml-1 text-xs text-ink-subtle">(edited)</span> : null}
-          </button>
-        )}
-      </td>
-      <td className="px-3 py-2 align-top">
-        <span className="rounded bg-surface-subtle px-1.5 py-0.5 text-xs">{tx.trntype}</span>
-      </td>
-      <td className="px-3 py-2 text-right align-top tabular-nums">
-        {editing ? (
-          <div>
-            <input
-              className="w-28 rounded-md border border-surface-muted px-2 py-1 text-right"
-              value={amountInput}
-              inputMode="decimal"
-              onChange={(e) => {
-                setAmountInput(e.target.value);
-                setAmountError(null);
-              }}
-            />
-            {amountError ? <p className="text-xs text-danger">{amountError}</p> : null}
-          </div>
-        ) : (
-          formatUsd(BigInt(tx.amountCents))
-        )}
-        {editing ? (
-          <span className="ml-2 inline-flex gap-1">
-            <button
-              type="button"
-              onClick={async () => {
-                let cents: bigint;
-                try {
-                  cents = parseDecimalToCents(amountInput);
-                } catch {
-                  setAmountError('Enter a number like -4.50 or 12.34');
-                  return;
-                }
-                if (cents === 0n) {
-                  setAmountError('amount must be non-zero');
-                  return;
-                }
-                await onSave({ description: desc, amount_cents: cents.toString() });
-                setEditing(false);
-              }}
-              className="rounded-md bg-accent px-2 py-1 text-xs text-accent-fg"
-            >
-              Save
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                setDesc(tx.description);
-                setAmountInput(decimalString(BigInt(tx.amountCents)));
-                setAmountError(null);
-                setEditing(false);
-              }}
-              className="rounded-md border border-surface-muted px-2 py-1 text-xs"
-            >
-              Cancel
-            </button>
-          </span>
-        ) : null}
-      </td>
-    </tr>
+
+          <PdfViewer
+            pdfHash={s.sourcePdfHash}
+            highlight={
+              selectedTx?.sourceBboxJson
+                ? {
+                    page: selectedTx.sourcePage,
+                    bbox: selectedTx.sourceBboxJson,
+                  }
+                : null
+            }
+          />
+        </div>
+        <ReconciliationWidget stmt={s} txCount={txs.length} txSumCents={txSumCents} />
+      </div>
+    </section>
   );
 }
