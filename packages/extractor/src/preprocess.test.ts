@@ -112,15 +112,19 @@ describe('extractTextLayer', () => {
 
 describe('rasterizePdf', () => {
   it('errors helpfully when pdftoppm is missing from PATH', async () => {
-    // Force ENOENT by pointing PATH at an empty directory. This works on
-    // both POSIX and Windows since execFile honors PATH for unqualified
-    // binaries.
+    // Force ENOENT by pointing PATH at empty. Note: we have to give
+    // rasterizePdf a path under a writable directory because it
+    // mkdir's <dirname>/pages BEFORE execing pdftoppm — using a
+    // non-writable parent (e.g. "/anywhere.pdf" resolving to "/pages"
+    // on Linux) fails with EACCES before pdftoppm is ever called.
+    const tmp = await mkdtemp(join(tmpdir(), 'rasterize-pathtest-'));
     const originalPath = process.env.PATH;
     process.env.PATH = '';
     try {
-      await expect(rasterizePdf('/anywhere.pdf')).rejects.toThrow(/pdftoppm not found/);
+      await expect(rasterizePdf(join(tmp, 'anywhere.pdf'))).rejects.toThrow(/pdftoppm not found/);
     } finally {
       process.env.PATH = originalPath;
+      await rm(tmp, { recursive: true, force: true });
     }
   });
 });
