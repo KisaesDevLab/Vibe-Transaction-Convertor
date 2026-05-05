@@ -16,8 +16,8 @@ typecheck → lint → test → build).
 | 7     | Companies CRUD (API + UI)                    | ✅     | `2e53a6a` | CRUD + 8 supertests + minimal UI    |
 | 8     | Accounts CRUD with Bank Picker               | ✅     | `387fe08` | masking + ABA + 7 supertests + UI   |
 | 9     | PDF Upload, Storage, Hashing                 | ✅     | `dc560c7` | sha256 + dedup + dropzone           |
-| 10    | PDF Pre-Processing & Routing                 | ✅     | _next_    | analyze + route + textLayer + bbox  |
-| 11    | GLM-OCR HTTP Client                          | ⏸      | —         |                                     |
+| 10    | PDF Pre-Processing & Routing                 | ✅     | `5c8b41b` | analyze + route + textLayer + bbox  |
+| 11    | GLM-OCR HTTP Client                          | ✅     | _next_    | retry+concurrency+cache, mocked     |
 | 12    | LLM Extractor — Schema, Prompts, Exemplars   | ⏸      | —         |                                     |
 | 13    | LLM Provider Abstraction (Local + Anthropic) | ⏸      | —         |                                     |
 | 14    | Multi-Account Auto-Split                     | ⏸      | —         |                                     |
