@@ -16,6 +16,7 @@ import { DiagnosticsPage } from './pages/DiagnosticsPage';
 import { EnginesAdminPage } from './pages/EnginesAdminPage';
 import { ExportPage } from './pages/ExportPage';
 import { GlobalStatementsPage } from './pages/GlobalStatementsPage';
+import { HelpPage } from './pages/HelpPage';
 import { LlmProviderAdminPage } from './pages/LlmProviderAdminPage';
 import { MaintenanceAdminPage } from './pages/MaintenanceAdminPage';
 import { StatementReviewPage } from './pages/StatementReviewPage';
@@ -42,6 +43,8 @@ export function App() {
                 <Route path="/statements/:statementId" element={<StatementReviewPage />} />
                 <Route path="/statements/:statementId/export" element={<ExportPage />} />
                 <Route path="/statements" element={<GlobalStatementsPage />} />
+                <Route path="/help" element={<HelpPage />} />
+                <Route path="/help/:slug" element={<HelpPage />} />
                 <Route
                   path="/admin"
                   element={

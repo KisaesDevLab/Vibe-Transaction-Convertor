@@ -16,6 +16,7 @@
     "@vibe-tx-converter/shared": "workspace:*",
     "clsx": "^2.1.1",
     "lucide-react": "^0.453.0",
+    "marked": "^18.0.3",
     "pdfjs-dist": "4.8.69",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
@@ -27,6 +28,7 @@
   },
   "devDependencies": {
     "@playwright/test": "^1.59.1",
+    "@tailwindcss/typography": "^0.5.19",
     "@types/react": "^18.3.3",
     "@types/react-dom": "^18.3.0",
     "@vitejs/plugin-react": "^4.3.1",

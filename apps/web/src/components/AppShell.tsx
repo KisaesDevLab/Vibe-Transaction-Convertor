@@ -66,6 +66,13 @@ export function AppShell({ children }: { children: ReactNode }) {
               </kbd>{' '}
               for shortcuts
             </span>
+            <Link
+              to="/help"
+              className="rounded-md border border-surface-muted px-3 py-1 text-sm hover:bg-surface-subtle"
+              title="In-app knowledge base"
+            >
+              Help
+            </Link>
             <button
               type="button"
               className="rounded-md border border-surface-muted px-3 py-1 text-sm hover:bg-surface-subtle"
