@@ -4,15 +4,17 @@ import { NavLink } from 'react-router-dom';
 import { useLogout, useMe } from '../hooks/useAuth';
 import { cn } from '../lib/cn';
 
-const NAV: Array<{ to: string; label: string }> = [
+const NAV: Array<{ to: string; label: string; adminOnly?: boolean }> = [
   { to: '/companies', label: 'Companies' },
   { to: '/statements', label: 'Statements' },
-  { to: '/admin', label: 'Admin' },
+  { to: '/admin', label: 'Admin', adminOnly: true },
 ];
 
 export function AppShell({ children }: { children: ReactNode }) {
   const me = useMe();
   const logout = useLogout();
+  const isAdmin = me.data?.role === 'admin';
+  const visibleNav = NAV.filter((item) => !item.adminOnly || isAdmin);
 
   return (
     <div className="grid min-h-screen grid-cols-[16rem_1fr] bg-surface text-ink">
@@ -22,7 +24,7 @@ export function AppShell({ children }: { children: ReactNode }) {
           <p className="text-xs text-ink-subtle">Transactions Converter</p>
         </div>
         <nav className="flex flex-col gap-1">
-          {NAV.map((item) => (
+          {visibleNav.map((item) => (
             <NavLink
               key={item.to}
               to={item.to}

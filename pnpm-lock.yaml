@@ -159,6 +159,9 @@ importers:
       drizzle-kit:
         specifier: ^0.24.2
         version: 0.24.2
+      pdf-lib:
+        specifier: ^1.17.1
+        version: 1.17.1
       pino-pretty:
         specifier: ^11.2.2
         version: 11.3.0

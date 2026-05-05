@@ -61,6 +61,18 @@ describe('OFX 2.x XML', () => {
     expect(out).toContain('A &amp; B &lt;Co&gt;');
     expect(out).toContain('safe&lt;text&gt;');
   });
+
+  it('collapses embedded newlines in name/memo (OCR multi-line tolerance)', () => {
+    const out = renderOfxXml({
+      ...STMT,
+      transactions: [
+        { ...STMT.transactions[0]!, name: 'PAYROLL\r\nDEPOSIT', memo: 'line1\nline2' },
+        STMT.transactions[1]!,
+      ],
+    });
+    expect(out).toContain('<NAME>PAYROLL DEPOSIT</NAME>');
+    expect(out).toContain('<MEMO>line1 line2</MEMO>');
+  });
 });
 
 describe('OFX 1.x SGML — QBO/QFX', () => {

@@ -20,8 +20,15 @@ const SGML_HEADER = [
 // (QuickBooks) accept either, but unclosed is canonical.
 const stag = (name: string, value: string | number): string => `<${name}>${value}`;
 
+// SGML record separation is `\r\n`. Any embedded newline inside a text
+// value (often present after OCR of multi-line descriptions) would split
+// the record and break parsers — collapse to single spaces first.
 const sgmlEscape = (s: string): string =>
-  s.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
+  s
+    .replaceAll(/[\r\n]+/g, ' ')
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;');
 
 const renderStmtTrnSgml = (trn: Stmt['transactions'][number]): string => {
   const lines: string[] = [

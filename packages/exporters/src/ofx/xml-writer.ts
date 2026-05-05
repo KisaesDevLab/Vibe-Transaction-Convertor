@@ -3,8 +3,15 @@
 
 import { accountTypeForBank, centsToDecimal, ofxDate, ofxDateTime, type Stmt } from './ast.js';
 
+// Defensively collapse newlines to spaces so OCR-derived multi-line
+// descriptions don't accidentally break record-oriented consumers that
+// don't normalize whitespace inside <NAME>/<MEMO>.
 const xmlEscape = (s: string): string =>
-  s.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
+  s
+    .replaceAll(/[\r\n]+/g, ' ')
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;');
 
 const tag = (name: string, content: string): string => `<${name}>${content}</${name}>`;
 

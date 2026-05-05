@@ -1,5 +1,6 @@
 import { Navigate, Route, Routes } from 'react-router-dom';
 
+import { AdminGate } from './components/AdminGate';
 import { AppShell } from './components/AppShell';
 import { AuthGate } from './components/AuthGate';
 import { AccountDetailPage } from './pages/AccountDetailPage';
@@ -30,8 +31,22 @@ export function App() {
                 <Route path="/accounts/:accountId/statements" element={<StatementsListPage />} />
                 <Route path="/statements/:statementId" element={<StatementReviewPage />} />
                 <Route path="/statements" element={<Placeholder title="Statements" />} />
-                <Route path="/admin" element={<AdminHomePage />} />
-                <Route path="/admin/audit" element={<AuditLogPage />} />
+                <Route
+                  path="/admin"
+                  element={
+                    <AdminGate>
+                      <AdminHomePage />
+                    </AdminGate>
+                  }
+                />
+                <Route
+                  path="/admin/audit"
+                  element={
+                    <AdminGate>
+                      <AuditLogPage />
+                    </AdminGate>
+                  }
+                />
                 <Route path="*" element={<Placeholder title="Not found" />} />
               </Routes>
             </AppShell>

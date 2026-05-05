@@ -19,6 +19,16 @@ export const useCompanies = (q?: string) =>
       api.get<{ rows: Company[]; total: number }>('/api/companies', q ? { q } : undefined),
   });
 
+// Single-company fetch — the list endpoint is paginated, so a deep link
+// to /companies/:id can't rely on the list cache when the company isn't
+// on the first page.
+export const useCompany = (id: string) =>
+  useQuery({
+    queryKey: [...companiesKey, 'one', id],
+    queryFn: () => api.get<Company>(`/api/companies/${id}`),
+    enabled: id.length > 0,
+  });
+
 export const useCreateCompany = () => {
   const qc = useQueryClient();
   return useMutation({

@@ -45,8 +45,11 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
   const stmtId = data.statementId;
   await setStatus(stmtId, 'preprocessing');
 
-  const buffer = await readFile(data.sourcePdfPath);
-  const analysis = await analyzePdfFromBuffer(buffer);
+  // pdfjs-dist takes ownership of the underlying ArrayBuffer per call,
+  // so we re-read the file before each pdfjs call rather than passing
+  // the same Buffer twice (which would detach the ArrayBuffer and
+  // throw "Cannot perform Construct on a detached ArrayBuffer").
+  const analysis = await analyzePdfFromBuffer(await readFile(data.sourcePdfPath));
   const method: ExtractionMethod = routePdf(analysis);
   await setStatus(stmtId, method === 'ocr' ? 'ocr' : 'extracting', {
     extractionMethod: method,
@@ -56,7 +59,7 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
   let markdown: string;
 
   if (method === 'text') {
-    const pages = await extractTextLayerFromBuffer(buffer);
+    const pages = await extractTextLayerFromBuffer(await readFile(data.sourcePdfPath));
     markdown = pages.map((p) => `# Page ${p.index + 1}\n\n${p.text}`).join('\n\n');
     // Multi-account detection runs only on the text-layer path here;
     // for OCR the same call lands in the future after text is recovered.
@@ -142,11 +145,13 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
       reconciled.deltaCents,
     );
     if (candidate) {
-      // Apply the repair to effectiveTxs (preserving the rest of the
-      // metadata) — drop-duplicate removes a row, sign-flip mutates one.
+      // Compute the repaired list in a temp variable; only commit it
+      // back to effectiveTxs if the second reconcile actually verifies.
+      // Otherwise we'd corrupt the user's row data with no reward.
       const repairedAmounts = candidate.transactions;
+      let candidateTxs: typeof effectiveTxs;
       if (repairedAmounts.length === effectiveTxs.length) {
-        effectiveTxs = effectiveTxs.map((t, i) => ({
+        candidateTxs = effectiveTxs.map((t, i) => ({
           ...t,
           amountCents: repairedAmounts[i]!.amountCents,
         }));
@@ -164,19 +169,26 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
             r += 1;
           }
         }
-        effectiveTxs = out;
+        candidateTxs = out;
       }
-      reconciled = reconcileGoldenRule({
+      const verifyAfterRepair = reconcileGoldenRule({
         openingBalanceCents: openingCents,
         closingBalanceCents: closingCents,
-        transactions: effectiveTxs.map((t) => ({ amountCents: t.amountCents })),
+        transactions: candidateTxs.map((t) => ({ amountCents: t.amountCents })),
         periodStart: result.data.period_start,
         periodEnd: result.data.period_end,
-        transactionDates: effectiveTxs.map((t) => t.postedDate),
+        transactionDates: candidateTxs.map((t) => t.postedDate),
       });
-      if (reconciled.status === 'verified') {
+      if (verifyAfterRepair.status === 'verified') {
+        effectiveTxs = candidateTxs;
+        reconciled = verifyAfterRepair;
         repairApplied = candidate.fixDescription;
         logger.info({ stmtId, fix: candidate.fixDescription }, 'reconcile repair applied');
+      } else {
+        logger.info(
+          { stmtId, fix: candidate.fixDescription },
+          'reconcile repair candidate rejected — still discrepant after fix',
+        );
       }
     }
   }

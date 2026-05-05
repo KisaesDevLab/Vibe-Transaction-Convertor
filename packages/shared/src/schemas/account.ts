@@ -33,6 +33,17 @@ export const AccountCreate = z
         message: 'credit-card accounts must not carry a routing number',
       });
     }
+    // Reject dashes-only account numbers — the regex above tolerates
+    // both digits and dashes for grouping but at least 4 digits must
+    // be present.
+    const digitCount = val.accountNumber.replace(/\D/g, '').length;
+    if (digitCount < 4) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['accountNumber'],
+        message: 'account_number must contain at least 4 digits',
+      });
+    }
   });
 export type AccountCreate = z.infer<typeof AccountCreate>;
 

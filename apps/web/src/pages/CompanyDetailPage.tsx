@@ -5,19 +5,19 @@ import { ACCOUNT_TYPE_LABELS } from '@vibe-tx-converter/shared';
 
 import { AccountFormDialog } from '../components/AccountFormDialog';
 import { useAccounts, useDeleteAccount } from '../hooks/useAccounts';
-import { useCompanies } from '../hooks/useCompanies';
+import { useCompany } from '../hooks/useCompanies';
 import { ApiError } from '../lib/api';
 
 export function CompanyDetailPage() {
   const { companyId = '' } = useParams();
-  const list = useCompanies();
-  const company = list.data?.rows.find((c) => c.id === companyId);
+  const companyQ = useCompany(companyId);
+  const company = companyQ.data;
   const accounts = useAccounts(companyId);
   const del = useDeleteAccount(companyId);
   const [open, setOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  if (list.isPending || accounts.isPending) {
+  if (companyQ.isPending || accounts.isPending) {
     return <p className="text-sm text-ink-muted">Loading…</p>;
   }
   if (!company) {
