@@ -19,10 +19,10 @@ just whether the happy path runs. Acceptance gauntlet: `pnpm acceptance`
 | 9     | PDF Upload, Storage, Hashing              | ⚠      | `dc560c7`   | no ZIP batch; no MIME sniffing; no .tmp 1h cleanup             |
 | 10    | PDF Pre-Processing & Routing              | ⚠      | `5c8b41b`   | no fixture suite; no per-page timeouts; no force-OCR flag      |
 | 11    | GLM-OCR HTTP Client                       | ⚠      | `c76d8cf`   | in-memory cache (spec: Redis); no version probe; no breaker    |
-| 12    | LLM Extractor                             | ⚠      | `ebecc34`   | 1 of 10 exemplars; flat schema; no token budget                |
-| 13    | LLM Provider Abstraction                  | ⚠      | `4abbdaf`   | no 60-s cache, no withValidationRepair, no @anthropic-ai/sdk   |
+| 12    | LLM Extractor                             | ⚠      | `<next>`    | 4 of 10 exemplars; token budget; cleanup; flat schema remains  |
+| 13    | LLM Provider Abstraction                  | ⚠      | `<next>`    | dateFormatOverride wired; no 60-s cache; no @anthropic-ai/sdk  |
 | 14    | Multi-Account Auto-Split                  | ⚠      | `9e34173`   | detection only — never splits into multiple statements         |
-| 15    | BullMQ Extraction Pipeline                | ⚠      | `56e80e0`   | no SSE progress; no cancel; no awaiting-locale gate            |
+| 15    | BullMQ Extraction Pipeline                | ⚠      | `<next>`    | locale-gate now wired; no SSE progress; no cancel              |
 | 16    | Golden Rule Reconciler & Repair Pass      | ⚠      | `9e34173`   | repair is heuristic (spec: LLM 2nd pass); no findSuspectRows   |
 | 17    | TRNTYPE Inference + FITID Generator       | ⚠      | `702449e`   | rule list + isCreditCard wired; no docs/extraction.md          |
 | 18    | Statement & Transaction Review UI         | ⚠      | `d22cccd`   | no global /statements; no full-detail header                   |
@@ -50,7 +50,7 @@ The **core happy path works end-to-end**: register first admin → create
 company → add account with bank-picker → upload PDF → BullMQ worker
 analyzes / extracts / reconciles → review grid with inline edits and
 PDF viewer → export to CSV/OFX/QBO/QFX → audit-log every mutation. The
-acceptance suite is green (120 unit + supertests pass, build clean).
+acceptance suite is green (125 unit + supertests pass, build clean).
 
 What's missing is **breadth, polish and several spec invariants**:
 

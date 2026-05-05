@@ -30,7 +30,47 @@ Hard rules:
    (e.g. ATM Withdrawal -> "ATM"). Otherwise omit.
 8. confidence reflects your certainty in the row (0.0 - 1.0).`;
 
-export const userPromptFor = (markdown: string): string =>
-  `Below is the OCR/text-layer markdown for one statement. Emit JSON\n` +
-  `that conforms to the schema. Do not add prose around the JSON.\n\n` +
-  `=== STATEMENT MARKDOWN ===\n${markdown}\n=== END ===`;
+export interface UserPromptOptions {
+  // Operator-confirmed date format. When set, the LLM is told to interpret
+  // every date in the markdown using this format and emit ISO 8601. Used
+  // when a prior extraction returned source_date_format='AMBIGUOUS' and
+  // the operator picked one. Phase 15 item 4b.
+  dateFormatOverride?: 'MDY' | 'DMY' | 'YMD' | undefined;
+  // Operator-confirmed account-type hint (CHECKING / SAVINGS /
+  // CREDITCARD / etc.). Currently unused; reserved for later phases.
+  accountTypeHint?: string | undefined;
+}
+
+export const userPromptFor = (markdown: string, opts: UserPromptOptions = {}): string => {
+  const overrideLine = opts.dateFormatOverride
+    ? `\nOperator override: interpret every date in the markdown using ` +
+      `the **${opts.dateFormatOverride}** format. Set source_date_format ` +
+      `to "${opts.dateFormatOverride}" with confidence 1.0.\n`
+    : '';
+  return (
+    `Below is the OCR/text-layer markdown for one statement. Emit JSON\n` +
+    `that conforms to the schema. Do not add prose around the JSON.${overrideLine}\n\n` +
+    `=== STATEMENT MARKDOWN ===\n${markdown}\n=== END ===`
+  );
+};
+
+// Phase 12 item 11: rough token estimator (4 chars per token, conservative)
+// for prompt-budget enforcement. We don't ship a tokenizer (cl100k_base
+// pulls in 1MB+); the 4:1 heuristic is within ~10% of the real count for
+// English text and over-estimates for digit-heavy bank-statement OCR,
+// which is the safe direction.
+export const estimateTokens = (text: string): number => Math.ceil(text.length / 4);
+
+// Phase 12 item 12: light header/footer cleanup pass before the LLM sees
+// the markdown. Strips obvious banking-statement noise that wastes tokens
+// without affecting extraction:
+//   * "Page X of Y" markers (we re-add # Page N headers ourselves)
+//   * Bare phone numbers and 1-800 customer service lines
+//   * Trailing whitespace and >2 consecutive blank lines
+export const cleanupMarkdown = (markdown: string): string =>
+  markdown
+    .replace(/^[ \t]*page\s+\d+\s+of\s+\d+[ \t]*$/gim, '')
+    .replace(/^[ \t]*(?:1[-. ]?)?(?:\(?\d{3}\)?[-. ]?\d{3}[-. ]?\d{4})[ \t]*$/gim, '')
+    .replace(/^[ \t]*customer\s+service:?\s*1[-. ]?\d{3}[-. ]?\d{3}[-. ]?\d{4}[ \t]*$/gim, '')
+    .replace(/[ \t]+$/gm, '')
+    .replace(/\n{3,}/g, '\n\n');

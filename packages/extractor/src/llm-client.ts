@@ -2,8 +2,38 @@
 // shared contract — downstream code never branches on provider.
 
 import { schemas } from '@vibe-tx-converter/shared';
-import { SYSTEM_PROMPT, userPromptFor } from './prompts/extract.js';
+import {
+  SYSTEM_PROMPT,
+  cleanupMarkdown,
+  estimateTokens,
+  userPromptFor,
+  type UserPromptOptions,
+} from './prompts/extract.js';
 import { exemplarsAsMessages } from './exemplars.js';
+
+// Phase 12 item 11: prompt budget. The Vibe Gateway hosts Qwen3-8B with a
+// 32K context, which after exemplars + system prompt + completion reserve
+// leaves ~24K input tokens for the markdown. Operators can shrink this via
+// LLM_MAX_PROMPT_TOKENS for cheaper providers.
+const PROMPT_BUDGET_RESERVE = 4_000;
+const defaultPromptBudget = (): number => Number(process.env.LLM_MAX_PROMPT_TOKENS ?? 24_000);
+
+// Cleans the markdown and truncates it to fit the prompt budget. Returns
+// the cleaned text plus the token count for telemetry.
+export const prepareMarkdown = (
+  raw: string,
+  budget: number = defaultPromptBudget(),
+): { text: string; tokens: number; truncated: boolean } => {
+  const cleaned = cleanupMarkdown(raw);
+  const allowed = Math.max(1_000, budget - PROMPT_BUDGET_RESERVE);
+  const tokens = estimateTokens(cleaned);
+  if (tokens <= allowed) return { text: cleaned, tokens, truncated: false };
+  // Truncate from the end — opening balance + early-period rows are higher
+  // priority than the trailing footer / disclosures.
+  const charBudget = allowed * 4;
+  const truncated = cleaned.slice(0, charBudget);
+  return { text: truncated, tokens: estimateTokens(truncated), truncated: true };
+};
 
 const { ExtractionResult } = schemas.extraction;
 type ExtractionResult = schemas.extraction.ExtractionResult;
@@ -22,11 +52,29 @@ export interface ExtractResult {
   rawJson: string;
 }
 
+export interface ExtractOptions extends UserPromptOptions {
+  schema?: object;
+}
+
 export interface LlmProvider {
   readonly id: 'local' | 'anthropic';
-  extract(markdown: string, schema?: object): Promise<ExtractResult>;
+  extract(markdown: string, opts?: ExtractOptions | object): Promise<ExtractResult>;
   health(): Promise<{ ok: boolean; detail?: string }>;
 }
+
+// Helper — second arg used to be a bare schema object; some callers still
+// pass that shape. Accept both, coerce to ExtractOptions.
+const coerceOpts = (arg?: ExtractOptions | object): ExtractOptions => {
+  if (!arg) return {};
+  // Heuristic: a JSON Schema has a `type` or `$schema` or `properties` key.
+  // ExtractOptions has dateFormatOverride / schema / accountTypeHint.
+  const a = arg as Record<string, unknown>;
+  const isSchema = 'type' in a || '$schema' in a || 'properties' in a;
+  if (isSchema && !('schema' in a) && !('dateFormatOverride' in a) && !('accountTypeHint' in a)) {
+    return { schema: arg };
+  }
+  return arg as ExtractOptions;
+};
 
 // ---- Local Vibe LLM Gateway (OpenAI-compatible) ----------------------------
 
@@ -67,12 +115,17 @@ export class LocalGatewayProvider implements LlmProvider {
     }
   }
 
-  async extract(markdown: string, schema?: object): Promise<ExtractResult> {
+  async extract(markdown: string, arg?: ExtractOptions | object): Promise<ExtractResult> {
     if (!this.baseUrl) throw new Error('LLM_GATEWAY_URL not set');
+    const opts = coerceOpts(arg);
+    const { text } = prepareMarkdown(markdown);
+    const promptOpts: UserPromptOptions = {};
+    if (opts.dateFormatOverride) promptOpts.dateFormatOverride = opts.dateFormatOverride;
+    if (opts.accountTypeHint) promptOpts.accountTypeHint = opts.accountTypeHint;
     const messages = [
       { role: 'system', content: SYSTEM_PROMPT },
       ...exemplarsAsMessages(),
-      { role: 'user', content: userPromptFor(markdown) },
+      { role: 'user', content: userPromptFor(text, promptOpts) },
     ];
     const ctl = new AbortController();
     const t = setTimeout(() => ctl.abort(), this.timeoutMs);
@@ -84,8 +137,8 @@ export class LocalGatewayProvider implements LlmProvider {
         body: JSON.stringify({
           model: this.modelId,
           messages,
-          response_format: schema
-            ? { type: 'json_schema', json_schema: { name: 'extraction', schema } }
+          response_format: opts.schema
+            ? { type: 'json_schema', json_schema: { name: 'extraction', schema: opts.schema } }
             : { type: 'json_object' },
           temperature: 0,
           max_tokens: Number(process.env.LLM_MAX_COMPLETION_TOKENS ?? 6000),
@@ -181,11 +234,16 @@ export class AnthropicProvider implements LlmProvider {
       : { ok: false, detail: 'ANTHROPIC_API_KEY not set' };
   }
 
-  async extract(markdown: string, schema?: object): Promise<ExtractResult> {
+  async extract(markdown: string, arg?: ExtractOptions | object): Promise<ExtractResult> {
+    const opts = coerceOpts(arg);
+    const { text } = prepareMarkdown(markdown);
+    const promptOpts: UserPromptOptions = {};
+    if (opts.dateFormatOverride) promptOpts.dateFormatOverride = opts.dateFormatOverride;
+    if (opts.accountTypeHint) promptOpts.accountTypeHint = opts.accountTypeHint;
     const tool = {
       name: 'emit_extraction',
       description: 'Emit the structured statement extraction.',
-      input_schema: schema ?? schemas.extraction.ExtractionJsonSchema,
+      input_schema: opts.schema ?? schemas.extraction.ExtractionJsonSchema,
     };
     const ctl = new AbortController();
     const t = setTimeout(() => ctl.abort(), this.timeoutMs);
@@ -204,7 +262,10 @@ export class AnthropicProvider implements LlmProvider {
           max_tokens: Number(process.env.LLM_MAX_COMPLETION_TOKENS ?? 6000),
           tools: [tool],
           tool_choice: { type: 'tool', name: 'emit_extraction' },
-          messages: [...exemplarsAsMessages(1), { role: 'user', content: userPromptFor(markdown) }],
+          messages: [
+            ...exemplarsAsMessages(1),
+            { role: 'user', content: userPromptFor(text, promptOpts) },
+          ],
         }),
         signal: ctl.signal,
       });

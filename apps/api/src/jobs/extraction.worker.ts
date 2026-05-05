@@ -50,6 +50,18 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
   const acctRows = await db.select().from(accounts).where(eq(accounts.id, data.accountId));
   const isCreditCard = acctRows[0]?.accountType === 'CREDITCARD';
 
+  // Phase 15 item 4b: if the operator already confirmed a date format
+  // (after a previous AMBIGUOUS extraction), pass that through to the
+  // LLM so it interprets the statement consistently.
+  const stmtRows = await db.select().from(statements).where(eq(statements.id, stmtId));
+  const dateFormatOverride =
+    stmtRows[0]?.sourceDateFormatUserConfirmed === true &&
+    (stmtRows[0]?.sourceDateFormat === 'MDY' ||
+      stmtRows[0]?.sourceDateFormat === 'DMY' ||
+      stmtRows[0]?.sourceDateFormat === 'YMD')
+      ? stmtRows[0].sourceDateFormat
+      : undefined;
+
   // pdfjs-dist takes ownership of the underlying ArrayBuffer per call,
   // so we re-read the file before each pdfjs call rather than passing
   // the same Buffer twice (which would detach the ArrayBuffer and
@@ -95,7 +107,38 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
   // gets the same schema via its tool_use input_schema (ADR-020).
   await setStatus(stmtId, 'extracting');
   const provider = await buildProvider(db);
-  const result = await provider.extract(markdown, schemas.extraction.ExtractionJsonSchema);
+  const result = await provider.extract(markdown, {
+    schema: schemas.extraction.ExtractionJsonSchema,
+    ...(dateFormatOverride ? { dateFormatOverride } : {}),
+  });
+
+  // Phase 15 item 4a: when the LLM returns AMBIGUOUS, halt and ask the
+  // operator. The /confirm-date-format endpoint flips the status back to
+  // 'uploaded' and re-enqueues with the operator-chosen format. Skip
+  // this gate when the operator has already confirmed (the worker is
+  // running with dateFormatOverride set).
+  if (!dateFormatOverride && result.data.source_date_format === 'AMBIGUOUS') {
+    await db
+      .update(statements)
+      .set({
+        status: 'awaiting-locale-confirmation',
+        sourceDateFormat: 'AMBIGUOUS',
+        sourceDateFormatConfidence: result.data.source_date_format_confidence,
+        llmProvider: provider.id,
+        llmInputTokens: result.telemetry.inputTokens,
+        llmOutputTokens: result.telemetry.outputTokens,
+        llmCallCount: 1,
+        llmCostMicros: result.telemetry.costMicros,
+        llmModelVersion: result.telemetry.model,
+        updatedAt: sql`now()`,
+      })
+      .where(eq(statements.id, stmtId));
+    logger.info(
+      { stmtId },
+      'extraction halted: ambiguous source date format — awaiting operator confirmation',
+    );
+    return;
+  }
 
   await db
     .update(statements)
