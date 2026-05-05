@@ -9,6 +9,7 @@ import { findByHash, ingestUpload, streamSourcePdf } from '../services/statement
 import { checkFreeSpace, isPdfMagicBytes, sha256Of, storePdf } from '../services/upload-storage.js';
 import { eq } from 'drizzle-orm';
 import { accounts, statements } from '../db/schema.js';
+import { enqueueExtraction } from '../jobs/queues.js';
 
 const MAX_PAGES = 200;
 
@@ -128,6 +129,19 @@ export const uploadsByAccountRouter = (): Router => {
             deduplicated: result.deduplicated,
             status: result.statement.status,
           });
+
+          if (process.env.REDIS_URL) {
+            try {
+              await enqueueExtraction({
+                statementId: result.statement.id,
+                accountId,
+                sourcePdfHash: stored.hash,
+                sourcePdfPath: stored.path,
+              });
+            } catch (err) {
+              logger.warn({ err }, 'failed to enqueue extraction (continuing)');
+            }
+          }
         } catch (err) {
           if (err instanceof ConflictError) {
             errors.push({ filename: f.originalname, error: err.message });

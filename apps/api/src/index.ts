@@ -1,4 +1,5 @@
 import { db } from './db/client.js';
+import { startWorkers } from './jobs/index.js';
 import { logger } from './lib/logger.js';
 import { seedFidirIfEmpty } from './services/fidir-seeder.js';
 import { createApp } from './server.js';
@@ -15,6 +16,7 @@ const main = async (): Promise<void> => {
   } else {
     logger.warn('DATABASE_URL not set; skipping FIDIR bootstrap seed');
   }
+  startWorkers();
   const app = createApp();
   app.listen(port, () => {
     logger.info({ port }, 'api listening');
