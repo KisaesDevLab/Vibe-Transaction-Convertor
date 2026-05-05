@@ -69,10 +69,10 @@ export function CompanyDetailPage() {
           {accounts.data?.map((a) => (
             <li key={a.id} className="flex items-center justify-between gap-3 px-4 py-3">
               <div>
-                <p className="font-medium">
+                <Link to={`/accounts/${a.id}`} className="font-medium hover:underline">
                   {a.nickname}{' '}
                   <span className="font-normal text-ink-muted">{a.accountNumberMasked}</span>
-                </p>
+                </Link>
                 <p className="text-xs text-ink-subtle">
                   {a.financialInstitution} · BID {a.intuBid} · {ACCOUNT_TYPE_LABELS[a.accountType]}{' '}
                   · {a.defaultCsvTemplate}

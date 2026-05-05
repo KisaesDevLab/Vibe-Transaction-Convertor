@@ -2,6 +2,7 @@ import { Navigate, Route, Routes } from 'react-router-dom';
 
 import { AppShell } from './components/AppShell';
 import { AuthGate } from './components/AuthGate';
+import { AccountDetailPage } from './pages/AccountDetailPage';
 import { CompaniesPage } from './pages/CompaniesPage';
 import { CompanyDetailPage } from './pages/CompanyDetailPage';
 import { LoginPage } from './pages/LoginPage';
@@ -21,6 +22,7 @@ export function App() {
                 <Route path="/" element={<Navigate to="/companies" replace />} />
                 <Route path="/companies" element={<CompaniesPage />} />
                 <Route path="/companies/:companyId" element={<CompanyDetailPage />} />
+                <Route path="/accounts/:accountId" element={<AccountDetailPage />} />
                 <Route path="/statements" element={<Placeholder title="Statements" />} />
                 <Route path="/admin" element={<Placeholder title="Admin" />} />
                 <Route path="*" element={<Placeholder title="Not found" />} />

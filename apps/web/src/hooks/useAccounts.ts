@@ -59,3 +59,42 @@ export const useDeleteAccount = (companyId: string) => {
     onSuccess: () => qc.invalidateQueries({ queryKey: accountsKey(companyId) }),
   });
 };
+
+export interface UploadResult {
+  statements: Array<{
+    filename: string;
+    hash: string;
+    pages: number;
+    bytes: number;
+    statementId: string;
+    deduplicated: boolean;
+    status: string;
+  }>;
+  errors: Array<{ filename: string; error: string }>;
+}
+
+const readCsrfFromCookie = (): string =>
+  document.cookie
+    .split('; ')
+    .find((c) => c.startsWith('vibetc_csrf='))
+    ?.split('=')[1] ?? '';
+
+export const useUpload = (accountId: string) => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (files: File[]): Promise<UploadResult> => {
+      const form = new FormData();
+      for (const f of files) form.append('files', f);
+      const res = await fetch(`/api/accounts/${accountId}/uploads`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'x-csrf-token': readCsrfFromCookie() },
+        body: form,
+      });
+      const body = (await res.json().catch(() => ({}))) as UploadResult & { message?: string };
+      if (!res.ok) throw new Error(body.message ?? `upload failed (${res.status})`);
+      return body;
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['statements', accountId] }),
+  });
+};

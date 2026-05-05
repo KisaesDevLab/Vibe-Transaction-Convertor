@@ -101,6 +101,8 @@ export default [
         URLSearchParams: 'readonly',
         FormData: 'readonly',
         File: 'readonly',
+        FileList: 'readonly',
+        FileReader: 'readonly',
         Blob: 'readonly',
         HTMLElement: 'readonly',
         HTMLInputElement: 'readonly',

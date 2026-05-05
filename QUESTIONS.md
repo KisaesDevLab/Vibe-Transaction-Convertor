@@ -57,3 +57,19 @@ and format before production. If Intuit's format diverges from the
 parser-friendly form, write a one-shot converter at
 `apps/api/src/scripts/fidir-convert.ts`. Mirror cadence: quarterly per
 plan.
+
+### Q-003 — ZIP batch upload deferred (Phase 9, item 4) — 2026-05-04
+
+**Question:** BuildPlan §9 item 4 says the upload route accepts up to
+100 PDFs **and/or a single ZIP** that gets unzipped server-side.
+Implementing ZIP needs an additional dep (yauzl or adm-zip) plus
+in-memory size accounting (a malicious zip could expand to 10× and
+exhaust the buffer limit), and adds a non-trivial test surface.
+
+**Assumption made:** Phase 9 supports only multi-PDF multipart upload.
+The route currently rejects ZIP files with the same magic-byte gate as
+any other non-PDF (the entry's first 5 bytes are `PK..` not `%PDF-`).
+
+**Where to revisit:** When the operator first asks to drop a ZIP. Add
+`yauzl` (smallest, streaming), enforce a per-entry size cap, and write
+a supertest with a real ZIP fixture in `tests/fixtures/`.

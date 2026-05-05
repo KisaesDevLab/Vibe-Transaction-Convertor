@@ -16,6 +16,7 @@ import { authRouter, usersRouter } from './routes/auth.js';
 import { companiesRouter } from './routes/companies.js';
 import { fidirRouter } from './routes/fidir.js';
 import { healthRouter } from './routes/health.js';
+import { uploadsByAccountRouter, uploadsRawRouter } from './routes/uploads.js';
 import { versionRouter } from './routes/version.js';
 
 export const createApp = (): Express => {
@@ -79,6 +80,8 @@ export const createApp = (): Express => {
   app.use('/api/companies', requireAuth, companiesRouter());
   app.use('/api/companies/:companyId/accounts', requireAuth, accountsByCompanyRouter());
   app.use('/api/accounts', requireAuth, accountsRouter());
+  app.use('/api/accounts/:accountId/uploads', requireAuth, uploadsByAccountRouter());
+  app.use('/api/uploads', requireAuth, uploadsRawRouter());
 
   app.use(notFoundHandler);
   app.use(errorHandler);
