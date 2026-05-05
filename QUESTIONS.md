@@ -73,3 +73,23 @@ any other non-PDF (the entry's first 5 bytes are `PK..` not `%PDF-`).
 **Where to revisit:** When the operator first asks to drop a ZIP. Add
 `yauzl` (smallest, streaming), enforce a per-entry size cap, and write
 a supertest with a real ZIP fixture in `tests/fixtures/`.
+
+### Q-004 — Rasterization mechanism: pdftoppm vs pdfjs+canvas (Phase 10, items 2 + 6) — 2026-05-04
+
+**Question:** BuildPlan §10 item 2 prefers `pdftoppm` (poppler-utils,
+shell-out) for raster, but the user's dev box is Windows where poppler
+is not installed by default. The pure-JS alternative is
+`pdfjs-dist` + `canvas`, which adds a native build step (sharp/cairo)
+that itself often fails on Windows.
+
+**Assumption made:** `rasterizePdf()` is exported from
+`packages/extractor/src/preprocess.ts` with the right contract but
+throws `not implemented yet — wired up by Phase 11`. The text-layer
+fast path (Phase 10's main deliverable) does not need rasterization.
+Phase 11 (GLM-OCR HTTP client) wires the actual implementation —
+likely shelling out to `pdftoppm` in the API container's Dockerfile,
+with the operator-guide doc instructing local installs to add poppler.
+
+**Where to revisit:** Phase 11 implementation. The API container's
+Dockerfile (Phase 28) MUST add `poppler-utils`. The `/api/health/ready`
+poppler-version probe (item 13) lands in Phase 11.

@@ -16,6 +16,10 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@vibe-tx-converter/shared": "workspace:*"
+    "@vibe-tx-converter/shared": "workspace:*",
+    "pdfjs-dist": "^4.7.76"
+  },
+  "devDependencies": {
+    "pdf-lib": "^1.17.1"
   }
 }
