@@ -187,11 +187,18 @@ export function AdminHomePage() {
               />
               <input
                 type="text"
-                placeholder="Type: I UNDERSTAND OCR TEXT EGRESSES"
+                aria-describedby="warning-phrase-hint"
+                placeholder="Type the phrase below exactly"
                 className="mt-2 w-full rounded-md border border-surface-muted px-3 py-2"
                 value={warningTyped}
                 onChange={(e) => setWarningTyped(e.target.value)}
               />
+              <p id="warning-phrase-hint" className="mt-1 text-xs text-ink-subtle">
+                Required phrase:{' '}
+                <code className="rounded bg-surface-subtle px-1 font-mono">
+                  I UNDERSTAND OCR TEXT EGRESSES
+                </code>
+              </p>
               {error ? (
                 <p role="alert" className="mt-2 text-sm text-danger">
                   {error}
