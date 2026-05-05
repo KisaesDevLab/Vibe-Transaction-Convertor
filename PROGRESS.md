@@ -92,6 +92,6 @@ shell-out.
   tests for both LLM providers, "no API key in logs" regression test,
   "no PDF/page-image bytes in payload" outbound assertion.
 - ~~Phase 16 LLM-driven repair.~~ Landed 2026-05-05 in `ec3de5c`.
-- **Phase 24 ExportPage** — full preview + per-format checkbox UI.
+- ~~Phase 24 ExportPage.~~ Landed 2026-05-05 in `11a57ad`.
 - **Phase 26 LlmProviderAdminPage** — typed-confirm phrase, model
   dropdown, monthly cost cap, test-connection.
