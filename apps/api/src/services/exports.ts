@@ -20,6 +20,31 @@ import { ConflictError, NotFoundError } from '../lib/errors.js';
 import type { Account, Statement, Transaction, User } from '../db/types.js';
 import { writeAudit } from './audit.js';
 
+// Filenames flow through Content-Disposition headers, which Node's
+// http module rejects for any byte > 0x7E (ERR_INVALID_CHAR). Bank/FI
+// names from the FIDIR mirror can carry curly quotes, en/em-dashes,
+// or accented letters, so strip non-ASCII and a few other header- /
+// filesystem-hostile chars at filename construction time.
+const sanitizeFilenamePart = (s: string): string =>
+  s
+    .normalize('NFKD')
+
+    .replace(/[^\x20-\x7E]/g, '')
+    .replace(/[\\/:*?"<>|\r\n]/g, '_')
+    .replace(/\s+/g, '-')
+    .replace(/_+/g, '_')
+    .replace(/^[._-]+|[._-]+$/g, '') || 'export';
+
+const buildExportBaseName = (account: Account, stmt: Statement): string => {
+  const last4 = account.accountNumberLast4 ?? account.accountNumber.slice(-4);
+  return [
+    sanitizeFilenamePart(account.financialInstitution),
+    sanitizeFilenamePart(last4),
+    sanitizeFilenamePart(stmt.periodStart ?? 'unknown'),
+    sanitizeFilenamePart(stmt.periodEnd ?? 'unknown'),
+  ].join('_');
+};
+
 // Phase 24 #7/#21: export bytes are persisted under
 // $DATA_DIR/exports/{statementId}/{exportJobId}.{ext} so re-downloads
 // don't re-render and the maintenance worker can sweep stale files
@@ -125,9 +150,7 @@ export const renderExport = async (
     throw new ConflictError('reconciliation discrepancy — export requires override');
   }
 
-  const baseName = `${account.financialInstitution.replace(/\s+/g, '-')}_${
-    account.accountNumberLast4 ?? account.accountNumber.slice(-4)
-  }_${stmt.periodStart ?? 'unknown'}_${stmt.periodEnd ?? 'unknown'}`;
+  const baseName = buildExportBaseName(account, stmt);
 
   const overridden = stmt.reconciliationStatus === 'overridden';
   const overrideNote = overridden
@@ -213,9 +236,7 @@ export const renderExportSlices = async (
   if (txs.length <= QBO_SPLIT_THRESHOLD) {
     return [await renderExport(db, statementId, format, opts)];
   }
-  const baseName = `${account.financialInstitution.replace(/\s+/g, '-')}_${
-    account.accountNumberLast4 ?? account.accountNumber.slice(-4)
-  }_${stmt.periodStart ?? 'unknown'}_${stmt.periodEnd ?? 'unknown'}`;
+  const baseName = buildExportBaseName(account, stmt);
   const slices: RenderedExport[] = [];
   for (let i = 0; i < txs.length; i += QBO_SPLIT_THRESHOLD) {
     const chunkTxs = txs.slice(i, i + QBO_SPLIT_THRESHOLD);
