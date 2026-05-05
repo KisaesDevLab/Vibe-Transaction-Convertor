@@ -39,14 +39,19 @@ describe('ocrPdfPages', () => {
   });
 
   it('caches results by image hash', async () => {
-    let count = 0;
-    const fetcher = buildFetcher(async () => {
-      count += 1;
+    // Count only /ocr hits — /version probes are also fetched and cached
+    // separately (Phase 11 #6) but aren't on the per-image hot path.
+    let ocrCount = 0;
+    const fetcher = buildFetcher(async ({ url }) => {
+      if (url.endsWith('/version')) {
+        return okResponse({ version: 'glm-ocr/test' });
+      }
+      ocrCount += 1;
       return okResponse({ pages: [{ index: 0, markdown: 'cached', confidence: 1 }] });
     });
     const buf = Buffer.from('same-bytes');
     await ocrPdfPages([buf, buf, buf], { baseUrl: 'http://x', fetcher, concurrency: 1 });
-    expect(count).toBe(1);
+    expect(ocrCount).toBe(1);
   });
 
   it('retries on 5xx and eventually succeeds', async () => {

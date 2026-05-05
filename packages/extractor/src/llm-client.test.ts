@@ -6,12 +6,11 @@ import {
 } from './llm-client.js';
 
 const SAMPLE = {
-  period_start: '2026-03-01',
-  period_end: '2026-03-31',
-  opening_balance_cents: 0,
-  closing_balance_cents: 0,
-  source_date_format: 'MDY',
-  source_date_format_confidence: 0.9,
+  account: { masked_number: '1234', type_hint: 'CHECKING' },
+  institution: { name: 'Acme Bank', intu_org_hint: null },
+  period: { start: '2026-03-01', end: '2026-03-31' },
+  balances: { opening_cents: 100, closing_cents: 0 },
+  source_date_format: { format: 'MDY', confidence: 0.9 },
   transactions: [
     {
       posted_date: '2026-03-03',
@@ -69,7 +68,7 @@ describe('AnthropicProvider', () => {
         }),
     });
     const r = await provider.extract('# md');
-    expect(r.data.opening_balance_cents).toBe(0);
+    expect(r.data.balances.opening_cents).toBe(100);
     expect(r.telemetry.inputTokens).toBe(100);
     expect(r.telemetry.costMicros).toBeGreaterThan(0n);
     expect(provider.id).toBe('anthropic');

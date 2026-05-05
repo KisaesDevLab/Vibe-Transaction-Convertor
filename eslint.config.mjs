@@ -13,6 +13,10 @@ const ignores = [
   '**/coverage/**',
   '**/.turbo/**',
   '**/*.config.{js,cjs,mjs,ts}',
+  // Playwright E2E files run under the Node + Playwright globals; the
+  // browser-rules ESLint config doesn't apply.
+  'apps/web/e2e/**',
+  'apps/web/playwright.config.ts',
 ];
 
 export default [

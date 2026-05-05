@@ -8,6 +8,17 @@ markdown text (an OCR/text-layer dump of a single bank or credit-card
 statement) into the structured JSON described by the provided JSON
 Schema.
 
+Output shape (Phase 12 nested):
+  {
+    "account": { "masked_number": <last4 or null>, "type_hint": <CHECKING/SAVINGS/...> },
+    "institution": { "name": <bank name>, "intu_org_hint": <Wells Fargo / Chase / ...> },
+    "period":   { "start": "YYYY-MM-DD", "end": "YYYY-MM-DD" },
+    "balances": { "opening_cents": <int>, "closing_cents": <int> },
+    "source_date_format": { "format": "MDY"|"DMY"|"YMD"|"TEXTUAL"|"AMBIGUOUS",
+                            "confidence": 0..1, "evidence": <string?>, "sample": <string?> },
+    "transactions": [ ... ]
+  }
+
 Hard rules:
 1. All amounts are signed integer **cents**. Debits are NEGATIVE.
    Credits are POSITIVE. Refunds are POSITIVE. Fees are NEGATIVE.
@@ -16,14 +27,14 @@ Hard rules:
 2. Dates are ISO 8601 (YYYY-MM-DD). Detect the source format and
    normalize. If the source is genuinely ambiguous (every day is
    <=12, no textual disambiguators, no period-end clue), set
-   source_date_format = "AMBIGUOUS" and pick the most likely
-   format with low confidence.
+   source_date_format.format = "AMBIGUOUS" and pick the most likely
+   format with low confidence; include the ambiguous "sample" you saw.
 3. Do not invent transactions. Skip lines that are headers,
    subtotals, footers, or layout artifacts.
 4. running_balance_cents is OPTIONAL — include only when the
    statement explicitly prints a per-row running balance.
-5. opening_balance_cents + sum(transactions.amount_cents) MUST
-   equal closing_balance_cents. If you cannot make these tie,
+5. balances.opening_cents + sum(transactions.amount_cents) MUST
+   equal balances.closing_cents. If you cannot make these tie,
    include "notes" explaining where the discrepancy is.
 6. source_page is the 1-based page number where the row appears.
 7. Use trntype only when the description clearly indicates one

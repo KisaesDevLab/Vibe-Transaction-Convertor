@@ -139,6 +139,37 @@ describe('OFX 1.x SGML — QBO/QFX', () => {
   });
 });
 
+describe('SGML transliteration (Phase 22 #8 — CHARSET 1252)', () => {
+  it('strips diacritics and folds smart quotes/dashes in QBO output', () => {
+    const out = renderQbo({
+      ...STMT,
+      transactions: [
+        {
+          ...STMT.transactions[0]!,
+          name: 'CAFÉ "L’Étoile" — São Paulo™',
+        },
+        STMT.transactions[1]!,
+      ],
+    });
+    expect(out).toContain('CAFE "L\'Etoile" - Sao Paulo(TM)');
+    // Confirm no non-ASCII chars survived in the rendered output.
+    // (Plain ASCII `-` and `"` are fine; we want the smart variants gone.)
+    // eslint-disable-next-line no-control-regex
+    const hasNonAscii = /[^\x00-\x7F]/.test(out);
+    expect(hasNonAscii).toBe(false);
+  });
+
+  it('drops fully non-ASCII codepoints to ? rather than shipping raw UTF-8', () => {
+    const out = renderQfx({
+      ...STMT,
+      transactions: [{ ...STMT.transactions[0]!, name: '東京銀行' }, STMT.transactions[1]!],
+    });
+    // Each CJK codepoint becomes '?'; the spec preference is "lossy
+    // ASCII over corrupted bytes the consumer can't decode".
+    expect(out).toContain('????');
+  });
+});
+
 describe('BANKID fallback ladder (ADR-012, Phase 22 #19/#21)', () => {
   it('uses routing number when present and 9-digit', () => {
     expect(resolveBankId('121000248', '3000')).toEqual({

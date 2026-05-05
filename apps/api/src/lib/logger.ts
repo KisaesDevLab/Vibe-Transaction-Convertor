@@ -17,6 +17,14 @@ export const logger = pino({
       '*.password_hash',
       '*.api_key',
       '*.apiKey',
+      // Top-level catches for the most-common LLM-provider key names.
+      // Pino's '*.apiKey' only matches keys one level deep, so explicit
+      // top-level entries are required. Phase 27 #30 regression.
+      'apiKey',
+      'api_key',
+      'anthropicApiKey',
+      'anthropic_api_key',
+      'ANTHROPIC_API_KEY',
     ],
     censor: '[redacted]',
   },

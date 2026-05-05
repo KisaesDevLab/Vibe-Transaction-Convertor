@@ -25,6 +25,7 @@ import { db } from '../db/client.js';
 import { accounts, statements, systemSettings, transactions } from '../db/schema.js';
 import { logger } from '../lib/logger.js';
 import { buildProvider } from '../services/llm-provider.js';
+import { redisOcrCache } from '../services/ocr-cache.js';
 import { writeAudit } from '../services/audit.js';
 
 import { QUEUE_EXTRACTION, getJobConnection, type ExtractionJobData } from './queues.js';
@@ -113,7 +114,7 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
     const rasters = await rasterizePdf(data.sourcePdfPath, { dpi: 300 });
     const scopedRasters = rasters.filter((r) => inRange(r.index));
     const images = await Promise.all(scopedRasters.map(async (r) => readFile(r.pngPath)));
-    const ocr = await ocrPdfPages(images);
+    const ocr = await ocrPdfPages(images, { cache: redisOcrCache });
     markdown = ocr.pages
       .map((p, i) => `# Page ${(scopedRasters[i]?.index ?? p.index) + 1}\n\n${p.markdown}`)
       .join('\n\n');
@@ -164,13 +165,21 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
   // 'uploaded' and re-enqueues with the operator-chosen format. Skip
   // this gate when the operator has already confirmed (the worker is
   // running with dateFormatOverride set).
-  if (!dateFormatOverride && result.data.source_date_format === 'AMBIGUOUS') {
+  // Phase 12 #1 nested shape: pull out the bits the worker needs.
+  const dateFormat = result.data.source_date_format.format;
+  const dateFormatConfidence = result.data.source_date_format.confidence;
+  const periodStart = result.data.period.start;
+  const periodEnd = result.data.period.end;
+  const openingCentsNumber = result.data.balances.opening_cents;
+  const closingCentsNumber = result.data.balances.closing_cents;
+
+  if (!dateFormatOverride && dateFormat === 'AMBIGUOUS') {
     await db
       .update(statements)
       .set({
         status: 'awaiting-locale-confirmation',
         sourceDateFormat: 'AMBIGUOUS',
-        sourceDateFormatConfidence: result.data.source_date_format_confidence,
+        sourceDateFormatConfidence: dateFormatConfidence,
         llmProvider: provider.id,
         llmInputTokens: result.telemetry.inputTokens,
         llmOutputTokens: result.telemetry.outputTokens,
@@ -196,12 +205,12 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
       llmCallCount: 1,
       llmCostMicros: result.telemetry.costMicros,
       llmModelVersion: result.telemetry.model,
-      sourceDateFormat: result.data.source_date_format,
-      sourceDateFormatConfidence: result.data.source_date_format_confidence,
-      periodStart: result.data.period_start,
-      periodEnd: result.data.period_end,
-      openingBalanceCents: BigInt(result.data.opening_balance_cents),
-      closingBalanceCents: BigInt(result.data.closing_balance_cents),
+      sourceDateFormat: dateFormat,
+      sourceDateFormatConfidence: dateFormatConfidence,
+      periodStart,
+      periodEnd,
+      openingBalanceCents: BigInt(openingCentsNumber),
+      closingBalanceCents: BigInt(closingCentsNumber),
       updatedAt: sql`now()`,
     })
     .where(eq(statements.id, stmtId));
@@ -212,8 +221,8 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
   // the Golden Rule fails. Repair tries sign-flip and drop-duplicate;
   // when it succeeds we mutate `effectiveTxs` in-place so all downstream
   // FITID + insert logic uses the corrected list.
-  const openingCents = BigInt(result.data.opening_balance_cents);
-  const closingCents = BigInt(result.data.closing_balance_cents);
+  const openingCents = BigInt(openingCentsNumber);
+  const closingCents = BigInt(closingCentsNumber);
   let effectiveTxs = result.data.transactions.map((t, idx) => ({
     postedDate: t.posted_date,
     description: t.description,
@@ -236,8 +245,8 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
       amountCents: t.amountCents,
       runningBalanceCents: t.runningBalanceCents,
     })),
-    periodStart: result.data.period_start,
-    periodEnd: result.data.period_end,
+    periodStart: periodStart,
+    periodEnd: periodEnd,
     transactionDates: effectiveTxs.map((t) => t.postedDate),
   });
 
@@ -295,8 +304,8 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
           amountCents: t.amountCents,
           runningBalanceCents: t.runningBalanceCents,
         })),
-        periodStart: result.data.period_start,
-        periodEnd: result.data.period_end,
+        periodStart: periodStart,
+        periodEnd: periodEnd,
         transactionDates: repairedTxs.map((t) => t.postedDate),
       });
       if (verifyAfterLlmRepair.status === 'verified') {
@@ -377,8 +386,8 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
         openingBalanceCents: openingCents,
         closingBalanceCents: closingCents,
         transactions: candidateTxs.map((t) => ({ amountCents: t.amountCents })),
-        periodStart: result.data.period_start,
-        periodEnd: result.data.period_end,
+        periodStart: periodStart,
+        periodEnd: periodEnd,
         transactionDates: candidateTxs.map((t) => t.postedDate),
       });
       if (verifyAfterRepair.status === 'verified') {

@@ -9,3 +9,8 @@ coverage/
 data/uploads/
 data/exports/
 tmp/
+
+# Playwright E2E artifacts (apps/web/e2e/)
+test-results/
+playwright-report/
+apps/web/e2e/.reachability.json

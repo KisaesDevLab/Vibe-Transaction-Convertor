@@ -33,11 +33,64 @@ const SGML_HEADER = [
 // (QuickBooks) accept either, but unclosed is canonical.
 const stag = (name: string, value: string | number): string => `<${name}>${value}`;
 
+// Phase 22 #8: SGML CHARSET is 1252 (Windows-1252), a single-byte ASCII
+// superset. Modern OCR markdown often contains UTF-8 chars Intuit
+// parsers reject (smart quotes, em-dashes, accented characters from
+// vendor names). Strip diacritics via NFD + drop combining marks, then
+// fold known-safe substitutions for chars that have ASCII equivalents
+// but aren't in 1252's Latin-1 base.
+const TRANSLIT_MAP: Record<string, string> = {
+  '‘': "'",
+  '’': "'",
+  '‚': "'",
+  '“': '"',
+  '”': '"',
+  '„': '"',
+  '–': '-',
+  '—': '-',
+  '―': '-',
+  '…': '...',
+  ' ': ' ',
+  '™': '(TM)',
+  '®': '(R)',
+  '©': '(C)',
+  '°': ' deg',
+  '½': '1/2',
+  '¼': '1/4',
+  '¾': '3/4',
+  '€': 'EUR',
+  '£': 'GBP',
+  '¥': 'JPY',
+};
+
+const transliterate = (s: string): string => {
+  // NFD splits accented chars into base + combining mark; drop the
+  // marks (Unicode "Combining Diacritical Marks" block U+0300–U+036F).
+  // Use \p{M} via the Unicode flag for clarity; equivalent to the
+  // raw [̀-ͯ] range without tripping ESLint's misleading-
+  // character-class rule on raw combining glyphs.
+  const stripped = s.normalize('NFD').replace(/\p{M}+/gu, '');
+  // Replace known-symbolic punctuation; drop anything still outside ASCII.
+  let out = '';
+  for (const ch of stripped) {
+    const replacement = TRANSLIT_MAP[ch];
+    if (replacement !== undefined) {
+      out += replacement;
+      continue;
+    }
+    const code = ch.codePointAt(0) ?? 0;
+    out += code < 0x80 ? ch : '?';
+  }
+  return out;
+};
+
 // SGML record separation is `\r\n`. Any embedded newline inside a text
 // value (often present after OCR of multi-line descriptions) would split
-// the record and break parsers — collapse to single spaces first.
+// the record and break parsers — collapse to single spaces first. Then
+// transliterate to ASCII so non-Latin1 characters don't ship as raw
+// UTF-8 bytes (which Quicken/QuickBooks corrupt under CHARSET 1252).
 const sgmlEscape = (s: string): string =>
-  s
+  transliterate(s)
     .replaceAll(/[\r\n]+/g, ' ')
     .replaceAll('&', '&amp;')
     .replaceAll('<', '&lt;')

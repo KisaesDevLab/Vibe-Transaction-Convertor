@@ -26,9 +26,9 @@ describe('exemplars', () => {
   it('exemplar opening + sum(amounts) === closing (Golden Rule self-check)', () => {
     for (const ex of EXEMPLARS) {
       const sum = ex.expected.transactions.reduce((acc, t) => acc + BigInt(t.amount_cents), 0n);
-      const expected = BigInt(ex.expected.opening_balance_cents) + sum;
+      const expected = BigInt(ex.expected.balances.opening_cents) + sum;
       expect(expected, `${ex.label} balance reconciliation`).toBe(
-        BigInt(ex.expected.closing_balance_cents),
+        BigInt(ex.expected.balances.closing_cents),
       );
     }
   });

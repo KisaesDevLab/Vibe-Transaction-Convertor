@@ -36,14 +36,11 @@ ELECTRONIC WITHDRAWALS
 
 ENDING BALANCE                                 $17,773.06`,
     expected: {
-      account_number_masked: '5678',
-      account_type_hint: 'CHECKING',
-      period_start: '2026-04-01',
-      period_end: '2026-04-30',
-      opening_balance_cents: 1_245_000,
-      closing_balance_cents: 1_777_306,
-      source_date_format: 'MDY',
-      source_date_format_confidence: 0.95,
+      account: { masked_number: '5678', type_hint: 'CHECKING' },
+      institution: { name: 'JPMorgan Chase Bank', intu_org_hint: 'Chase' },
+      period: { start: '2026-04-01', end: '2026-04-30' },
+      balances: { opening_cents: 1_245_000, closing_cents: 1_777_306 },
+      source_date_format: { format: 'MDY', confidence: 0.95 },
       transactions: [
         {
           posted_date: '2026-04-03',
@@ -113,14 +110,11 @@ Withdrawals and Other Subtractions
 
 Ending Balance on 02/28/2026                        $8,654.12`,
     expected: {
-      account_number_masked: '4321',
-      account_type_hint: 'SAVINGS',
-      period_start: '2026-02-01',
-      period_end: '2026-02-28',
-      opening_balance_cents: 850_000,
-      closing_balance_cents: 865_412,
-      source_date_format: 'MDY',
-      source_date_format_confidence: 0.95,
+      account: { masked_number: '4321', type_hint: 'SAVINGS' },
+      institution: { name: 'Wells Fargo', intu_org_hint: 'Wells Fargo' },
+      period: { start: '2026-02-01', end: '2026-02-28' },
+      balances: { opening_cents: 850_000, closing_cents: 865_412 },
+      source_date_format: { format: 'MDY', confidence: 0.95 },
       transactions: [
         {
           posted_date: '2026-02-05',
@@ -169,14 +163,11 @@ Date     Description                                    Amount
 
 Statement Period: 02/16/2026 — 03/15/2026`,
     expected: {
-      account_number_masked: '91009',
-      account_type_hint: 'CREDITCARD',
-      period_start: '2026-02-16',
-      period_end: '2026-03-15',
-      opening_balance_cents: 124_567,
-      closing_balance_cents: 289_045,
-      source_date_format: 'MDY',
-      source_date_format_confidence: 0.95,
+      account: { masked_number: '91009', type_hint: 'CREDITCARD' },
+      institution: { name: 'American Express', intu_org_hint: 'American Express' },
+      period: { start: '2026-02-16', end: '2026-03-15' },
+      balances: { opening_cents: 124_567, closing_cents: 289_045 },
+      source_date_format: { format: 'MDY', confidence: 0.95 },
       transactions: [
         {
           posted_date: '2026-02-18',
@@ -245,14 +236,11 @@ Date       Description                                Amount       Balance
 
 Closing Balance ........................ $4,315.79`,
     expected: {
-      account_number_masked: '1234',
-      account_type_hint: 'CHECKING',
-      period_start: '2026-03-01',
-      period_end: '2026-03-31',
-      opening_balance_cents: 120_000,
-      closing_balance_cents: 431_579,
-      source_date_format: 'MDY',
-      source_date_format_confidence: 0.9,
+      account: { masked_number: '1234', type_hint: 'CHECKING' },
+      institution: { name: 'Acme Bank', intu_org_hint: 'Acme Bank' },
+      period: { start: '2026-03-01', end: '2026-03-31' },
+      balances: { opening_cents: 120_000, closing_cents: 431_579 },
+      source_date_format: { format: 'MDY', confidence: 0.9 },
       transactions: [
         {
           posted_date: '2026-03-03',
@@ -314,14 +302,11 @@ Withdrawals and other subtractions
 
 Ending Balance on 05/31/2026 .................. $8,895.45`,
     expected: {
-      account_number_masked: '8821',
-      account_type_hint: 'CHECKING',
-      period_start: '2026-05-01',
-      period_end: '2026-05-31',
-      opening_balance_cents: 520_000,
-      closing_balance_cents: 889_545,
-      source_date_format: 'MDY',
-      source_date_format_confidence: 0.95,
+      account: { masked_number: '8821', type_hint: 'CHECKING' },
+      institution: { name: 'Bank of America', intu_org_hint: 'Bank of America' },
+      period: { start: '2026-05-01', end: '2026-05-31' },
+      balances: { opening_cents: 520_000, closing_cents: 889_545 },
+      source_date_format: { format: 'MDY', confidence: 0.95 },
       transactions: [
         {
           posted_date: '2026-05-02',
@@ -402,14 +387,11 @@ Date     Description                                       Amount
 06/20    SPOTIFY USA                                       11.99
 06/25    HOME DEPOT 0987                                  215.43`,
     expected: {
-      account_number_masked: '3344',
-      account_type_hint: 'CREDITCARD',
-      period_start: '2026-06-01',
-      period_end: '2026-06-30',
-      opening_balance_cents: 85_045,
-      closing_balance_cents: 42_439,
-      source_date_format: 'MDY',
-      source_date_format_confidence: 0.95,
+      account: { masked_number: '3344', type_hint: 'CREDITCARD' },
+      institution: { name: 'Capital One', intu_org_hint: 'Capital One' },
+      period: { start: '2026-06-01', end: '2026-06-30' },
+      balances: { opening_cents: 85_045, closing_cents: 42_439 },
+      source_date_format: { format: 'MDY', confidence: 0.95 },
       transactions: [
         {
           posted_date: '2026-06-02',
@@ -482,14 +464,11 @@ Trans Date   Description                                   Amount
 07/22        BEST BUY #1230                                 299.99
 07/28        CASHBACK BONUS REDEMPTION                      -25.00`,
     expected: {
-      account_number_masked: '7711',
-      account_type_hint: 'CREDITCARD',
-      period_start: '2026-07-01',
-      period_end: '2026-07-31',
-      opening_balance_cents: 158_020,
-      closing_balance_cents: 78_302,
-      source_date_format: 'MDY',
-      source_date_format_confidence: 0.95,
+      account: { masked_number: '7711', type_hint: 'CREDITCARD' },
+      institution: { name: 'Discover', intu_org_hint: 'Discover' },
+      period: { start: '2026-07-01', end: '2026-07-31' },
+      balances: { opening_cents: 158_020, closing_cents: 78_302 },
+      source_date_format: { format: 'MDY', confidence: 0.95 },
       transactions: [
         {
           posted_date: '2026-07-03',
@@ -562,14 +541,11 @@ Trans Date    Description                                  Amount
 24/08/2026    PRET A MANGER 0123                            18.45
 28/08/2026    HILTON LONDON PADDINGTON                     425.80`,
     expected: {
-      account_number_masked: '5599',
-      account_type_hint: 'CREDITCARD',
-      period_start: '2026-08-01',
-      period_end: '2026-08-31',
-      opening_balance_cents: 64_530,
-      closing_balance_cents: 190_440,
-      source_date_format: 'DMY',
-      source_date_format_confidence: 0.92,
+      account: { masked_number: '5599', type_hint: 'CREDITCARD' },
+      institution: { name: 'Citi', intu_org_hint: 'Citi' },
+      period: { start: '2026-08-01', end: '2026-08-31' },
+      balances: { opening_cents: 64_530, closing_cents: 190_440 },
+      source_date_format: { format: 'DMY', confidence: 0.92 },
       transactions: [
         {
           posted_date: '2026-08-03',
@@ -640,14 +616,11 @@ Date         Description                                       Amount
 
 Ending Balance 2026-09-30 ....................... $6,461.62`,
     expected: {
-      account_number_masked: '6644',
-      account_type_hint: 'CHECKING',
-      period_start: '2026-09-01',
-      period_end: '2026-09-30',
-      opening_balance_cents: 365_075,
-      closing_balance_cents: 646_162,
-      source_date_format: 'YMD',
-      source_date_format_confidence: 0.98,
+      account: { masked_number: '6644', type_hint: 'CHECKING' },
+      institution: { name: 'U.S. Bank', intu_org_hint: 'U.S. Bank' },
+      period: { start: '2026-09-01', end: '2026-09-30' },
+      balances: { opening_cents: 365_075, closing_cents: 646_162 },
+      source_date_format: { format: 'YMD', confidence: 0.98 },
       transactions: [
         {
           posted_date: '2026-09-02',
@@ -721,14 +694,11 @@ Withdrawals and Debits
 
 Ending Balance 2026-10-31 ...................... $14,163.35`,
     expected: {
-      account_number_masked: '9988',
-      account_type_hint: 'CHECKING',
-      period_start: '2026-10-01',
-      period_end: '2026-10-31',
-      opening_balance_cents: 1_892_040,
-      closing_balance_cents: 1_416_335,
-      source_date_format: 'YMD',
-      source_date_format_confidence: 0.98,
+      account: { masked_number: '9988', type_hint: 'CHECKING' },
+      institution: { name: 'PNC Bank', intu_org_hint: 'PNC Bank' },
+      period: { start: '2026-10-01', end: '2026-10-31' },
+      balances: { opening_cents: 1_892_040, closing_cents: 1_416_335 },
+      source_date_format: { format: 'YMD', confidence: 0.98 },
       transactions: [
         {
           posted_date: '2026-10-02',

@@ -9,7 +9,7 @@ import { writeAudit } from '../services/audit.js';
 import { overrideReconciliation } from '../services/exports.js';
 import { recomputeReconciliation } from '../services/reconciliation.js';
 import { computeFitid, inferTrntype, normalizeDescription } from '@vibe-tx-converter/exporters';
-import { enqueueExtraction } from '../jobs/queues.js';
+import { enqueueExtraction, extractionQueue } from '../jobs/queues.js';
 
 const serializeBigint = <T extends Record<string, unknown>>(row: T): T => {
   const out: Record<string, unknown> = {};
@@ -477,6 +477,94 @@ export const statementsRouter = (): Router => {
         action: 'statement.re-extract',
       });
       res.json({ ok: true });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // Phase 15 #7: SSE progress stream. Browser opens this and receives a
+  // status snapshot every 1.5s until the statement reaches a terminal
+  // state (review / exported / failed / awaiting-locale-confirmation),
+  // then closes. Cheaper than long-polling on the front-end while still
+  // staying on the existing connection — no websocket plumbing needed.
+  router.get('/:id/progress', async (req, res, next) => {
+    try {
+      const id = String(req.params.id);
+      res.setHeader('content-type', 'text/event-stream');
+      res.setHeader('cache-control', 'no-cache, no-transform');
+      res.setHeader('connection', 'keep-alive');
+      res.flushHeaders?.();
+
+      const TERMINAL = new Set(['review', 'exported', 'failed', 'awaiting-locale-confirmation']);
+      let lastSerialized = '';
+      let cancelled = false;
+      req.on('close', () => {
+        cancelled = true;
+      });
+
+      while (!cancelled) {
+        const rows = await db.select().from(statements).where(eq(statements.id, id));
+        const row = rows[0];
+        if (!row) {
+          res.write(`event: error\ndata: ${JSON.stringify({ message: 'not found' })}\n\n`);
+          break;
+        }
+        const snapshot = serializeBigint(row);
+        const serialized = JSON.stringify(snapshot);
+        if (serialized !== lastSerialized) {
+          res.write(`data: ${serialized}\n\n`);
+          lastSerialized = serialized;
+        }
+        if (TERMINAL.has(row.status)) break;
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+      }
+      res.end();
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // Phase 15 #17: cancel an in-flight extraction. Removes the job from
+  // BullMQ; the worker checks for cancellation between phases. Marks
+  // the statement as failed with a cancel-specific message.
+  router.post('/:id/cancel', async (req, res, next) => {
+    try {
+      const id = String(req.params.id);
+      const rows = await db.select().from(statements).where(eq(statements.id, id));
+      const stmt = rows[0];
+      if (!stmt) throw new NotFoundError(`statement ${id}`);
+      if (stmt.status === 'review' || stmt.status === 'exported' || stmt.status === 'failed') {
+        throw new ValidationError(`cannot cancel a ${stmt.status} statement`);
+      }
+      let removedFromQueue = false;
+      if (process.env.REDIS_URL) {
+        try {
+          const job = await extractionQueue().getJob(`extract:${id}`);
+          if (job) {
+            await job.remove();
+            removedFromQueue = true;
+          }
+        } catch {
+          // job already finished or not present; falling through to
+          // the DB-state mutation is still the right call.
+        }
+      }
+      await db
+        .update(statements)
+        .set({
+          status: 'failed',
+          errorMessage: 'cancelled by operator',
+          updatedAt: sql`now()`,
+        })
+        .where(eq(statements.id, id));
+      await writeAudit(db, {
+        actorUserId: req.user!.id,
+        entityType: 'statement',
+        entityId: id,
+        action: 'statement.cancel',
+        payload: { removedFromQueue },
+      });
+      res.json({ ok: true, removedFromQueue });
     } catch (err) {
       next(err);
     }
