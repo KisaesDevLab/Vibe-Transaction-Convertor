@@ -23,7 +23,7 @@ just whether the happy path runs. Acceptance gauntlet: `pnpm acceptance`
 | 13    | LLM Provider Abstraction                  | ⚠      | `c403118`   | dateFormatOverride wired; no 60-s cache; no @anthropic-ai/sdk  |
 | 14    | Multi-Account Auto-Split                  | ⚠      | `9e34173`   | detection only — never splits into multiple statements         |
 | 15    | BullMQ Extraction Pipeline                | ⚠      | `c403118`   | locale-gate now wired; no SSE progress; no cancel              |
-| 16    | Golden Rule Reconciler & Repair Pass      | ⚠      | `<next>`    | LLM repair + suspect rows + auto-recompute; no LLM-pass tests  |
+| 16    | Golden Rule Reconciler & Repair Pass      | ⚠      | `ec3de5c`   | LLM repair + suspect rows + auto-recompute; no LLM-pass tests  |
 | 17    | TRNTYPE Inference + FITID Generator       | ⚠      | `702449e`   | rule list + isCreditCard wired; no docs/extraction.md          |
 | 18    | Statement & Transaction Review UI         | ⚠      | `d22cccd`   | no global /statements; no full-detail header                   |
 | 19    | PDF Viewer with Bounding-Box Highlighting | ⚠      | `9a1fc2f`   | PDF→txn click selection not wired                              |
@@ -58,8 +58,8 @@ What's missing is **breadth, polish and several spec invariants**:
 - No fixture corpus / golden-master files; no Playwright; no React
   Testing Library.
 - LLM extraction is wired but thin — 4 of 10 exemplars, flat schema
-  (still pending nesting refactor), no LLM-driven repair pass.
-  Token budget + markdown cleanup landed in `c403118`.
+  (still pending nesting refactor). Token budget + markdown cleanup
+  landed in `c403118`. LLM-driven repair pass landed in `ec3de5c`.
 - Multi-account detection works but does not split into multiple
   statement rows (no `page_range` column, no confirm-split route).
 - ~~Exporter byte shapes diverge from spec.~~ Resolved 2026-05-05 in
@@ -90,7 +90,7 @@ shell-out.
   "no PDF/page-image bytes in payload" outbound assertion.
 - **Phase 14 real split** — the upload-time split decision and per-
   account-segment statement insert.
-- **Phase 16 LLM-driven repair** — currently in-process heuristics.
+- ~~Phase 16 LLM-driven repair.~~ Landed 2026-05-05 in `ec3de5c`.
 - **Phase 24 ExportPage** — full preview + per-format checkbox UI.
 - **Phase 26 LlmProviderAdminPage** — typed-confirm phrase, model
   dropdown, monthly cost cap, test-connection.
