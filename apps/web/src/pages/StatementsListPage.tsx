@@ -1,5 +1,5 @@
-import { useMemo, useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
+import { useMemo } from 'react';
+import { Link, useParams, useSearchParams } from 'react-router-dom';
 
 import { ReconciliationBadge, StatusBadge } from '../components/StatusBadge';
 import { useStatementsByAccount } from '../hooks/useStatementsList';
@@ -18,9 +18,21 @@ export function StatementsListPage() {
   const { accountId = '' } = useParams();
   const account = useAccount(accountId);
   const list = useStatementsByAccount(accountId);
-  const [statusFilter, setStatusFilter] = useState('');
-  const [violationsOnly, setViolationsOnly] = useState(false);
-  const [search, setSearch] = useState('');
+  // Filter state lives in the URL so it survives back-button navigation
+  // and reloads, mirroring the global statements page. Each setter
+  // writes through setSearchParams instead of useState.
+  const [params, setParams] = useSearchParams();
+  const statusFilter = params.get('status') ?? '';
+  const violationsOnly = params.get('violations') === '1';
+  const search = params.get('q') ?? '';
+  const setFilter = (next: Record<string, string | null>): void => {
+    const sp = new URLSearchParams(params);
+    for (const [k, v] of Object.entries(next)) {
+      if (!v) sp.delete(k);
+      else sp.set(k, v);
+    }
+    setParams(sp, { replace: true });
+  };
 
   const rows = useMemo(() => {
     if (!list.data) return [];
@@ -58,7 +70,7 @@ export function StatementsListPage() {
           <button
             key={f.value}
             type="button"
-            onClick={() => setStatusFilter(f.value)}
+            onClick={() => setFilter({ status: f.value || null })}
             className={`rounded-full border px-3 py-1 text-xs ${
               statusFilter === f.value
                 ? 'border-accent bg-accent text-accent-fg'
@@ -72,7 +84,7 @@ export function StatementsListPage() {
           <input
             type="checkbox"
             checked={violationsOnly}
-            onChange={(e) => setViolationsOnly(e.target.checked)}
+            onChange={(e) => setFilter({ violations: e.target.checked ? '1' : null })}
           />
           Has period-bounds violations
         </label>
@@ -80,7 +92,7 @@ export function StatementsListPage() {
           type="search"
           placeholder="Search by id…"
           value={search}
-          onChange={(e) => setSearch(e.target.value)}
+          onChange={(e) => setFilter({ q: e.target.value || null })}
           className="ml-auto rounded-md border border-surface-muted px-3 py-1.5 text-xs"
         />
       </div>

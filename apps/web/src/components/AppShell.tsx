@@ -1,5 +1,5 @@
 import { type ReactNode } from 'react';
-import { NavLink } from 'react-router-dom';
+import { Link, NavLink } from 'react-router-dom';
 
 import { useLogout, useMe } from '../hooks/useAuth';
 import { cn } from '../lib/cn';
@@ -48,7 +48,15 @@ export function AppShell({ children }: { children: ReactNode }) {
       <div className="flex flex-col">
         <header className="flex items-center justify-between border-b border-surface-muted bg-white px-6 py-3">
           <div className="text-sm text-ink-muted">
-            {me.data ? `${me.data.displayName} · ${me.data.role}` : null}
+            {me.data ? (
+              <Link
+                to="/account"
+                className="hover:text-ink hover:underline"
+                title="View profile and change password"
+              >
+                {me.data.displayName} · {me.data.role}
+              </Link>
+            ) : null}
           </div>
           <div className="flex items-center gap-2">
             <span className="hidden text-xs text-ink-subtle md:inline" title="Keyboard shortcuts">

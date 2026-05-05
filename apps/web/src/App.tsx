@@ -4,6 +4,7 @@ import { AdminGate } from './components/AdminGate';
 import { AppShell } from './components/AppShell';
 import { AuthGate } from './components/AuthGate';
 import { AccountDetailPage } from './pages/AccountDetailPage';
+import { AccountProfilePage } from './pages/AccountProfilePage';
 import { CompaniesPage } from './pages/CompaniesPage';
 import { CompanyDetailPage } from './pages/CompanyDetailPage';
 import { LoginPage } from './pages/LoginPage';
@@ -33,6 +34,7 @@ export function App() {
             <AppShell>
               <Routes>
                 <Route path="/" element={<Navigate to="/companies" replace />} />
+                <Route path="/account" element={<AccountProfilePage />} />
                 <Route path="/companies" element={<CompaniesPage />} />
                 <Route path="/companies/:companyId" element={<CompanyDetailPage />} />
                 <Route path="/accounts/:accountId" element={<AccountDetailPage />} />

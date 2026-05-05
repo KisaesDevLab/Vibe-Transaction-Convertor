@@ -61,3 +61,9 @@ export const useUsersExist = () =>
     queryKey: ['auth', 'users-exist'],
     queryFn: () => api.get<{ exists: boolean }>('/api/auth/users-exist'),
   });
+
+export const useChangePassword = () =>
+  useMutation({
+    mutationFn: (input: { currentPassword: string; newPassword: string }) =>
+      api.post<{ ok: boolean }>('/api/auth/change-password', input),
+  });
