@@ -72,6 +72,9 @@ export function AdminHomePage() {
           <Link to="/admin/diagnostics" className="text-accent hover:underline">
             Diagnostics →
           </Link>
+          <Link to="/admin/llm-provider" className="text-accent hover:underline">
+            LLM provider →
+          </Link>
           <Link to="/admin/maintenance" className="text-accent hover:underline">
             Maintenance →
           </Link>

@@ -4,18 +4,29 @@ import { rm, readdir, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { db } from '../db/client.js';
-import { sessions, systemSettings } from '../db/schema.js';
+import { statements, sessions, systemSettings } from '../db/schema.js';
 import { ValidationError } from '../lib/errors.js';
-import { wrapSecret } from '../lib/secrets.js';
+import { unwrapSecret, wrapSecret } from '../lib/secrets.js';
 import { requireAdmin } from '../middleware/auth.js';
 import { writeAudit } from '../services/audit.js';
 import { getFidirStatus, seedFidir } from '../services/fidir-seeder.js';
+import { buildProvider } from '../services/llm-provider.js';
 import { extractionQueue } from '../jobs/queues.js';
 import { logger } from '../lib/logger.js';
 
 const PROVIDER_KEY = 'llm.provider';
 const ANTHROPIC_KEY = 'llm.anthropic.api_key';
 const ANTHROPIC_MODEL = 'llm.anthropic.model';
+const MONTHLY_CAP_KEY = 'llm.anthropic.monthly_cap_usd';
+
+// Phase 26 #29: only the Claude family is supported on the Anthropic
+// path. Newer models go here; the UI surfaces this list and rejects
+// anything else server-side.
+const ALLOWED_ANTHROPIC_MODELS = [
+  'claude-opus-4-7',
+  'claude-sonnet-4-6',
+  'claude-haiku-4-5-20251001',
+] as const;
 
 export const adminRouter = (): Router => {
   const router = Router();
@@ -35,11 +46,33 @@ export const adminRouter = (): Router => {
         .select()
         .from(systemSettings)
         .where(eq(systemSettings.key, ANTHROPIC_KEY));
+      const capRows = await db
+        .select()
+        .from(systemSettings)
+        .where(eq(systemSettings.key, MONTHLY_CAP_KEY));
+
+      // Phase 26 #29: surface the last 4 chars of the stored key for a
+      // visual sanity check ("am I looking at the right key?") without
+      // exposing the rest. We unwrap, slice, then drop the plaintext.
+      let lastFour: string | null = null;
+      const keyBlob = keyRows[0]?.valueEncrypted;
+      if (keyBlob) {
+        try {
+          const plain = unwrapSecret(keyBlob);
+          lastFour = plain.slice(-4);
+        } catch {
+          // wrapped value is corrupt — surface as no-key.
+        }
+      }
       res.json({
         provider: provRows[0]?.valuePlaintext ?? 'local',
         anthropicModel: modelRows[0]?.valuePlaintext ?? null,
-        anthropicKeyConfigured:
-          keyRows[0]?.valueEncrypted !== null && keyRows[0]?.valueEncrypted !== undefined,
+        anthropicKeyConfigured: lastFour !== null,
+        anthropicKeyLastFour: lastFour,
+        allowedModels: ALLOWED_ANTHROPIC_MODELS,
+        monthlyCapUsd: capRows[0]?.valuePlaintext
+          ? Number.parseFloat(capRows[0].valuePlaintext)
+          : null,
       });
     } catch (err) {
       next(err);
@@ -99,7 +132,9 @@ export const adminRouter = (): Router => {
   router.post('/llm-provider/anthropic-model', async (req, res, next) => {
     try {
       const model = String(req.body?.model ?? '').trim();
-      if (model.length === 0) throw new ValidationError('model is required');
+      if (!ALLOWED_ANTHROPIC_MODELS.includes(model as never)) {
+        throw new ValidationError(`model must be one of: ${ALLOWED_ANTHROPIC_MODELS.join(', ')}`);
+      }
       await db
         .insert(systemSettings)
         .values({ key: ANTHROPIC_MODEL, valuePlaintext: model, isSecret: false })
@@ -107,7 +142,125 @@ export const adminRouter = (): Router => {
           target: systemSettings.key,
           set: { valuePlaintext: model, updatedAt: sql`now()`, updatedByUserId: req.user!.id },
         });
+      await writeAudit(db, {
+        actorUserId: req.user!.id,
+        entityType: 'system_settings',
+        entityId: ANTHROPIC_MODEL,
+        action: 'anthropic-model.change',
+        payload: { model },
+      });
       res.json({ ok: true, model });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // Phase 26 #29: clear the stored Anthropic API key. Used when the
+  // operator rotates keys (revoke old → DELETE here → POST new).
+  router.delete('/llm-provider/anthropic-key', async (req, res, next) => {
+    try {
+      await db.delete(systemSettings).where(eq(systemSettings.key, ANTHROPIC_KEY));
+      await writeAudit(db, {
+        actorUserId: req.user!.id,
+        entityType: 'system_settings',
+        entityId: ANTHROPIC_KEY,
+        action: 'anthropic-key.clear',
+      });
+      res.json({ ok: true });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // Phase 26 #34: monthly USD cost cap on the Anthropic provider. The
+  // worker checks this before every extract call and refuses if the
+  // current calendar-month spend would exceed the cap. NULL = no cap.
+  router.post('/llm-provider/monthly-cap', async (req, res, next) => {
+    try {
+      const raw = req.body?.usd;
+      let value: string | null = null;
+      if (raw === null || raw === undefined || raw === '') {
+        await db.delete(systemSettings).where(eq(systemSettings.key, MONTHLY_CAP_KEY));
+      } else {
+        const parsed = Number.parseFloat(String(raw));
+        if (!Number.isFinite(parsed) || parsed < 0) {
+          throw new ValidationError('usd must be a non-negative number, or null to clear');
+        }
+        value = parsed.toFixed(2);
+        await db
+          .insert(systemSettings)
+          .values({ key: MONTHLY_CAP_KEY, valuePlaintext: value, isSecret: false })
+          .onConflictDoUpdate({
+            target: systemSettings.key,
+            set: {
+              valuePlaintext: value,
+              updatedAt: sql`now()`,
+              updatedByUserId: req.user!.id,
+            },
+          });
+      }
+      await writeAudit(db, {
+        actorUserId: req.user!.id,
+        entityType: 'system_settings',
+        entityId: MONTHLY_CAP_KEY,
+        action: 'monthly-cap.set',
+        payload: { usd: value },
+      });
+      res.json({ ok: true, monthlyCapUsd: value === null ? null : Number.parseFloat(value) });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // Phase 26 #32: test-connection. Pings the configured provider's
+  // health() and returns a structured result. Doesn't consume tokens
+  // for Anthropic (presence-of-key check); does hit /health for the
+  // local gateway.
+  router.post('/llm-provider/test', async (_req, res, next) => {
+    try {
+      const provider = await buildProvider(db);
+      const health = await provider.health();
+      res.json({
+        provider: provider.id,
+        ok: health.ok,
+        detail: health.detail ?? null,
+      });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // Phase 26 #36: rolling cost summary for the dashboard widget. Sums
+  // statements.llm_cost_micros across three windows + per-statement
+  // average for the 30d window.
+  router.get('/llm-provider/cost-summary', async (_req, res, next) => {
+    try {
+      const sumExpr = sql<string>`coalesce(sum(${statements.llmCostMicros}), 0)`;
+      const countExpr = sql<string>`count(*)`;
+      const window = async (
+        days: number,
+      ): Promise<{ totalMicros: bigint; statementCount: number }> => {
+        const rows = await db
+          .select({ total: sumExpr, count: countExpr })
+          .from(statements)
+          .where(sql`${statements.createdAt} >= now() - (${days} || ' days')::interval`);
+        return {
+          totalMicros: BigInt(rows[0]?.total ?? '0'),
+          statementCount: Number.parseInt(rows[0]?.count ?? '0', 10),
+        };
+      };
+      const [d7, d30, d90] = await Promise.all([window(7), window(30), window(90)]);
+      const microsToUsd = (micros: bigint): number => Number(micros) / 1_000_000;
+      res.json({
+        days7: { totalUsd: microsToUsd(d7.totalMicros), statements: d7.statementCount },
+        days30: {
+          totalUsd: microsToUsd(d30.totalMicros),
+          statements: d30.statementCount,
+          avgUsdPerStatement:
+            d30.statementCount === 0 ? 0 : microsToUsd(d30.totalMicros) / d30.statementCount,
+        },
+        days90: { totalUsd: microsToUsd(d90.totalMicros), statements: d90.statementCount },
+      });
     } catch (err) {
       next(err);
     }

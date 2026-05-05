@@ -22,7 +22,7 @@ import {
 import { schemas } from '@vibe-tx-converter/shared';
 
 import { db } from '../db/client.js';
-import { accounts, statements, transactions } from '../db/schema.js';
+import { accounts, statements, systemSettings, transactions } from '../db/schema.js';
 import { logger } from '../lib/logger.js';
 import { buildProvider } from '../services/llm-provider.js';
 import { writeAudit } from '../services/audit.js';
@@ -124,6 +124,36 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
   // gets the same schema via its tool_use input_schema (ADR-020).
   await setStatus(stmtId, 'extracting');
   const provider = await buildProvider(db);
+
+  // Phase 26 #34: enforce monthly cost cap before calling Anthropic.
+  // The cap is a soft USD ceiling — checked against current calendar-
+  // month accrued spend. Local provider is free, so we don't bother.
+  if (provider.id === 'anthropic') {
+    const capRows = await db
+      .select()
+      .from(systemSettings)
+      .where(eq(systemSettings.key, 'llm.anthropic.monthly_cap_usd'));
+    const capUsd = capRows[0]?.valuePlaintext ? Number.parseFloat(capRows[0].valuePlaintext) : null;
+    if (capUsd !== null && Number.isFinite(capUsd)) {
+      const spentRows = await db
+        .select({
+          total: sql<string>`coalesce(sum(${statements.llmCostMicros}), 0)`,
+        })
+        .from(statements)
+        .where(sql`date_trunc('month', ${statements.createdAt}) = date_trunc('month', now())`);
+      const spentUsd = Number(BigInt(spentRows[0]?.total ?? '0')) / 1_000_000;
+      if (spentUsd >= capUsd) {
+        const msg = `monthly Anthropic spend cap reached: $${spentUsd.toFixed(2)} ≥ $${capUsd.toFixed(2)}`;
+        await db
+          .update(statements)
+          .set({ status: 'failed', errorMessage: msg, updatedAt: sql`now()` })
+          .where(eq(statements.id, stmtId));
+        logger.warn({ stmtId, spentUsd, capUsd }, 'extraction blocked by monthly cap');
+        return;
+      }
+    }
+  }
+
   const result = await provider.extract(markdown, {
     schema: schemas.extraction.ExtractionJsonSchema,
     ...(dateFormatOverride ? { dateFormatOverride } : {}),

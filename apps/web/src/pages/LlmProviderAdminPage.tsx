@@ -1,0 +1,386 @@
+// Phase 26 admin page for the LLM provider — local Vibe Gateway vs.
+// Anthropic API. The home /admin page also renders an inline summary;
+// this page is the deep-config surface (model picker, monthly cap,
+// test-connection, cost dashboard, key rotation).
+
+import { type FormEvent, useState } from 'react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { Link } from 'react-router-dom';
+
+import { useToast } from '../components/Toast';
+import { api, ApiError } from '../lib/api';
+
+interface ProviderStatus {
+  provider: 'local' | 'anthropic';
+  anthropicModel: string | null;
+  anthropicKeyConfigured: boolean;
+  anthropicKeyLastFour: string | null;
+  allowedModels: string[];
+  monthlyCapUsd: number | null;
+}
+
+interface TestResult {
+  provider: 'local' | 'anthropic';
+  ok: boolean;
+  detail: string | null;
+}
+
+interface CostSummary {
+  days7: { totalUsd: number; statements: number };
+  days30: { totalUsd: number; statements: number; avgUsdPerStatement: number };
+  days90: { totalUsd: number; statements: number };
+}
+
+const fmtUsd = (n: number): string =>
+  n.toLocaleString('en-US', { style: 'currency', currency: 'USD' });
+
+// Phase 26 #29: typed-confirmation phrase. Filed verbatim in the audit
+// log when an operator enables the Anthropic provider.
+const CONFIRM_PHRASE = 'I AUTHORIZE OCR EGRESS';
+
+export function LlmProviderAdminPage() {
+  const qc = useQueryClient();
+  const toast = useToast();
+  const provider = useQuery({
+    queryKey: ['admin', 'llm-provider'],
+    queryFn: () => api.get<ProviderStatus>('/api/admin/llm-provider'),
+  });
+  const cost = useQuery({
+    queryKey: ['admin', 'llm-cost'],
+    queryFn: () => api.get<CostSummary>('/api/admin/llm-provider/cost-summary'),
+  });
+
+  const switchProvider = useMutation({
+    mutationFn: (p: 'local' | 'anthropic') => api.post('/api/admin/llm-provider', { provider: p }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'llm-provider'] }),
+  });
+  const setKey = useMutation({
+    mutationFn: (apiKey: string) => api.post('/api/admin/llm-provider/anthropic-key', { apiKey }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'llm-provider'] }),
+  });
+  const clearKey = useMutation({
+    mutationFn: () => api.delete('/api/admin/llm-provider/anthropic-key'),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'llm-provider'] }),
+  });
+  const setModel = useMutation({
+    mutationFn: (model: string) => api.post('/api/admin/llm-provider/anthropic-model', { model }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'llm-provider'] }),
+  });
+  const setCap = useMutation({
+    mutationFn: (usd: number | null) => api.post('/api/admin/llm-provider/monthly-cap', { usd }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'llm-provider'] }),
+  });
+  const test = useMutation({
+    mutationFn: () => api.post<TestResult>('/api/admin/llm-provider/test'),
+  });
+
+  const [keyInput, setKeyInput] = useState('');
+  const [confirmPhrase, setConfirmPhrase] = useState('');
+  const [error, setError] = useState<string | null>(null);
+
+  const onSetKey = async (e: FormEvent): Promise<void> => {
+    e.preventDefault();
+    setError(null);
+    if (confirmPhrase !== CONFIRM_PHRASE) {
+      setError(`Type the phrase exactly to confirm: ${CONFIRM_PHRASE}`);
+      return;
+    }
+    if (keyInput.length < 20) {
+      setError('Anthropic keys are longer than 20 characters.');
+      return;
+    }
+    try {
+      await setKey.mutateAsync(keyInput);
+      setKeyInput('');
+      setConfirmPhrase('');
+      toast.success('Anthropic key stored AES-256-GCM-encrypted at rest.');
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'failed');
+    }
+  };
+
+  const onClearKey = async (): Promise<void> => {
+    if (!window.confirm('Clear the stored Anthropic API key? Provider will fall back to local.'))
+      return;
+    try {
+      await clearKey.mutateAsync();
+      toast.success('Anthropic key cleared.');
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : 'clear failed');
+    }
+  };
+
+  const onTest = async (): Promise<void> => {
+    try {
+      const result = await test.mutateAsync();
+      if (result.ok) toast.success(`Provider "${result.provider}" reachable.`);
+      else toast.error(`Provider "${result.provider}" not reachable: ${result.detail ?? '?'}`);
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : 'test failed');
+    }
+  };
+
+  const onSetCap = async (raw: string): Promise<void> => {
+    const value = raw.trim();
+    if (value === '') {
+      await setCap.mutateAsync(null);
+      toast.success('Monthly cap cleared (no limit).');
+      return;
+    }
+    const parsed = Number.parseFloat(value);
+    if (!Number.isFinite(parsed) || parsed < 0) {
+      toast.error('Cap must be a non-negative dollar amount.');
+      return;
+    }
+    await setCap.mutateAsync(parsed);
+    toast.success(`Monthly cap set to ${fmtUsd(parsed)}.`);
+  };
+
+  return (
+    <section className="mx-auto max-w-3xl space-y-6">
+      <Link to="/admin" className="text-sm text-ink-muted hover:text-ink">
+        ← Admin
+      </Link>
+      <header>
+        <h1 className="text-2xl font-semibold">LLM provider</h1>
+        <p className="text-sm text-ink-subtle">
+          Local Vibe Gateway is the default. Anthropic is opt-in; switching to it sends
+          OCR-extracted markdown text outbound (never raw PDFs or page images).
+        </p>
+      </header>
+
+      <section className="rounded-lg border border-surface-muted bg-white p-4">
+        <h2 className="text-base font-medium">Routing</h2>
+        {provider.data ? (
+          <>
+            <p className="mt-2 text-sm">
+              Currently routing extractions to{' '}
+              <strong className="font-mono">{provider.data.provider}</strong>.{' '}
+              {provider.data.provider === 'anthropic' && provider.data.anthropicModel
+                ? `Model: ${provider.data.anthropicModel}.`
+                : ''}
+            </p>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <button
+                type="button"
+                disabled={provider.data.provider === 'local'}
+                onClick={() => switchProvider.mutate('local')}
+                className="rounded-md border border-surface-muted px-3 py-1.5 text-sm disabled:opacity-50"
+              >
+                Use local Vibe Gateway
+              </button>
+              <button
+                type="button"
+                disabled={
+                  provider.data.provider === 'anthropic' || !provider.data.anthropicKeyConfigured
+                }
+                onClick={() => switchProvider.mutate('anthropic')}
+                className="rounded-md border border-surface-muted px-3 py-1.5 text-sm disabled:opacity-50"
+                title={
+                  !provider.data.anthropicKeyConfigured
+                    ? 'Set an Anthropic API key first'
+                    : 'Switch routing to Anthropic'
+                }
+              >
+                Use Anthropic
+              </button>
+              <button
+                type="button"
+                onClick={() => void onTest()}
+                disabled={test.isPending}
+                className="rounded-md border border-accent px-3 py-1.5 text-sm text-accent hover:bg-accent/5"
+              >
+                {test.isPending ? 'Testing…' : 'Test connection'}
+              </button>
+            </div>
+          </>
+        ) : (
+          <p className="mt-2 text-sm text-ink-muted">Loading…</p>
+        )}
+      </section>
+
+      {provider.data ? (
+        <section className="rounded-lg border border-surface-muted bg-white p-4">
+          <h2 className="text-base font-medium">Anthropic key</h2>
+          {provider.data.anthropicKeyConfigured ? (
+            <div className="mt-2 flex flex-wrap items-center gap-3 text-sm">
+              <span className="font-mono text-ink-muted">
+                sk-ant-…{provider.data.anthropicKeyLastFour}
+              </span>
+              <button
+                type="button"
+                onClick={() => void onClearKey()}
+                disabled={clearKey.isPending}
+                className="rounded-md border border-danger px-3 py-1 text-xs text-danger hover:bg-danger/5"
+              >
+                Clear key
+              </button>
+            </div>
+          ) : (
+            <p className="mt-2 text-sm text-ink-muted">No key on file.</p>
+          )}
+
+          <form onSubmit={onSetKey} className="mt-4 border-t border-surface-muted pt-4">
+            <p className="text-sm">
+              {provider.data.anthropicKeyConfigured ? 'Replace key' : 'Set key'}
+            </p>
+            <p className="mt-1 text-xs text-ink-subtle">
+              Stored AES-256-GCM-encrypted at rest. Only OCR-extracted markdown text egresses; raw
+              PDFs and page images NEVER leave this server.
+            </p>
+            <input
+              type="password"
+              autoComplete="off"
+              placeholder="sk-ant-…"
+              className="mt-2 w-full rounded-md border border-surface-muted px-3 py-2 text-sm font-mono"
+              value={keyInput}
+              onChange={(e) => setKeyInput(e.target.value)}
+            />
+            <input
+              type="text"
+              placeholder={`Type: ${CONFIRM_PHRASE}`}
+              className="mt-2 w-full rounded-md border border-surface-muted px-3 py-2 text-sm"
+              value={confirmPhrase}
+              onChange={(e) => setConfirmPhrase(e.target.value)}
+            />
+            {error ? (
+              <p role="alert" className="mt-2 text-sm text-danger">
+                {error}
+              </p>
+            ) : null}
+            <button
+              type="submit"
+              disabled={
+                setKey.isPending || keyInput.length < 20 || confirmPhrase !== CONFIRM_PHRASE
+              }
+              className="mt-3 rounded-md bg-accent px-4 py-2 text-sm font-medium text-accent-fg disabled:opacity-50"
+            >
+              {setKey.isPending ? 'Saving…' : 'Save key'}
+            </button>
+          </form>
+        </section>
+      ) : null}
+
+      {provider.data ? (
+        <section className="rounded-lg border border-surface-muted bg-white p-4">
+          <h2 className="text-base font-medium">Model</h2>
+          <p className="mt-1 text-xs text-ink-subtle">
+            Pricing per ADR-020 + the table at <code>packages/extractor/src/llm-client.ts</code>.
+          </p>
+          <select
+            className="mt-2 w-full rounded-md border border-surface-muted bg-white px-3 py-2 text-sm"
+            value={provider.data.anthropicModel ?? provider.data.allowedModels[0]}
+            onChange={(e) => setModel.mutate(e.target.value)}
+          >
+            {provider.data.allowedModels.map((m) => (
+              <option key={m} value={m}>
+                {m}
+              </option>
+            ))}
+          </select>
+        </section>
+      ) : null}
+
+      {provider.data ? (
+        <section className="rounded-lg border border-surface-muted bg-white p-4">
+          <h2 className="text-base font-medium">Monthly spend cap</h2>
+          <p className="mt-1 text-xs text-ink-subtle">
+            Worker refuses to call Anthropic when current calendar-month spend would exceed this.
+            Empty = no cap. Local provider is free and isn&apos;t affected.
+          </p>
+          <CapForm
+            current={provider.data.monthlyCapUsd}
+            disabled={setCap.isPending}
+            onSubmit={onSetCap}
+          />
+        </section>
+      ) : null}
+
+      <section className="rounded-lg border border-surface-muted bg-white p-4">
+        <h2 className="text-base font-medium">Cost dashboard</h2>
+        {cost.data ? (
+          <div className="mt-3 grid gap-3 sm:grid-cols-3">
+            <CostCard
+              label="7d"
+              usd={cost.data.days7.totalUsd}
+              statements={cost.data.days7.statements}
+            />
+            <CostCard
+              label="30d"
+              usd={cost.data.days30.totalUsd}
+              statements={cost.data.days30.statements}
+              extra={`avg ${fmtUsd(cost.data.days30.avgUsdPerStatement)}/stmt`}
+            />
+            <CostCard
+              label="90d"
+              usd={cost.data.days90.totalUsd}
+              statements={cost.data.days90.statements}
+            />
+          </div>
+        ) : (
+          <p className="mt-2 text-sm text-ink-muted">Loading…</p>
+        )}
+      </section>
+    </section>
+  );
+}
+
+function CostCard({
+  label,
+  usd,
+  statements,
+  extra,
+}: {
+  label: string;
+  usd: number;
+  statements: number;
+  extra?: string;
+}) {
+  return (
+    <div className="rounded-md border border-surface-muted bg-surface-subtle p-3">
+      <p className="text-xs uppercase tracking-wide text-ink-muted">{label}</p>
+      <p className="mt-1 font-mono text-lg tabular-nums">{fmtUsd(usd)}</p>
+      <p className="text-xs text-ink-subtle">{statements} statements</p>
+      {extra ? <p className="mt-1 text-xs text-ink-subtle">{extra}</p> : null}
+    </div>
+  );
+}
+
+function CapForm({
+  current,
+  disabled,
+  onSubmit,
+}: {
+  current: number | null;
+  disabled: boolean;
+  onSubmit: (raw: string) => Promise<void>;
+}) {
+  const [val, setVal] = useState<string>(current === null ? '' : current.toFixed(2));
+  return (
+    <form
+      className="mt-2 flex flex-wrap gap-2"
+      onSubmit={(e) => {
+        e.preventDefault();
+        void onSubmit(val);
+      }}
+    >
+      <span className="grid place-items-center text-sm text-ink-muted">$</span>
+      <input
+        type="number"
+        min="0"
+        step="0.01"
+        placeholder="No cap"
+        value={val}
+        onChange={(e) => setVal(e.target.value)}
+        className="w-32 rounded-md border border-surface-muted px-3 py-1.5 text-sm tabular-nums"
+      />
+      <button
+        type="submit"
+        disabled={disabled}
+        className="rounded-md border border-surface-muted px-3 py-1.5 text-sm"
+      >
+        {disabled ? 'Saving…' : 'Save cap'}
+      </button>
+    </form>
+  );
+}

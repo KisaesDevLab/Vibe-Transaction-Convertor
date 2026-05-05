@@ -14,6 +14,7 @@ import { BackupAdminPage } from './pages/BackupAdminPage';
 import { DiagnosticsPage } from './pages/DiagnosticsPage';
 import { EnginesAdminPage } from './pages/EnginesAdminPage';
 import { ExportPage } from './pages/ExportPage';
+import { LlmProviderAdminPage } from './pages/LlmProviderAdminPage';
 import { MaintenanceAdminPage } from './pages/MaintenanceAdminPage';
 import { StatementReviewPage } from './pages/StatementReviewPage';
 import { StatementsListPage } from './pages/StatementsListPage';
@@ -43,6 +44,14 @@ export function App() {
                   element={
                     <AdminGate>
                       <AdminHomePage />
+                    </AdminGate>
+                  }
+                />
+                <Route
+                  path="/admin/llm-provider"
+                  element={
+                    <AdminGate>
+                      <LlmProviderAdminPage />
                     </AdminGate>
                   }
                 />
