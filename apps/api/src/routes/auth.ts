@@ -1,8 +1,8 @@
 import { Router } from 'express';
-import { sql } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 
 import { db } from '../db/client.js';
-import { users } from '../db/schema.js';
+import { sessions, users } from '../db/schema.js';
 import { AuthError, ValidationError } from '../lib/errors.js';
 import { csrfTokenHandler } from '../middleware/csrf.js';
 import { loginRateLimit } from '../middleware/login-rate-limit.js';
@@ -130,8 +130,28 @@ export const usersRouter = (): Router => {
 
   router.get('/', async (_req, res, next) => {
     try {
-      const rows = await db.select().from(users);
-      res.json(rows.map(safeUser));
+      // Phase 26 #5: surface last-login per user. Each session row's
+      // createdAt is "this user authenticated at this moment"; the
+      // newest one is "last login" (or null when the user has never
+      // logged in / sessions were pruned).
+      const rows = await db
+        .select({
+          id: users.id,
+          email: users.email,
+          displayName: users.displayName,
+          role: users.role,
+          createdAt: users.createdAt,
+          lastLoginAt: sql<Date | null>`max(${sessions.createdAt})`,
+        })
+        .from(users)
+        .leftJoin(sessions, eq(sessions.userId, users.id))
+        .groupBy(users.id);
+      res.json(
+        rows.map((u) => ({
+          ...safeUser(u),
+          lastLoginAt: u.lastLoginAt,
+        })),
+      );
     } catch (err) {
       next(err);
     }

@@ -9,6 +9,7 @@ import { writeAudit } from '../services/audit.js';
 import { overrideReconciliation } from '../services/exports.js';
 import { recomputeReconciliation } from '../services/reconciliation.js';
 import { computeFitid, inferTrntype, normalizeDescription } from '@vibe-tx-converter/exporters';
+import { findSuspectRows } from '@vibe-tx-converter/reconciler';
 import { enqueueExtraction, extractionQueue } from '../jobs/queues.js';
 
 const serializeBigint = <T extends Record<string, unknown>>(row: T): T => {
@@ -46,9 +47,33 @@ export const statementsRouter = (): Router => {
         .from(transactions)
         .where(eq(transactions.statementId, id))
         .orderBy(transactions.postedDate, transactions.seqInDay);
+
+      // Phase 18 #25: per-row running-balance suspects. Only meaningful
+      // when the statement actually printed running balances (otherwise
+      // findSuspectRows returns []), so the UI just hides the badges.
+      const suspectByTxId: Record<string, string> = {};
+      if (stmt.openingBalanceCents !== null) {
+        const suspects = findSuspectRows(
+          stmt.openingBalanceCents,
+          txs.map((t) => ({
+            amountCents: t.amountCents,
+            runningBalanceCents: t.runningBalanceCents,
+          })),
+        );
+        for (const s of suspects) {
+          const tx = txs[s.index];
+          if (tx) suspectByTxId[tx.id] = s.deltaCents.toString();
+        }
+      }
+
       res.json({
         statement: serializeBigint(stmt),
-        transactions: txs.map((t) => serializeBigint(t)),
+        transactions: txs.map((t) => ({
+          ...serializeBigint(t),
+          // null when the row reconciles cleanly; otherwise the cents
+          // delta against the running balance the LLM wrote.
+          runningBalanceDeltaCents: suspectByTxId[t.id] ?? null,
+        })),
       });
     } catch (err) {
       next(err);

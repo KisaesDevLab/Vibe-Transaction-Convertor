@@ -1,21 +1,58 @@
-import { useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
+import { type FormEvent, useState } from 'react';
+import { Link, useNavigate, useParams } from 'react-router-dom';
 
 import { ACCOUNT_TYPE_LABELS } from '@vibe-tx-converter/shared';
 
 import { AccountFormDialog } from '../components/AccountFormDialog';
 import { useAccounts, useDeleteAccount } from '../hooks/useAccounts';
-import { useCompany } from '../hooks/useCompanies';
+import { useCompany, useDeleteCompany, useUpdateCompany } from '../hooks/useCompanies';
 import { ApiError } from '../lib/api';
 
 export function CompanyDetailPage() {
   const { companyId = '' } = useParams();
+  const navigate = useNavigate();
   const companyQ = useCompany(companyId);
   const company = companyQ.data;
   const accounts = useAccounts(companyId);
   const del = useDeleteAccount(companyId);
+  const updateCompany = useUpdateCompany();
+  const deleteCompany = useDeleteCompany();
   const [open, setOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [editOpen, setEditOpen] = useState(false);
+  const [editName, setEditName] = useState('');
+  const [confirmDelete, setConfirmDelete] = useState('');
+
+  const onEdit = (): void => {
+    setEditName(company?.name ?? '');
+    setEditOpen(true);
+    setError(null);
+  };
+
+  const onSaveEdit = async (e: FormEvent): Promise<void> => {
+    e.preventDefault();
+    const trimmed = editName.trim();
+    if (trimmed.length === 0) {
+      setError('Name is required');
+      return;
+    }
+    try {
+      await updateCompany.mutateAsync({ id: companyId, name: trimmed });
+      setEditOpen(false);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'update failed');
+    }
+  };
+
+  const onDeleteCompany = async (): Promise<void> => {
+    if (confirmDelete !== company?.name) return;
+    try {
+      await deleteCompany.mutateAsync({ id: companyId });
+      navigate('/companies');
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'delete failed');
+    }
+  };
 
   if (companyQ.isPending || accounts.isPending) {
     return <p className="text-sm text-ink-muted">Loading…</p>;
@@ -36,21 +73,127 @@ export function CompanyDetailPage() {
       <Link to="/companies" className="text-sm text-ink-muted hover:text-ink">
         ← Companies
       </Link>
-      <header className="mt-2 mb-6 flex items-end justify-between">
-        <div>
-          <h1 className="text-2xl font-semibold">{company.name}</h1>
+      <header className="mt-2 mb-6 flex items-end justify-between gap-3">
+        <div className="min-w-0">
+          <h1 className="truncate text-2xl font-semibold">{company.name}</h1>
           <p className="text-sm text-ink-muted">
             {accounts.data?.length ?? 0} account{(accounts.data?.length ?? 0) === 1 ? '' : 's'}
           </p>
         </div>
-        <button
-          type="button"
-          onClick={() => setOpen(true)}
-          className="rounded-md bg-accent px-4 py-2 text-sm font-medium text-accent-fg"
-        >
-          Add account
-        </button>
+        <div className="flex flex-wrap gap-2">
+          <button
+            type="button"
+            onClick={onEdit}
+            className="rounded-md border border-surface-muted px-3 py-2 text-sm hover:bg-surface-subtle"
+          >
+            Edit
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setConfirmDelete('');
+              setError(null);
+              setEditOpen(false);
+              const dlg = document.getElementById(
+                'delete-company-dialog',
+              ) as HTMLDialogElement | null;
+              dlg?.showModal();
+            }}
+            className="rounded-md border border-danger px-3 py-2 text-sm text-danger hover:bg-danger/5"
+          >
+            Delete
+          </button>
+          <button
+            type="button"
+            onClick={() => setOpen(true)}
+            className="rounded-md bg-accent px-4 py-2 text-sm font-medium text-accent-fg"
+          >
+            Add account
+          </button>
+        </div>
       </header>
+
+      {editOpen ? (
+        <form
+          onSubmit={onSaveEdit}
+          className="mb-4 rounded-lg border border-surface-muted bg-white p-4"
+        >
+          <h2 className="text-base font-medium">Rename company</h2>
+          <input
+            type="text"
+            value={editName}
+            onChange={(e) => setEditName(e.target.value)}
+            className="mt-2 w-full rounded-md border border-surface-muted px-3 py-2 text-sm"
+            autoFocus
+          />
+          <div className="mt-3 flex gap-2">
+            <button
+              type="submit"
+              disabled={updateCompany.isPending}
+              className="rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-accent-fg disabled:opacity-50"
+            >
+              {updateCompany.isPending ? 'Saving…' : 'Save'}
+            </button>
+            <button
+              type="button"
+              onClick={() => setEditOpen(false)}
+              className="rounded-md border border-surface-muted px-3 py-1.5 text-sm"
+            >
+              Cancel
+            </button>
+          </div>
+        </form>
+      ) : null}
+
+      <dialog
+        id="delete-company-dialog"
+        className="rounded-xl p-0 backdrop:bg-ink/40"
+        onClose={() => setConfirmDelete('')}
+      >
+        <form
+          method="dialog"
+          className="w-full max-w-md space-y-3 p-6"
+          onSubmit={(e) => {
+            e.preventDefault();
+            void onDeleteCompany();
+          }}
+        >
+          <h2 className="text-lg font-semibold">Delete company</h2>
+          <p className="text-sm text-ink-muted">
+            This permanently removes <strong>{company.name}</strong>. Companies with accounts cannot
+            be deleted (the API returns 409); delete the accounts first or use the forced cascade
+            endpoint via the API. Type the company name to confirm.
+          </p>
+          <input
+            type="text"
+            value={confirmDelete}
+            onChange={(e) => setConfirmDelete(e.target.value)}
+            placeholder={company.name}
+            className="w-full rounded-md border border-surface-muted px-3 py-2 text-sm"
+          />
+          <div className="flex justify-end gap-2">
+            <button
+              type="button"
+              onClick={() => {
+                const dlg = document.getElementById(
+                  'delete-company-dialog',
+                ) as HTMLDialogElement | null;
+                dlg?.close();
+              }}
+              className="rounded-md border border-surface-muted px-3 py-2 text-sm"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              disabled={confirmDelete !== company.name || deleteCompany.isPending}
+              className="rounded-md bg-danger px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
+            >
+              {deleteCompany.isPending ? 'Deleting…' : 'Delete company'}
+            </button>
+          </div>
+        </form>
+      </dialog>
 
       {error ? (
         <p role="alert" className="mb-3 text-sm text-danger">

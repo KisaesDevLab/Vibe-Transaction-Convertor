@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 
+import { LocaleConfirmBanner } from '../components/LocaleConfirmBanner';
 import { ReconciliationBadge, StatusBadge } from '../components/StatusBadge';
 import { ReconciliationWidget } from '../components/ReconciliationWidget';
 import { TransactionGrid } from '../components/TransactionGrid';
@@ -319,42 +320,17 @@ export function StatementReviewPage() {
       ) : null}
 
       {s.status === 'awaiting-locale-confirmation' ? (
-        <div className="rounded-md border border-amber-300 bg-amber-50 p-4 text-sm text-amber-900">
-          <h2 className="text-base font-semibold">Date format ambiguous</h2>
-          <p className="mt-1">
-            We extracted dates from this PDF but couldn't tell whether the day or the month comes
-            first. Pick the right one — extraction will re-run and exports unblock once
-            reconciliation is verified.
-          </p>
-          <div className="mt-3 flex flex-wrap gap-2">
-            {(['MDY', 'DMY', 'YMD'] as const).map((fmt) => (
-              <button
-                key={fmt}
-                type="button"
-                disabled={confirmFormat.isPending}
-                onClick={async () => {
-                  try {
-                    await confirmFormat.mutateAsync(fmt);
-                    toast.success(`Re-extracting with ${fmt}`);
-                  } catch (err) {
-                    toast.error(err instanceof ApiError ? err.message : 'failed');
-                  }
-                }}
-                className={
-                  fmt === 'MDY'
-                    ? 'rounded-md bg-amber-700 px-3 py-1.5 text-sm font-medium text-white disabled:opacity-50'
-                    : 'rounded-md border border-amber-700 px-3 py-1.5 text-sm font-medium text-amber-900 disabled:opacity-50'
-                }
-              >
-                {fmt === 'MDY'
-                  ? 'Use MDY (US — month/day/year)'
-                  : fmt === 'DMY'
-                    ? 'Use DMY (European — day/month/year)'
-                    : 'Use YMD (ISO 8601)'}
-              </button>
-            ))}
-          </div>
-        </div>
+        <LocaleConfirmBanner
+          onConfirm={async (fmt) => {
+            try {
+              await confirmFormat.mutateAsync(fmt);
+              toast.success(`Re-extracting with ${fmt}`);
+            } catch (err) {
+              toast.error(err instanceof ApiError ? err.message : 'failed');
+            }
+          }}
+          isPending={confirmFormat.isPending}
+        />
       ) : null}
 
       <div className="grid gap-4 lg:grid-cols-[1fr_18rem]">

@@ -121,6 +121,7 @@ export default [
         HTMLTextAreaElement: 'readonly',
         HTMLAnchorElement: 'readonly',
         HTMLTableElement: 'readonly',
+        HTMLDialogElement: 'readonly',
         requestAnimationFrame: 'readonly',
         cancelAnimationFrame: 'readonly',
         ResizeObserver: 'readonly',

@@ -8,8 +8,13 @@ export interface Account {
   nickname: string;
   financialInstitution: string;
   intuBid: string;
+  intuOrg?: string | null;
   accountType: string;
   accountNumberMasked: string;
+  routingNumber: string | null;
+  routingNumberAbaValid: boolean | null;
+  defaultCsvTemplate: 'qbo3' | 'qbo4' | 'xero' | 'generic';
+  intuUseridOverride?: string | null;
 }
 
 export const useAccount = (id: string) =>

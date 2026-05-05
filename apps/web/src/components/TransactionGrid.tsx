@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 
 import { decimalString, formatUsd, parseDecimalToCents } from '@vibe-tx-converter/shared';
 
+import { DeleteConfirmDialog } from './DeleteConfirmDialog';
 import { type TransactionPatch, type TransactionRow } from '../hooks/useStatementsList';
 import { cn } from '../lib/cn';
 
@@ -74,6 +75,10 @@ export function TransactionGrid({
   const [activeRow, setActiveRow] = useState<number>(0);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [bulkTrntype, setBulkTrntype] = useState<string>('');
+  const [pendingDelete, setPendingDelete] = useState<
+    { kind: 'one'; tx: TransactionRow } | { kind: 'bulk'; ids: string[] } | null
+  >(null);
+  const [deleteBusy, setDeleteBusy] = useState(false);
   const tableRef = useRef<HTMLTableElement>(null);
 
   const rows = useMemo(() => {
@@ -194,18 +199,10 @@ export function TransactionGrid({
           {onDelete ? (
             <button
               type="button"
-              onClick={async () => {
+              onClick={() => {
                 const ids = Array.from(selectedIds);
-                if (
-                  !window.confirm(
-                    `Delete ${ids.length} transaction${ids.length === 1 ? '' : 's'}? This cannot be undone.`,
-                  )
-                )
-                  return;
-                for (const id of ids) {
-                  await onDelete(id);
-                }
-                setSelectedIds(new Set());
+                if (ids.length === 0) return;
+                setPendingDelete({ kind: 'bulk', ids });
               }}
               className="rounded-md border border-danger px-3 py-1 text-xs font-medium text-danger"
             >
@@ -332,7 +329,7 @@ export function TransactionGrid({
                   await onSave(tx.id, patch);
                   setEditingId(null);
                 }}
-                onDelete={onDelete ? () => onDelete(tx.id) : undefined}
+                onDelete={onDelete ? () => setPendingDelete({ kind: 'one', tx }) : undefined}
               />
             ))}
             {rows.length === 0 ? (
@@ -350,6 +347,51 @@ export function TransactionGrid({
       </div>
 
       {isAdmin && onAdd ? <AddRowForm onAdd={onAdd} defaultDate={periodStart ?? ''} /> : null}
+
+      <DeleteConfirmDialog
+        open={pendingDelete !== null}
+        title={
+          pendingDelete?.kind === 'bulk'
+            ? `Delete ${pendingDelete.ids.length} transaction${pendingDelete.ids.length === 1 ? '' : 's'}?`
+            : 'Delete transaction?'
+        }
+        description={
+          pendingDelete?.kind === 'bulk'
+            ? 'These rows will be removed from the statement. Reconciliation status will be recomputed automatically; if the delete makes the totals balance, the statement flips back to verified.'
+            : 'This row will be removed from the statement. Reconciliation status is recomputed automatically.'
+        }
+        preview={
+          pendingDelete?.kind === 'one' ? (
+            <div className="space-y-1 font-mono">
+              <div>{pendingDelete.tx.postedDate}</div>
+              <div className="truncate">{pendingDelete.tx.description}</div>
+              <div className="tabular-nums">{formatUsd(BigInt(pendingDelete.tx.amountCents))}</div>
+            </div>
+          ) : pendingDelete?.kind === 'bulk' ? (
+            <div className="text-xs text-ink-muted">{pendingDelete.ids.length} rows selected</div>
+          ) : null
+        }
+        confirmText={
+          pendingDelete?.kind === 'bulk' ? `DELETE ${pendingDelete.ids.length}` : 'DELETE'
+        }
+        busy={deleteBusy}
+        onClose={() => setPendingDelete(null)}
+        onConfirm={async () => {
+          if (!pendingDelete || !onDelete) return;
+          setDeleteBusy(true);
+          try {
+            if (pendingDelete.kind === 'one') {
+              await onDelete(pendingDelete.tx.id);
+            } else {
+              for (const id of pendingDelete.ids) await onDelete(id);
+              setSelectedIds(new Set());
+            }
+            setPendingDelete(null);
+          } finally {
+            setDeleteBusy(false);
+          }
+        }}
+      />
     </div>
   );
 }
@@ -538,7 +580,7 @@ function Row({
   onStartEdit: () => void;
   onCancelEdit: () => void;
   onSave: (patch: TransactionPatch) => Promise<unknown>;
-  onDelete?: (() => Promise<unknown>) | undefined;
+  onDelete?: (() => void) | undefined;
 }) {
   const [desc, setDesc] = useState(tx.description);
   const [amount, setAmount] = useState(decimalString(BigInt(tx.amountCents)));
@@ -687,6 +729,14 @@ function Row({
       </td>
       <td className="px-3 py-2 text-right text-xs tabular-nums text-ink-subtle">
         {tx.runningBalanceCents ? formatUsd(BigInt(tx.runningBalanceCents)) : ''}
+        {tx.runningBalanceDeltaCents && tx.runningBalanceDeltaCents !== '0' ? (
+          <span
+            title={`Printed running balance is off by ${formatUsd(BigInt(tx.runningBalanceDeltaCents))} vs prior_running + this row's amount.`}
+            className="ml-1 inline-block rounded bg-amber-100 px-1 py-0.5 text-[10px] font-medium text-amber-900"
+          >
+            off by {formatUsd(BigInt(tx.runningBalanceDeltaCents))}
+          </span>
+        ) : null}
       </td>
       <td className="px-3 py-2 text-right text-xs text-ink-subtle">{tx.sourcePage}</td>
       <td className="px-3 py-2 text-right">
@@ -708,10 +758,9 @@ function Row({
           {onDelete ? (
             <button
               type="button"
-              onClick={async (e) => {
+              onClick={(e) => {
                 e.stopPropagation();
-                if (!window.confirm(`Delete this transaction (${tx.description})?`)) return;
-                await onDelete();
+                onDelete();
               }}
               title="Admin: delete transaction"
               className="rounded text-xs text-ink-subtle hover:text-danger"

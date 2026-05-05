@@ -48,6 +48,10 @@ export interface TransactionRow {
   sourceBboxJson: [number, number, number, number] | null;
   userEdited: boolean;
   confidence: number;
+  // Server-computed: cents the printed running_balance is off vs.
+  // (prior_running + this row's amount). Null when the row reconciles
+  // cleanly or no running balance was extracted. Phase 18 #25.
+  runningBalanceDeltaCents?: string | null;
 }
 
 export const useStatementsByAccount = (accountId: string) =>

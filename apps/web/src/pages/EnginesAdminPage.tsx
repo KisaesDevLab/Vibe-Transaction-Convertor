@@ -41,6 +41,15 @@ interface TestResult {
   latencyMs?: number;
 }
 
+interface CostSummary {
+  days7: { totalUsd: number; statements: number };
+  days30: { totalUsd: number; statements: number; avgUsdPerStatement: number };
+  days90: { totalUsd: number; statements: number };
+}
+
+const fmtUsd = (n: number): string =>
+  n.toLocaleString('en-US', { style: 'currency', currency: 'USD' });
+
 const palette = (s: 'ok' | 'fail' | 'unconfigured'): string =>
   s === 'ok'
     ? 'bg-emerald-50 text-emerald-800'
@@ -60,6 +69,12 @@ export function EnginesAdminPage() {
   const engines = useQuery({
     queryKey: ['admin', 'engines'],
     queryFn: () => api.get<EnginesResponse>('/api/admin/engines'),
+  });
+  const cost = useQuery({
+    queryKey: ['admin', 'llm-cost'],
+    queryFn: () => api.get<CostSummary>('/api/admin/llm-provider/cost-summary'),
+    // Cost numbers move slowly; refresh every minute is plenty.
+    refetchInterval: 60_000,
   });
 
   const deps = ready.data?.dependencies ?? {};
@@ -110,7 +125,64 @@ export function EnginesAdminPage() {
         config={cfgs?.['llm-gateway'] ?? null}
         notes="Default extraction provider — Qwen3-8B via Vibe LLM Gateway. Switching to Anthropic happens on /admin/llm-provider; this URL is only used when provider=local."
       />
+
+      <section className="rounded-lg border border-surface-muted bg-white p-4">
+        <header className="flex items-baseline justify-between">
+          <h2 className="text-base font-medium">LLM cost rollup</h2>
+          <Link to="/admin/llm-provider" className="text-xs text-accent hover:underline">
+            Manage provider →
+          </Link>
+        </header>
+        <p className="mt-1 text-xs text-ink-muted">
+          Rolls up{' '}
+          <code className="rounded bg-surface-subtle px-1">statements.llm_cost_micros</code> per
+          window. Local provider is free, so these only move when routing to Anthropic.
+        </p>
+        {cost.data ? (
+          <div className="mt-3 grid gap-3 sm:grid-cols-3">
+            <CostCard
+              label="7d"
+              usd={cost.data.days7.totalUsd}
+              statements={cost.data.days7.statements}
+            />
+            <CostCard
+              label="30d"
+              usd={cost.data.days30.totalUsd}
+              statements={cost.data.days30.statements}
+              extra={`avg ${fmtUsd(cost.data.days30.avgUsdPerStatement)}/stmt`}
+            />
+            <CostCard
+              label="90d"
+              usd={cost.data.days90.totalUsd}
+              statements={cost.data.days90.statements}
+            />
+          </div>
+        ) : (
+          <p className="mt-2 text-xs text-ink-muted">Loading…</p>
+        )}
+      </section>
     </section>
+  );
+}
+
+function CostCard({
+  label,
+  usd,
+  statements,
+  extra,
+}: {
+  label: string;
+  usd: number;
+  statements: number;
+  extra?: string;
+}) {
+  return (
+    <div className="rounded-md border border-surface-muted bg-surface-subtle p-3">
+      <p className="text-xs uppercase tracking-wide text-ink-muted">{label}</p>
+      <p className="mt-1 font-mono text-lg tabular-nums">{fmtUsd(usd)}</p>
+      <p className="text-xs text-ink-subtle">{statements} statements</p>
+      {extra ? <p className="mt-1 text-xs text-ink-subtle">{extra}</p> : null}
+    </div>
   );
 }
 

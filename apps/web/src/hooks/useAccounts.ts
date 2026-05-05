@@ -65,6 +65,25 @@ export const useDeleteAccount = (companyId: string) => {
   });
 };
 
+export interface UpdateAccountInput {
+  nickname?: string;
+  defaultCsvTemplate?: CsvTemplate;
+  routingNumber?: string | null;
+  intuUseridOverride?: string | null;
+}
+
+export const useUpdateAccount = (companyId: string) => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, patch }: { id: string; patch: UpdateAccountInput }) =>
+      api.patch<Account>(`/api/accounts/${id}`, patch),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: accountsKey(companyId) });
+      qc.invalidateQueries({ queryKey: ['account'] });
+    },
+  });
+};
+
 export interface UploadResult {
   statements: Array<{
     filename: string;

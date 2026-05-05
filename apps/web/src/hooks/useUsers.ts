@@ -8,6 +8,9 @@ export interface AdminUser {
   displayName: string;
   role: 'admin' | 'staff';
   createdAt: string;
+  // ISO timestamp of the most recent session.created_at; null when the
+  // user has never logged in or all sessions have been pruned.
+  lastLoginAt?: string | null;
 }
 
 const usersKey = ['admin', 'users'] as const;

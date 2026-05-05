@@ -5,6 +5,19 @@ import { useAdminUsers, useCreateStaff, useResetPassword } from '../hooks/useUse
 import { useToast } from '../components/Toast';
 import { ApiError } from '../lib/api';
 
+const formatRelativeTime = (iso: string): string => {
+  const ms = Date.now() - new Date(iso).getTime();
+  if (ms < 60_000) return 'just now';
+  const minutes = Math.floor(ms / 60_000);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(ms / 3_600_000);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(ms / 86_400_000);
+  if (days < 30) return `${days}d ago`;
+  const months = Math.floor(days / 30);
+  return `${months}mo ago`;
+};
+
 export function UsersAdminPage() {
   const list = useAdminUsers();
   const create = useCreateStaff();
@@ -114,6 +127,7 @@ export function UsersAdminPage() {
               <th className="px-3 py-2 font-medium">Email</th>
               <th className="px-3 py-2 font-medium">Role</th>
               <th className="px-3 py-2 font-medium">Created</th>
+              <th className="px-3 py-2 font-medium">Last login</th>
               <th className="px-3 py-2"></th>
             </tr>
           </thead>
@@ -127,6 +141,9 @@ export function UsersAdminPage() {
                 </td>
                 <td className="px-3 py-2 text-xs text-ink-subtle">
                   {new Date(u.createdAt).toLocaleDateString()}
+                </td>
+                <td className="px-3 py-2 text-xs text-ink-subtle">
+                  {u.lastLoginAt ? formatRelativeTime(u.lastLoginAt) : 'never'}
                 </td>
                 <td className="px-3 py-2 text-right">
                   <button

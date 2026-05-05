@@ -1,12 +1,17 @@
-import { useEffect, useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
+import { type FormEvent, useEffect, useState } from 'react';
+import { Link, useNavigate, useParams } from 'react-router-dom';
 
 import { ACCOUNT_TYPE_LABELS, type AccountTypeCode } from '@vibe-tx-converter/shared';
 
 import { StatusBadge, ReconciliationBadge } from '../components/StatusBadge';
 import { UploadDropzone } from '../components/UploadDropzone';
 import { useToast } from '../components/Toast';
-import { fetchRevealedAccount } from '../hooks/useAccounts';
+import {
+  fetchRevealedAccount,
+  useDeleteAccount,
+  useUpdateAccount,
+  type CsvTemplate,
+} from '../hooks/useAccounts';
 import { useMe } from '../hooks/useAuth';
 import { useAccount } from '../hooks/useStatements';
 import { useStatementsByAccount } from '../hooks/useStatementsList';
@@ -16,12 +21,21 @@ const REVEAL_DURATION_MS = 30_000;
 
 export function AccountDetailPage() {
   const { accountId = '' } = useParams();
+  const navigate = useNavigate();
   const account = useAccount(accountId);
   const statements = useStatementsByAccount(accountId);
   const me = useMe();
   const toast = useToast();
   const [revealedNumber, setRevealedNumber] = useState<string | null>(null);
   const [revealMsRemaining, setRevealMsRemaining] = useState<number>(0);
+  const [editOpen, setEditOpen] = useState(false);
+  const [editNickname, setEditNickname] = useState('');
+  const [editTemplate, setEditTemplate] = useState<CsvTemplate>('qbo3');
+  const [editRouting, setEditRouting] = useState('');
+  const [editError, setEditError] = useState<string | null>(null);
+  const [confirmDeleteText, setConfirmDeleteText] = useState('');
+  const updateAccount = useUpdateAccount(account.data?.companyId ?? '');
+  const deleteAccount = useDeleteAccount(account.data?.companyId ?? '');
 
   useEffect(() => {
     if (!revealedNumber) return;
@@ -50,6 +64,48 @@ export function AccountDetailPage() {
 
   const a = account.data;
   const isAdmin = me.data?.role === 'admin';
+
+  const openEdit = (): void => {
+    setEditNickname(a.nickname);
+    setEditTemplate(a.defaultCsvTemplate);
+    setEditRouting(a.routingNumber ?? '');
+    setEditError(null);
+    setEditOpen(true);
+  };
+
+  const onSaveEdit = async (e: FormEvent): Promise<void> => {
+    e.preventDefault();
+    const trimmed = editNickname.trim();
+    if (trimmed.length === 0) {
+      setEditError('Nickname is required');
+      return;
+    }
+    try {
+      await updateAccount.mutateAsync({
+        id: a.id,
+        patch: {
+          nickname: trimmed,
+          defaultCsvTemplate: editTemplate,
+          routingNumber: editRouting.trim().length === 0 ? null : editRouting.trim(),
+        },
+      });
+      setEditOpen(false);
+      toast.success('Account updated');
+    } catch (err) {
+      setEditError(err instanceof ApiError ? err.message : 'update failed');
+    }
+  };
+
+  const onDeleteAccount = async (): Promise<void> => {
+    if (confirmDeleteText !== a.nickname) return;
+    try {
+      await deleteAccount.mutateAsync({ id: a.id });
+      toast.success(`Deleted ${a.nickname}`);
+      navigate(`/companies/${a.companyId}`);
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : 'delete failed');
+    }
+  };
 
   const onReveal = async (): Promise<void> => {
     try {
@@ -90,9 +146,153 @@ export function AccountDetailPage() {
         </h1>
         <p className="text-sm text-ink-subtle">
           {a.financialInstitution} · BID {a.intuBid} ·{' '}
-          {ACCOUNT_TYPE_LABELS[a.accountType as AccountTypeCode] ?? a.accountType}
+          {ACCOUNT_TYPE_LABELS[a.accountType as AccountTypeCode] ?? a.accountType} ·{' '}
+          {a.defaultCsvTemplate}
+          {a.routingNumber ? ` · routing ${a.routingNumber}` : ''}
         </p>
+        <div className="mt-3 flex flex-wrap gap-2">
+          <button
+            type="button"
+            onClick={openEdit}
+            className="rounded-md border border-surface-muted px-3 py-1.5 text-sm hover:bg-surface-subtle"
+          >
+            Edit
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setConfirmDeleteText('');
+              const dlg = document.getElementById(
+                'delete-account-dialog',
+              ) as HTMLDialogElement | null;
+              dlg?.showModal();
+            }}
+            className="rounded-md border border-danger px-3 py-1.5 text-sm text-danger hover:bg-danger/5"
+          >
+            Delete
+          </button>
+        </div>
       </header>
+
+      {editOpen ? (
+        <form
+          onSubmit={onSaveEdit}
+          className="mb-6 rounded-lg border border-surface-muted bg-white p-4"
+        >
+          <h2 className="text-base font-medium">Edit account</h2>
+          <p className="mt-1 text-xs text-ink-subtle">
+            Account type, account number, and FI/BID are immutable — the FITID derivation depends on
+            them. Re-create the account to change those.
+          </p>
+          <div className="mt-3 grid gap-3 sm:grid-cols-2">
+            <label className="block text-xs text-ink-muted">
+              Nickname
+              <input
+                type="text"
+                value={editNickname}
+                onChange={(e) => setEditNickname(e.target.value)}
+                className="mt-1 w-full rounded-md border border-surface-muted px-3 py-1.5 text-sm"
+                autoFocus
+              />
+            </label>
+            <label className="block text-xs text-ink-muted">
+              Default CSV template
+              <select
+                value={editTemplate}
+                onChange={(e) => setEditTemplate(e.target.value as CsvTemplate)}
+                className="mt-1 w-full rounded-md border border-surface-muted bg-white px-3 py-1.5 text-sm"
+              >
+                <option value="qbo3">qbo3 — Date, Description, Amount</option>
+                <option value="qbo4">qbo4 — Date, Description, Credit, Debit</option>
+                <option value="xero">xero — *Date, *Amount, Payee, …</option>
+                <option value="generic">generic — full denormalized row</option>
+              </select>
+            </label>
+            <label className="block text-xs text-ink-muted sm:col-span-2">
+              Routing number (optional)
+              <input
+                type="text"
+                value={editRouting}
+                onChange={(e) => setEditRouting(e.target.value)}
+                placeholder="9-digit ABA — leave blank for credit cards"
+                className="mt-1 w-full rounded-md border border-surface-muted px-3 py-1.5 text-sm font-mono tabular-nums"
+                inputMode="numeric"
+              />
+            </label>
+          </div>
+          {editError ? (
+            <p role="alert" className="mt-2 text-sm text-danger">
+              {editError}
+            </p>
+          ) : null}
+          <div className="mt-3 flex gap-2">
+            <button
+              type="submit"
+              disabled={updateAccount.isPending}
+              className="rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-accent-fg disabled:opacity-50"
+            >
+              {updateAccount.isPending ? 'Saving…' : 'Save'}
+            </button>
+            <button
+              type="button"
+              onClick={() => setEditOpen(false)}
+              className="rounded-md border border-surface-muted px-3 py-1.5 text-sm"
+            >
+              Cancel
+            </button>
+          </div>
+        </form>
+      ) : null}
+
+      <dialog
+        id="delete-account-dialog"
+        className="rounded-xl p-0 backdrop:bg-ink/40"
+        onClose={() => setConfirmDeleteText('')}
+      >
+        <form
+          method="dialog"
+          className="w-full max-w-md space-y-3 p-6"
+          onSubmit={(e) => {
+            e.preventDefault();
+            void onDeleteAccount();
+          }}
+        >
+          <h2 className="text-lg font-semibold">Delete account</h2>
+          <p className="text-sm text-ink-muted">
+            This permanently removes <strong>{a.nickname}</strong>. Accounts with statements on file
+            return 409 — delete the statements first, or pass <code>force=true</code>
+            via the API. Type the nickname to confirm.
+          </p>
+          <input
+            type="text"
+            value={confirmDeleteText}
+            onChange={(e) => setConfirmDeleteText(e.target.value)}
+            placeholder={a.nickname}
+            className="w-full rounded-md border border-surface-muted px-3 py-2 text-sm"
+          />
+          <div className="flex justify-end gap-2">
+            <button
+              type="button"
+              onClick={() => {
+                const dlg = document.getElementById(
+                  'delete-account-dialog',
+                ) as HTMLDialogElement | null;
+                dlg?.close();
+              }}
+              className="rounded-md border border-surface-muted px-3 py-2 text-sm"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              disabled={confirmDeleteText !== a.nickname || deleteAccount.isPending}
+              className="rounded-md bg-danger px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
+            >
+              {deleteAccount.isPending ? 'Deleting…' : 'Delete account'}
+            </button>
+          </div>
+        </form>
+      </dialog>
 
       <h2 className="mb-2 text-lg font-medium">Upload statements</h2>
       <UploadDropzone accountId={a.id} />
