@@ -24,6 +24,7 @@ import {
 } from '../hooks/useStatementsList';
 import { useAccount } from '../hooks/useStatements';
 import { useAccounts } from '../hooks/useAccounts';
+import { useCompany } from '../hooks/useCompanies';
 import { useMe } from '../hooks/useAuth';
 import { ApiError } from '../lib/api';
 import { SplitStatementModal } from '../components/SplitStatementModal';
@@ -105,6 +106,7 @@ export function StatementReviewPage() {
   // accounts under the same company in the per-segment dropdowns.
   const parentAccount = useAccount(stmt.data?.statement.accountId ?? '');
   const accountsInCompany = useAccounts(parentAccount.data?.companyId ?? '');
+  const parentCompany = useCompany(parentAccount.data?.companyId ?? '');
 
   const txSumCents = useMemo<bigint>(() => {
     if (!stmt.data) return 0n;
@@ -154,6 +156,36 @@ export function StatementReviewPage() {
 
       <header className="flex flex-wrap items-end justify-between gap-3">
         <div>
+          {/* Company → account breadcrumb (BuildPlan §18.6). Each link
+              jumps back to the parent so the user can pivot from a
+              statement to other statements on the same account or to
+              the company's full account list. */}
+          <p className="text-xs text-ink-muted">
+            {parentCompany.data ? (
+              <Link
+                to={`/companies/${parentCompany.data.id}`}
+                className="hover:text-ink hover:underline"
+              >
+                {parentCompany.data.name}
+              </Link>
+            ) : (
+              <span className="text-ink-subtle">…</span>
+            )}
+            <span className="mx-1.5 text-ink-subtle">/</span>
+            {parentAccount.data ? (
+              <Link
+                to={`/accounts/${parentAccount.data.id}`}
+                className="hover:text-ink hover:underline"
+              >
+                {parentAccount.data.nickname}{' '}
+                <span className="font-normal text-ink-subtle">
+                  {parentAccount.data.accountNumberMasked}
+                </span>
+              </Link>
+            ) : (
+              <span className="text-ink-subtle">…</span>
+            )}
+          </p>
           <h1 className="text-2xl font-semibold">
             {s.periodStart && s.periodEnd
               ? `${s.periodStart} → ${s.periodEnd}`
