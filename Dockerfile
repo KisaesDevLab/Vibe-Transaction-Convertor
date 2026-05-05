@@ -40,9 +40,15 @@ LABEL org.opencontainers.image.title="vibe-tx-converter" \
       org.opencontainers.image.description="Self-hosted PDF-statement converter to CSV/OFX/QFX/QBO" \
       org.opencontainers.image.version="${BUILD_SHA}"
 
-# Workspace symlinks resolved by pnpm — copy node_modules and dist trees.
+# Workspace symlinks resolved by pnpm. The root /app/node_modules
+# carries the .pnpm content store; each workspace's own node_modules
+# carries the per-package symlinks that point into that store. Both
+# halves are required for runtime module resolution from
+# /app/apps/api/dist/... — without apps/api/node_modules, Node can't
+# find pg / bullmq / drizzle / etc. and boot crashes.
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/apps/api/dist ./apps/api/dist
+COPY --from=builder /app/apps/api/node_modules ./apps/api/node_modules
 COPY --from=builder /app/apps/api/package.json ./apps/api/package.json
 COPY --from=builder /app/apps/api/src/db/migrations ./apps/api/src/db/migrations
 COPY --from=builder /app/apps/web/dist ./apps/web/dist
