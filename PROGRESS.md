@@ -18,7 +18,7 @@ typecheck → lint → test → build).
 | 9     | PDF Upload, Storage, Hashing                 | ✅     | `dc560c7` | sha256 + dedup + dropzone           |
 | 10    | PDF Pre-Processing & Routing                 | ✅     | `5c8b41b` | analyze + route + textLayer + bbox  |
 | 11    | GLM-OCR HTTP Client                          | ✅     | `c76d8cf` | retry+concurrency+cache, mocked     |
-| 12    | LLM Extractor — Schema, Prompts, Exemplars   | ⏸      | —         |                                     |
+| 12    | LLM Extractor — Schema, Prompts, Exemplars   | ✅     | `ebecc34` | Zod + JSON-schema + 1 exemplar      |
 | 13    | LLM Provider Abstraction (Local + Anthropic) | ⏸      | —         |                                     |
 | 14    | Multi-Account Auto-Split                     | ⏸      | —         |                                     |
 | 15    | BullMQ Extraction Pipeline                   | ⏸      | —         |                                     |
