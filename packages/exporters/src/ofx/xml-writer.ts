@@ -26,9 +26,19 @@ export const renderStmtTrnXml = (trn: Stmt['transactions'][number]): string =>
   (trn.memo ? `\n        ${tag('MEMO', xmlEscape(trn.memo.slice(0, 255)))}` : '') +
   `\n      </STMTTRN>`;
 
-export const renderOfxXml = (stmt: Stmt): string => {
+export interface OfxXmlOptions {
+  // When the statement was exported under a Golden Rule override, drop a
+  // forensic XML comment up top so future reviewers see the trail.
+  // (Phase 21 item 22.)
+  overrideNote?: string;
+}
+
+export const renderOfxXml = (stmt: Stmt, opts: OfxXmlOptions = {}): string => {
   const isCC = stmt.bankAccountInfo.accountType === 'CREDITCARD';
   const trnList = stmt.transactions.map(renderStmtTrnXml).join('\n');
+  const forensicComment = opts.overrideNote
+    ? `<!-- Reconciliation: ${xmlEscape(opts.overrideNote)} -->\n`
+    : '';
 
   const acctBlock = isCC
     ? `<CCACCTFROM>
@@ -82,6 +92,7 @@ ${trnList}
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <?OFX OFXHEADER="200" VERSION="211" SECURITY="NONE" OLDFILEUID="NONE" NEWFILEUID="NONE"?>
+${forensicComment}
 <OFX>
   <SIGNONMSGSRSV1>
     <SONRS>

@@ -21,6 +21,12 @@ export interface StatementSummary {
   sourceDateFormatConfidence: number | null;
   sourceDateFormatUserConfirmed: boolean | null;
   periodBoundsViolations: number;
+  detectedSplits: {
+    multiAccount: boolean;
+    uniqueLast4: string[];
+    splits: Array<{ last4: string; pageStart: number; pageEnd: number }>;
+  } | null;
+  multiAccountAcknowledged: boolean;
   errorMessage: string | null;
   createdAt: string;
   updatedAt: string;
@@ -134,6 +140,27 @@ export const useReExtract = (statementId: string) => {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: () => api.post<{ ok: boolean }>(`/api/statements/${statementId}/re-extract`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['statement', statementId] }),
+  });
+};
+
+export const useAcknowledgeMultiAccount = (statementId: string) => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () =>
+      api.post<{ ok: boolean }>(`/api/statements/${statementId}/acknowledge-multi-account`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['statement', statementId] }),
+  });
+};
+
+export const useConfirmDateFormat = (statementId: string) => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (format: 'MDY' | 'DMY' | 'YMD') =>
+      api.post<{ ok: boolean; format: string }>(
+        `/api/statements/${statementId}/confirm-date-format`,
+        { format },
+      ),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['statement', statementId] }),
   });
 };

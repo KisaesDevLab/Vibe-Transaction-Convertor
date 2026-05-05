@@ -1,5 +1,6 @@
 import { logger } from '../lib/logger.js';
 import { startExtractionWorker } from './extraction.worker.js';
+import { startMaintenanceWorker } from './maintenance.worker.js';
 
 let started = false;
 
@@ -14,6 +15,7 @@ export const startWorkers = (): void => {
     return;
   }
   startExtractionWorker();
+  startMaintenanceWorker();
   started = true;
-  logger.info('extraction worker started (inline)');
+  logger.info('inline workers started: extraction + maintenance');
 };

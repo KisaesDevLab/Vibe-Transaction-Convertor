@@ -62,15 +62,18 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
     const pages = await extractTextLayerFromBuffer(await readFile(data.sourcePdfPath));
     markdown = pages.map((p) => `# Page ${p.index + 1}\n\n${p.text}`).join('\n\n');
     // Persist detected splits so the UI can offer a confirmation flow.
+    // The user can either acknowledge ('whole PDF is one account, proceed')
+    // or upload pages separately. Phase 14.
     const splitInfo = detectMultiAccount(pages);
     if (splitInfo.multiAccount) {
+      await db
+        .update(statements)
+        .set({ detectedSplits: splitInfo, updatedAt: sql`now()` })
+        .where(eq(statements.id, stmtId));
       logger.warn(
         { stmtId, splits: splitInfo.splits },
-        'multi-account PDF detected; user can confirm in UI',
+        'multi-account PDF detected; persisted splits for UI confirmation',
       );
-      // Stash splits in error_message until a dedicated column is added —
-      // a small workaround so the UI can read them. Phase 14 schema
-      // refresh adds a typed field.
     }
   } else {
     // OCR path. rasterizePdf throws today (Q-006) until poppler is wired

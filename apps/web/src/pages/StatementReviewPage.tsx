@@ -7,7 +7,9 @@ import { TransactionGrid } from '../components/TransactionGrid';
 import { PdfViewer } from '../components/PdfViewer';
 import { useToast } from '../components/Toast';
 import {
+  useAcknowledgeMultiAccount,
   useAddTransaction,
+  useConfirmDateFormat,
   useDeleteTransaction,
   useReExtract,
   useStatement,
@@ -79,6 +81,8 @@ export function StatementReviewPage() {
   const addTx = useAddTransaction(statementId);
   const deleteTx = useDeleteTransaction(statementId);
   const reExtract = useReExtract(statementId);
+  const confirmFormat = useConfirmDateFormat(statementId);
+  const ackMultiAccount = useAcknowledgeMultiAccount(statementId);
   const me = useMe();
   const isAdmin = me.data?.role === 'admin';
   const toast = useToast();
@@ -233,30 +237,77 @@ export function StatementReviewPage() {
         </div>
       ) : null}
 
+      {s.detectedSplits?.multiAccount && !s.multiAccountAcknowledged ? (
+        <div className="rounded-md border border-blue-200 bg-blue-50 p-4 text-sm text-blue-900">
+          <h2 className="text-base font-semibold">Multiple accounts detected in this PDF</h2>
+          <p className="mt-1">
+            We saw {s.detectedSplits.uniqueLast4.length} different account numbers across the pages
+            of this PDF (ending in {s.detectedSplits.uniqueLast4.join(', ')}). The extraction
+            proceeded as one statement; this often produces unbalanced results. Consider
+            re-uploading each account separately.
+          </p>
+          <ul className="mt-2 list-disc pl-5 text-xs text-blue-800">
+            {s.detectedSplits.splits.map((sp, i) => (
+              <li key={i}>
+                <code className="rounded bg-white px-1">••••{sp.last4}</code> — pages{' '}
+                {sp.pageStart + 1} to {sp.pageEnd + 1}
+              </li>
+            ))}
+          </ul>
+          <button
+            type="button"
+            onClick={async () => {
+              try {
+                await ackMultiAccount.mutateAsync();
+                toast.success('Multi-account warning dismissed');
+              } catch (err) {
+                toast.error(err instanceof ApiError ? err.message : 'failed');
+              }
+            }}
+            disabled={ackMultiAccount.isPending}
+            className="mt-3 rounded-md border border-blue-700 px-3 py-1.5 text-xs font-medium text-blue-900 disabled:opacity-50"
+          >
+            Acknowledge — proceed as single statement
+          </button>
+        </div>
+      ) : null}
+
       {s.status === 'awaiting-locale-confirmation' ? (
         <div className="rounded-md border border-amber-300 bg-amber-50 p-4 text-sm text-amber-900">
           <h2 className="text-base font-semibold">Date format ambiguous</h2>
           <p className="mt-1">
             We extracted dates from this PDF but couldn't tell whether the day or the month comes
-            first. Pick the right one before exports unblock.
+            first. Pick the right one — extraction will re-run and exports unblock once
+            reconciliation is verified.
           </p>
-          <div className="mt-3 flex gap-2">
-            <button
-              type="button"
-              className="rounded-md bg-amber-700 px-3 py-1.5 text-sm font-medium text-white"
-            >
-              Use MDY (US — month/day/year)
-            </button>
-            <button
-              type="button"
-              className="rounded-md border border-amber-700 px-3 py-1.5 text-sm font-medium text-amber-900"
-            >
-              Use DMY (European — day/month/year)
-            </button>
+          <div className="mt-3 flex flex-wrap gap-2">
+            {(['MDY', 'DMY', 'YMD'] as const).map((fmt) => (
+              <button
+                key={fmt}
+                type="button"
+                disabled={confirmFormat.isPending}
+                onClick={async () => {
+                  try {
+                    await confirmFormat.mutateAsync(fmt);
+                    toast.success(`Re-extracting with ${fmt}`);
+                  } catch (err) {
+                    toast.error(err instanceof ApiError ? err.message : 'failed');
+                  }
+                }}
+                className={
+                  fmt === 'MDY'
+                    ? 'rounded-md bg-amber-700 px-3 py-1.5 text-sm font-medium text-white disabled:opacity-50'
+                    : 'rounded-md border border-amber-700 px-3 py-1.5 text-sm font-medium text-amber-900 disabled:opacity-50'
+                }
+              >
+                {fmt === 'MDY'
+                  ? 'Use MDY (US — month/day/year)'
+                  : fmt === 'DMY'
+                    ? 'Use DMY (European — day/month/year)'
+                    : 'Use YMD (ISO 8601)'}
+              </button>
+            ))}
           </div>
-          <p className="mt-2 text-xs italic">
-            Confirmation endpoint lands when the LLM extractor reports an ambiguous source.
-          </p>
         </div>
       ) : null}
 

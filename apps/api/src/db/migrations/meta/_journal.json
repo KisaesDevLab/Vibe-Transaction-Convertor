@@ -29,6 +29,13 @@
       "when": 1777937042573,
       "tag": "0003_check_constraints",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1777937042574,
+      "tag": "0004_multi_account_splits",
+      "breakpoints": true
     }
   ]
 }

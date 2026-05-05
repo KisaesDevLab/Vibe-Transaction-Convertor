@@ -1,13 +1,17 @@
 import { Router } from 'express';
-import { eq, sql } from 'drizzle-orm';
+import { eq, lt, sql } from 'drizzle-orm';
+import { rm, readdir, stat } from 'node:fs/promises';
+import { join } from 'node:path';
 
 import { db } from '../db/client.js';
-import { systemSettings } from '../db/schema.js';
+import { sessions, systemSettings } from '../db/schema.js';
 import { ValidationError } from '../lib/errors.js';
 import { wrapSecret } from '../lib/secrets.js';
 import { requireAdmin } from '../middleware/auth.js';
 import { writeAudit } from '../services/audit.js';
 import { getFidirStatus, seedFidir } from '../services/fidir-seeder.js';
+import { extractionQueue } from '../jobs/queues.js';
+import { logger } from '../lib/logger.js';
 
 const PROVIDER_KEY = 'llm.provider';
 const ANTHROPIC_KEY = 'llm.anthropic.api_key';
@@ -128,6 +132,83 @@ export const adminRouter = (): Router => {
   router.get('/fidir/status', async (_req, res, next) => {
     try {
       res.json(await getFidirStatus(db));
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // Queue stats for the maintenance page.
+  router.get('/maintenance/queue-stats', async (_req, res, next) => {
+    try {
+      if (!process.env.REDIS_URL) {
+        res.json({ redis: 'unconfigured' });
+        return;
+      }
+      const q = extractionQueue();
+      const counts = await q.getJobCounts('waiting', 'active', 'delayed', 'completed', 'failed');
+      res.json({ redis: 'configured', extraction: counts });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // Prune expired sessions on demand.
+  router.post('/maintenance/prune-sessions', async (req, res, next) => {
+    try {
+      const result = await db
+        .delete(sessions)
+        .where(lt(sessions.expiresAt, new Date()))
+        .returning({ id: sessions.id });
+      await writeAudit(db, {
+        actorUserId: req.user!.id,
+        entityType: 'system',
+        entityId: 'sessions',
+        action: 'maintenance.prune-sessions',
+        payload: { deleted: result.length },
+      });
+      res.json({ deleted: result.length });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // Clean ${DATA_DIR}/tmp older than 6 hours (Phase 9 item 21 / Phase 15
+  // item 11). Recursive delete of any subdirectory whose mtime is older
+  // than the cutoff.
+  router.post('/maintenance/clean-tmp', async (req, res, next) => {
+    try {
+      const dataDir = process.env.DATA_DIR ?? './data';
+      const tmpDir = join(dataDir, 'tmp');
+      const cutoff = Date.now() - 6 * 60 * 60 * 1000;
+      let removed = 0;
+      let kept = 0;
+      try {
+        const entries = await readdir(tmpDir, { withFileTypes: true });
+        for (const entry of entries) {
+          const full = join(tmpDir, entry.name);
+          try {
+            const s = await stat(full);
+            if (s.mtimeMs < cutoff) {
+              await rm(full, { recursive: true, force: true });
+              removed += 1;
+            } else {
+              kept += 1;
+            }
+          } catch (err) {
+            logger.warn({ err, full }, 'tmp clean skipped entry');
+          }
+        }
+      } catch {
+        // tmp dir doesn't exist; nothing to clean
+      }
+      await writeAudit(db, {
+        actorUserId: req.user!.id,
+        entityType: 'system',
+        entityId: 'tmp',
+        action: 'maintenance.clean-tmp',
+        payload: { removed, kept },
+      });
+      res.json({ removed, kept, tmpDir });
     } catch (err) {
       next(err);
     }

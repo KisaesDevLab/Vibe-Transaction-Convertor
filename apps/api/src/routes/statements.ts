@@ -217,6 +217,77 @@ export const statementsRouter = (): Router => {
     }
   });
 
+  // Acknowledge a detected multi-account PDF: clears the warning so the
+  // review page stops nagging. Phase 14.
+  router.post('/:id/acknowledge-multi-account', async (req, res, next) => {
+    try {
+      const id = String(req.params.id);
+      const rows = await db.select().from(statements).where(eq(statements.id, id));
+      const stmt = rows[0];
+      if (!stmt) throw new NotFoundError(`statement ${id}`);
+      await db
+        .update(statements)
+        .set({ multiAccountAcknowledged: true, updatedAt: sql`now()` })
+        .where(eq(statements.id, id));
+      await writeAudit(db, {
+        actorUserId: req.user!.id,
+        entityType: 'statement',
+        entityId: id,
+        action: 'statement.acknowledge-multi-account',
+      });
+      res.json({ ok: true });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // Confirm an ambiguous source date format. Marks the statement with
+  // the user's choice and re-enqueues extraction so the LLM uses the
+  // hint. Phase 18 item 6a/6b.
+  router.post('/:id/confirm-date-format', async (req, res, next) => {
+    try {
+      const id = String(req.params.id);
+      const format = String(req.body?.format ?? '');
+      if (!['MDY', 'DMY', 'YMD'].includes(format)) {
+        throw new ValidationError("format must be 'MDY' | 'DMY' | 'YMD'");
+      }
+      const rows = await db.select().from(statements).where(eq(statements.id, id));
+      const stmt = rows[0];
+      if (!stmt) throw new NotFoundError(`statement ${id}`);
+      await db
+        .update(statements)
+        .set({
+          sourceDateFormat: format as 'MDY' | 'DMY' | 'YMD',
+          sourceDateFormatUserConfirmed: true,
+          status: 'uploaded',
+          errorMessage: null,
+          updatedAt: sql`now()`,
+        })
+        .where(eq(statements.id, id));
+      // Wipe prior transactions so the re-run isn't deduped against
+      // the old (potentially mis-dated) FITIDs.
+      await db.delete(transactions).where(eq(transactions.statementId, id));
+      if (process.env.REDIS_URL) {
+        await enqueueExtraction({
+          statementId: id,
+          accountId: stmt.accountId,
+          sourcePdfHash: stmt.sourcePdfHash,
+          sourcePdfPath: stmt.sourcePdfPath,
+        });
+      }
+      await writeAudit(db, {
+        actorUserId: req.user!.id,
+        entityType: 'statement',
+        entityId: id,
+        action: 'statement.confirm-date-format',
+        payload: { format },
+      });
+      res.json({ ok: true, format });
+    } catch (err) {
+      next(err);
+    }
+  });
+
   // Admin: re-enqueue extraction. Useful when the source PDF was
   // re-uploaded or the LLM provider changed. Idempotent at the queue
   // level by virtue of the (account_id, source_pdf_hash) job ID.

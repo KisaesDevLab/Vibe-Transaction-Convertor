@@ -72,6 +72,8 @@ export function TransactionGrid({
   const [sortOrder, setSortOrder] = useState<SortOrder>('asc');
   const [editingId, setEditingId] = useState<string | null>(null);
   const [activeRow, setActiveRow] = useState<number>(0);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [bulkTrntype, setBulkTrntype] = useState<string>('');
   const tableRef = useRef<HTMLTableElement>(null);
 
   const rows = useMemo(() => {
@@ -108,7 +110,9 @@ export function TransactionGrid({
     0n,
   );
 
-  // Hot-keys: j/k to move, e to edit, Esc to cancel.
+  // Hot-keys (Phase 18 item 23): j/k move row, e edit, Esc cancel,
+  // x toggle row select, Shift+S save (no-op without dirty fields), and
+  // r forces a refetch of the statement which re-runs reconciliation.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement | null)?.tagName;
@@ -119,8 +123,11 @@ export function TransactionGrid({
         setActiveRow((i) => Math.max(i - 1, 0));
       } else if (e.key === 'e' && rows[activeRow]) {
         setEditingId(rows[activeRow]!.id);
+      } else if (e.key === 'x' && rows[activeRow]) {
+        toggleSelectOne(rows[activeRow]!.id);
       } else if (e.key === 'Escape') {
         setEditingId(null);
+        setSelectedIds(new Set());
       }
     };
     document.addEventListener('keydown', onKey);
@@ -135,8 +142,86 @@ export function TransactionGrid({
     }
   };
 
+  const allFilteredSelected = rows.length > 0 && rows.every((r) => selectedIds.has(r.id));
+  const toggleSelectAll = () => {
+    if (allFilteredSelected) {
+      setSelectedIds(new Set());
+    } else {
+      setSelectedIds(new Set(rows.map((r) => r.id)));
+    }
+  };
+  const toggleSelectOne = (id: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
   return (
     <div className="space-y-3">
+      {isAdmin && selectedIds.size > 0 ? (
+        <div className="flex flex-wrap items-center gap-2 rounded-md border border-accent/40 bg-accent/5 px-3 py-2 text-sm">
+          <span className="font-medium">{selectedIds.size} selected</span>
+          <select
+            value={bulkTrntype}
+            onChange={(e) => setBulkTrntype(e.target.value)}
+            className="rounded-md border border-surface-muted bg-white px-2 py-1 text-xs"
+          >
+            <option value="">Set TRNTYPE…</option>
+            {TRNTYPE_OPTIONS.map((t) => (
+              <option key={t} value={t}>
+                {t}
+              </option>
+            ))}
+          </select>
+          <button
+            type="button"
+            disabled={!bulkTrntype}
+            onClick={async () => {
+              const ids = Array.from(selectedIds);
+              for (const id of ids) {
+                await onSave(id, { trntype: bulkTrntype });
+              }
+              setBulkTrntype('');
+              setSelectedIds(new Set());
+            }}
+            className="rounded-md bg-accent px-3 py-1 text-xs font-medium text-accent-fg disabled:opacity-50"
+          >
+            Apply
+          </button>
+          {onDelete ? (
+            <button
+              type="button"
+              onClick={async () => {
+                const ids = Array.from(selectedIds);
+                if (
+                  !window.confirm(
+                    `Delete ${ids.length} transaction${ids.length === 1 ? '' : 's'}? This cannot be undone.`,
+                  )
+                )
+                  return;
+                for (const id of ids) {
+                  await onDelete(id);
+                }
+                setSelectedIds(new Set());
+              }}
+              className="rounded-md border border-danger px-3 py-1 text-xs font-medium text-danger"
+            >
+              Delete selected
+            </button>
+          ) : null}
+          <button
+            type="button"
+            onClick={() => setSelectedIds(new Set())}
+            className="ml-auto rounded-md border border-surface-muted px-3 py-1 text-xs"
+          >
+            Clear
+          </button>
+        </div>
+      ) : null}
+
       <div className="flex flex-wrap items-center gap-2">
         <input
           type="search"
@@ -175,13 +260,23 @@ export function TransactionGrid({
         {suspectCount > 0 ? ` · ${suspectCount} suspect` : ''}
         {' · '}
         absolute total {formatUsd(totalAbs)}
-        <span className="ml-2 text-ink-subtle">(j/k navigate · e edit · Esc cancel)</span>
+        <span className="ml-2 text-ink-subtle">(j/k row · e edit · x select · Esc cancel)</span>
       </p>
 
       <div className="overflow-hidden rounded-lg border border-surface-muted bg-white">
         <table ref={tableRef} className="w-full text-sm">
           <thead className="bg-surface-subtle text-left">
             <tr>
+              {isAdmin ? (
+                <th className="w-8 px-2 py-2">
+                  <input
+                    type="checkbox"
+                    checked={allFilteredSelected}
+                    onChange={toggleSelectAll}
+                    aria-label="Select all visible rows"
+                  />
+                </th>
+              ) : null}
               <SortHeader
                 label="Date"
                 active={sortField === 'postedDate'}
@@ -224,6 +319,8 @@ export function TransactionGrid({
                 editing={editingId === tx.id}
                 active={i === activeRow}
                 selected={selectedId === tx.id}
+                checked={selectedIds.has(tx.id)}
+                onToggleCheck={() => toggleSelectOne(tx.id)}
                 isAdmin={isAdmin}
                 onActivate={() => {
                   setActiveRow(i);
@@ -241,7 +338,7 @@ export function TransactionGrid({
             {rows.length === 0 ? (
               <tr>
                 <td
-                  colSpan={isAdmin ? 9 : 8}
+                  colSpan={isAdmin ? 10 : 8}
                   className="px-3 py-8 text-center text-sm text-ink-muted"
                 >
                   No matching transactions.
@@ -419,8 +516,10 @@ function Row({
   editing,
   active,
   selected,
+  checked,
   isAdmin,
   onActivate,
+  onToggleCheck,
   onStartEdit,
   onCancelEdit,
   onSave,
@@ -432,8 +531,10 @@ function Row({
   editing: boolean;
   active: boolean;
   selected: boolean;
+  checked: boolean;
   isAdmin?: boolean | undefined;
   onActivate: () => void;
+  onToggleCheck: () => void;
   onStartEdit: () => void;
   onCancelEdit: () => void;
   onSave: (patch: TransactionPatch) => Promise<unknown>;
@@ -454,9 +555,19 @@ function Row({
       onClick={onActivate}
       className={cn(
         'cursor-pointer align-top transition-colors',
-        selected ? 'bg-amber-50' : active ? 'bg-surface-subtle/50' : '',
+        checked ? 'bg-accent/10' : selected ? 'bg-amber-50' : active ? 'bg-surface-subtle/50' : '',
       )}
     >
+      {isAdmin ? (
+        <td className="px-2 py-2" onClick={(e) => e.stopPropagation()}>
+          <input
+            type="checkbox"
+            checked={checked}
+            onChange={onToggleCheck}
+            aria-label={`Select transaction ${tx.description}`}
+          />
+        </td>
+      ) : null}
       <td className="px-3 py-2 whitespace-nowrap">
         {editing ? (
           <input

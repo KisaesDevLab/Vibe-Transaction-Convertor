@@ -197,6 +197,8 @@ export const statements = vibetc.table(
       .notNull()
       .default(sql`0`),
     errorMessage: text('error_message'),
+    detectedSplits: jsonb('detected_splits'),
+    multiAccountAcknowledged: boolean('multi_account_acknowledged').notNull().default(false),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
   },
