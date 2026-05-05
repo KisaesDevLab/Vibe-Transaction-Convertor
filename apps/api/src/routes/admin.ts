@@ -133,5 +133,52 @@ export const adminRouter = (): Router => {
     }
   });
 
+  // Aggregate diagnostics — used by the /admin/diagnostics page.
+  router.get('/diagnostics', async (_req, res, next) => {
+    try {
+      const counts = await Promise.all([
+        db.execute(sql`select count(*)::int as c from vibetc.users`),
+        db.execute(sql`select count(*)::int as c from vibetc.companies`),
+        db.execute(sql`select count(*)::int as c from vibetc.accounts`),
+        db.execute(sql`select count(*)::int as c from vibetc.statements`),
+        db.execute(sql`select count(*)::int as c from vibetc.transactions`),
+        db.execute(sql`select count(*)::int as c from vibetc.fidir_entries`),
+        db.execute(sql`select count(*)::int as c from vibetc.audit_log`),
+      ]);
+      const [users, companies, accounts, statements, transactions, fidirEntries, auditLog] =
+        counts.map((r) => Number((r.rows[0] as { c: number }).c));
+      const memory = process.memoryUsage();
+      res.json({
+        env: {
+          nodeVersion: process.version,
+          platform: process.platform,
+          buildSha: process.env.BUILD_SHA ?? 'unknown',
+          appliance: process.env.APPLIANCE_MODE === 'true',
+          workerInline: process.env.WORKER_INLINE !== 'false',
+        },
+        rss: { rssMb: Math.round(memory.rss / (1024 * 1024)) },
+        services: {
+          databaseUrl: process.env.DATABASE_URL ? 'configured' : 'unconfigured',
+          redisUrl: process.env.REDIS_URL ? 'configured' : 'unconfigured',
+          glmOcrUrl: process.env.GLM_OCR_URL ? 'configured' : 'unconfigured',
+          llmGatewayUrl: process.env.LLM_GATEWAY_URL ? 'configured' : 'unconfigured',
+          anthropicBaseUrl: process.env.ANTHROPIC_BASE_URL ?? 'https://api.anthropic.com',
+        },
+        counts: {
+          users,
+          companies,
+          accounts,
+          statements,
+          transactions,
+          fidirEntries,
+          auditLog,
+        },
+        uptime: { seconds: Math.round(process.uptime()) },
+      });
+    } catch (err) {
+      next(err);
+    }
+  });
+
   return router;
 };

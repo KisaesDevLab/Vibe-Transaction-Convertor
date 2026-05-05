@@ -1,4 +1,4 @@
-import { type FormEvent, useState } from 'react';
+import { type FormEvent, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 
 import {
@@ -8,23 +8,48 @@ import {
   useUpdateCompany,
   type Company,
 } from '../hooks/useCompanies';
+import { useToast } from '../components/Toast';
 import { ApiError } from '../lib/api';
 
+const PAGE_SIZE = 50;
+
 export function CompaniesPage() {
-  const [search, setSearch] = useState('');
-  const list = useCompanies(search.trim().length > 0 ? search.trim() : undefined);
+  const [searchInput, setSearchInput] = useState('');
+  const [searchDebounced, setSearchDebounced] = useState('');
+  const [page, setPage] = useState(0);
+
+  // Debounce search → 250ms — avoid hammering the API on every keystroke.
+  useEffect(() => {
+    const t = setTimeout(() => {
+      setSearchDebounced(searchInput.trim());
+      setPage(0);
+    }, 250);
+    return () => clearTimeout(t);
+  }, [searchInput]);
+
+  const list = useCompanies({
+    q: searchDebounced.length > 0 ? searchDebounced : undefined,
+    limit: PAGE_SIZE,
+    offset: page * PAGE_SIZE,
+  });
   const create = useCreateCompany();
   const [newName, setNewName] = useState('');
   const [createError, setCreateError] = useState<string | null>(null);
+  const toast = useToast();
+  const total = list.data?.total ?? 0;
+  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
   const onCreate = async (e: FormEvent): Promise<void> => {
     e.preventDefault();
     setCreateError(null);
     try {
       await create.mutateAsync({ name: newName });
+      toast.success('Company created');
       setNewName('');
     } catch (err) {
-      setCreateError(err instanceof ApiError ? err.message : 'create failed');
+      const msg = err instanceof ApiError ? err.message : 'create failed';
+      setCreateError(msg);
+      toast.error(msg);
     }
   };
 
@@ -33,14 +58,16 @@ export function CompaniesPage() {
       <header className="mb-6 flex items-end justify-between">
         <div>
           <h1 className="text-2xl font-semibold">Companies</h1>
-          <p className="text-sm text-ink-muted">Each company holds one or more accounts.</p>
+          <p className="text-sm text-ink-muted">
+            {total} total · page {page + 1}/{totalPages}
+          </p>
         </div>
         <input
           type="search"
           placeholder="Search…"
           className="rounded-md border border-surface-muted px-3 py-2 text-sm"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
+          value={searchInput}
+          onChange={(e) => setSearchInput(e.target.value)}
         />
       </header>
 
@@ -89,11 +116,36 @@ export function CompaniesPage() {
           </p>
         </div>
       ) : (
-        <ul className="divide-y divide-surface-muted overflow-hidden rounded-lg border border-surface-muted bg-white">
-          {list.data?.rows.map((c) => (
-            <CompanyRow key={c.id} company={c} />
-          ))}
-        </ul>
+        <>
+          <ul className="divide-y divide-surface-muted overflow-hidden rounded-lg border border-surface-muted bg-white">
+            {list.data?.rows.map((c) => (
+              <CompanyRow key={c.id} company={c} />
+            ))}
+          </ul>
+          {totalPages > 1 ? (
+            <div className="mt-3 flex items-center justify-between text-sm">
+              <button
+                type="button"
+                disabled={page === 0}
+                onClick={() => setPage((p) => Math.max(0, p - 1))}
+                className="rounded-md border border-surface-muted px-3 py-1.5 disabled:opacity-50"
+              >
+                ← Prev
+              </button>
+              <span className="text-ink-muted">
+                Page {page + 1} of {totalPages}
+              </span>
+              <button
+                type="button"
+                disabled={page >= totalPages - 1}
+                onClick={() => setPage((p) => Math.min(totalPages - 1, p + 1))}
+                className="rounded-md border border-surface-muted px-3 py-1.5 disabled:opacity-50"
+              >
+                Next →
+              </button>
+            </div>
+          ) : null}
+        </>
       )}
     </section>
   );

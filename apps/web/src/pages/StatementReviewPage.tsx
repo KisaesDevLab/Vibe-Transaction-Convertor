@@ -7,10 +7,14 @@ import { TransactionGrid } from '../components/TransactionGrid';
 import { PdfViewer } from '../components/PdfViewer';
 import { useToast } from '../components/Toast';
 import {
+  useAddTransaction,
+  useDeleteTransaction,
+  useReExtract,
   useStatement,
   useUpdateTransaction,
   type TransactionRow,
 } from '../hooks/useStatementsList';
+import { useMe } from '../hooks/useAuth';
 import { ApiError } from '../lib/api';
 
 const FORMATS: Array<{ value: string; label: string }> = [
@@ -23,22 +27,19 @@ const FORMATS: Array<{ value: string; label: string }> = [
   { value: 'qfx', label: 'QFX' },
 ];
 
-const downloadExport = async (
-  statementId: string,
-  format: string,
-  override: boolean,
-): Promise<void> => {
-  const url = `/api/statements/${statementId}/exports/${format}${override ? '?override=true' : ''}`;
+const csrfHeader = (): Record<string, string> => ({
+  'x-csrf-token':
+    document.cookie
+      .split('; ')
+      .find((c) => c.startsWith('vibetc_csrf='))
+      ?.split('=')[1] ?? '',
+});
+
+const downloadFromUrl = async (url: string, fallbackName: string): Promise<void> => {
   const res = await fetch(url, {
     method: 'POST',
     credentials: 'include',
-    headers: {
-      'x-csrf-token':
-        document.cookie
-          .split('; ')
-          .find((c) => c.startsWith('vibetc_csrf='))
-          ?.split('=')[1] ?? '',
-    },
+    headers: csrfHeader(),
   });
   if (!res.ok) {
     const body = (await res.json().catch(() => ({ message: `HTTP ${res.status}` }))) as {
@@ -50,7 +51,7 @@ const downloadExport = async (
   }
   const blob = await res.blob();
   const cd = res.headers.get('content-disposition') ?? '';
-  const filename = /filename="([^"]+)"/.exec(cd)?.[1] ?? 'export';
+  const filename = /filename="([^"]+)"/.exec(cd)?.[1] ?? fallbackName;
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
   a.download = filename;
@@ -59,10 +60,27 @@ const downloadExport = async (
   a.remove();
 };
 
+const downloadExport = (statementId: string, format: string, override: boolean): Promise<void> =>
+  downloadFromUrl(
+    `/api/statements/${statementId}/exports/${format}${override ? '?override=true' : ''}`,
+    'export',
+  );
+
+const downloadBundle = (statementId: string, override: boolean): Promise<void> =>
+  downloadFromUrl(
+    `/api/statements/${statementId}/exports-bundle${override ? '?override=true' : ''}`,
+    'export-bundle.zip',
+  );
+
 export function StatementReviewPage() {
   const { statementId = '' } = useParams();
   const stmt = useStatement(statementId);
   const update = useUpdateTransaction(statementId);
+  const addTx = useAddTransaction(statementId);
+  const deleteTx = useDeleteTransaction(statementId);
+  const reExtract = useReExtract(statementId);
+  const me = useMe();
+  const isAdmin = me.data?.role === 'admin';
   const toast = useToast();
   const [selectedTx, setSelectedTx] = useState<TransactionRow | null>(null);
 
@@ -98,12 +116,19 @@ export function StatementReviewPage() {
 
   return (
     <section className="mx-auto max-w-7xl space-y-4">
-      <Link
-        to={`/accounts/${s.accountId}/statements`}
-        className="text-sm text-ink-muted hover:text-ink"
-      >
-        ← Statements
-      </Link>
+      <div className="flex items-center justify-between gap-3 text-sm">
+        <Link to={`/accounts/${s.accountId}/statements`} className="text-ink-muted hover:text-ink">
+          ← Statements
+        </Link>
+        {isAdmin ? (
+          <Link
+            to={`/admin/audit?entityType=statement&entityId=${s.id}`}
+            className="text-ink-muted hover:text-ink"
+          >
+            View audit history →
+          </Link>
+        ) : null}
+      </div>
 
       <header className="flex flex-wrap items-end justify-between gap-3">
         <div>
@@ -139,7 +164,50 @@ export function StatementReviewPage() {
             ) : null}
           </div>
         </div>
-        <div className="flex flex-wrap gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          {isAdmin ? (
+            <button
+              type="button"
+              onClick={async () => {
+                if (
+                  !window.confirm(
+                    'Re-extract this statement? Existing transactions will be discarded and the LLM will run again.',
+                  )
+                )
+                  return;
+                try {
+                  await reExtract.mutateAsync();
+                  toast.success('Re-extraction enqueued');
+                } catch (err) {
+                  toast.error(err instanceof ApiError ? err.message : 're-extract failed');
+                }
+              }}
+              disabled={reExtract.isPending}
+              className="rounded-md border border-surface-muted px-3 py-1.5 text-sm hover:bg-surface-subtle disabled:opacity-50"
+            >
+              {reExtract.isPending ? 'Enqueueing…' : 'Re-extract'}
+            </button>
+          ) : null}
+          <button
+            type="button"
+            disabled={exportBlocked}
+            title={
+              exportBlocked
+                ? 'Reconciliation is not verified — fix discrepancies or override before export'
+                : 'Download all 7 formats as a single zip'
+            }
+            onClick={async () => {
+              try {
+                await downloadBundle(statementId, s.reconciliationStatus === 'overridden');
+                toast.success('Downloaded all formats');
+              } catch (err) {
+                toast.error(err instanceof ApiError ? err.message : 'export failed');
+              }
+            }}
+            className="rounded-md border border-accent bg-accent px-3 py-1.5 text-sm font-medium text-accent-fg hover:bg-accent/90 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            Download all (.zip)
+          </button>
           {FORMATS.map((f) => (
             <button
               key={f.value}
@@ -199,6 +267,7 @@ export function StatementReviewPage() {
             periodStart={s.periodStart}
             periodEnd={s.periodEnd}
             selectedId={selectedTx?.id ?? null}
+            isAdmin={isAdmin}
             onSelect={(t) => setSelectedTx(t)}
             onSave={async (id, patch) => {
               try {
@@ -209,6 +278,32 @@ export function StatementReviewPage() {
                 throw err;
               }
             }}
+            onAdd={
+              isAdmin
+                ? async (input) => {
+                    try {
+                      await addTx.mutateAsync(input);
+                      toast.success('Transaction added');
+                    } catch (err) {
+                      toast.error(err instanceof ApiError ? err.message : 'add failed');
+                      throw err;
+                    }
+                  }
+                : undefined
+            }
+            onDelete={
+              isAdmin
+                ? async (id) => {
+                    try {
+                      await deleteTx.mutateAsync(id);
+                      toast.success('Transaction deleted');
+                    } catch (err) {
+                      toast.error(err instanceof ApiError ? err.message : 'delete failed');
+                      throw err;
+                    }
+                  }
+                : undefined
+            }
           />
 
           <PdfViewer

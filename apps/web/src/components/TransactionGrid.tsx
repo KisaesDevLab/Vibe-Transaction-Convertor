@@ -35,11 +35,21 @@ export interface GridFilters {
   editedOnly: boolean;
 }
 
+export interface AddTxInput {
+  posted_date: string;
+  description: string;
+  amount_cents: string;
+  trntype?: string;
+}
+
 export function TransactionGrid({
   txs,
   periodStart,
   periodEnd,
   onSave,
+  onDelete,
+  onAdd,
+  isAdmin,
   onSelect,
   selectedId,
 }: {
@@ -47,8 +57,11 @@ export function TransactionGrid({
   periodStart: string | null;
   periodEnd: string | null;
   onSave: (id: string, patch: TransactionPatch) => Promise<unknown>;
-  onSelect?: (tx: TransactionRow) => void;
-  selectedId?: string | null;
+  onDelete?: ((id: string) => Promise<unknown>) | undefined;
+  onAdd?: ((input: AddTxInput) => Promise<unknown>) | undefined;
+  isAdmin?: boolean | undefined;
+  onSelect?: ((tx: TransactionRow) => void) | undefined;
+  selectedId?: string | null | undefined;
 }) {
   const [filters, setFilters] = useState<GridFilters>({
     search: '',
@@ -198,6 +211,7 @@ export function TransactionGrid({
               <th className="px-3 py-2 text-right font-medium">Running</th>
               <th className="px-3 py-2 text-right font-medium">Pg</th>
               <th className="px-3 py-2 text-right font-medium">Conf</th>
+              {isAdmin ? <th className="px-3 py-2 w-8"></th> : null}
             </tr>
           </thead>
           <tbody className="divide-y divide-surface-muted">
@@ -210,6 +224,7 @@ export function TransactionGrid({
                 editing={editingId === tx.id}
                 active={i === activeRow}
                 selected={selectedId === tx.id}
+                isAdmin={isAdmin}
                 onActivate={() => {
                   setActiveRow(i);
                   onSelect?.(tx);
@@ -220,17 +235,149 @@ export function TransactionGrid({
                   await onSave(tx.id, patch);
                   setEditingId(null);
                 }}
+                onDelete={onDelete ? () => onDelete(tx.id) : undefined}
               />
             ))}
             {rows.length === 0 ? (
               <tr>
-                <td colSpan={8} className="px-3 py-8 text-center text-sm text-ink-muted">
+                <td
+                  colSpan={isAdmin ? 9 : 8}
+                  className="px-3 py-8 text-center text-sm text-ink-muted"
+                >
                   No matching transactions.
                 </td>
               </tr>
             ) : null}
           </tbody>
         </table>
+      </div>
+
+      {isAdmin && onAdd ? <AddRowForm onAdd={onAdd} defaultDate={periodStart ?? ''} /> : null}
+    </div>
+  );
+}
+
+function AddRowForm({
+  onAdd,
+  defaultDate,
+}: {
+  onAdd: (input: AddTxInput) => Promise<unknown>;
+  defaultDate: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const [postedDate, setPostedDate] = useState(defaultDate);
+  const [description, setDescription] = useState('');
+  const [amount, setAmount] = useState('');
+  const [trntype, setTrntype] = useState('OTHER');
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  if (!open) {
+    return (
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        className="rounded-md border border-dashed border-surface-muted px-3 py-2 text-sm text-ink-muted hover:bg-surface-subtle"
+      >
+        + Add transaction (admin)
+      </button>
+    );
+  }
+
+  const submit = async (): Promise<void> => {
+    setError(null);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(postedDate)) {
+      setError('Date must be YYYY-MM-DD');
+      return;
+    }
+    if (description.trim().length === 0) {
+      setError('Description is required');
+      return;
+    }
+    let cents: bigint;
+    try {
+      cents = parseDecimalToCents(amount);
+    } catch {
+      setError('Amount must be like -4.50 or 12.34');
+      return;
+    }
+    if (cents === 0n) {
+      setError('Amount must be non-zero');
+      return;
+    }
+    setSaving(true);
+    try {
+      await onAdd({
+        posted_date: postedDate,
+        description: description.trim(),
+        amount_cents: cents.toString(),
+        trntype,
+      });
+      setDescription('');
+      setAmount('');
+      setOpen(false);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'failed');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="space-y-2 rounded-md border border-surface-muted bg-white p-3 text-sm">
+      <p className="font-medium">Add transaction</p>
+      <div className="grid grid-cols-1 gap-2 sm:grid-cols-[10rem_1fr_8rem_8rem]">
+        <input
+          type="date"
+          value={postedDate}
+          onChange={(e) => setPostedDate(e.target.value)}
+          className="rounded-md border border-surface-muted px-2 py-1.5"
+        />
+        <input
+          placeholder="Description"
+          value={description}
+          onChange={(e) => setDescription(e.target.value)}
+          className="rounded-md border border-surface-muted px-2 py-1.5"
+        />
+        <input
+          inputMode="decimal"
+          placeholder="-4.50"
+          value={amount}
+          onChange={(e) => setAmount(e.target.value)}
+          className="rounded-md border border-surface-muted px-2 py-1.5 text-right tabular-nums"
+        />
+        <select
+          value={trntype}
+          onChange={(e) => setTrntype(e.target.value)}
+          className="rounded-md border border-surface-muted bg-white px-2 py-1.5"
+        >
+          {TRNTYPE_OPTIONS.map((t) => (
+            <option key={t} value={t}>
+              {t}
+            </option>
+          ))}
+        </select>
+      </div>
+      {error ? <p className="text-xs text-danger">{error}</p> : null}
+      <div className="flex justify-end gap-2">
+        <button
+          type="button"
+          onClick={() => {
+            setOpen(false);
+            setError(null);
+          }}
+          className="rounded-md border border-surface-muted px-3 py-1.5 text-xs"
+        >
+          Cancel
+        </button>
+        <button
+          type="button"
+          onClick={submit}
+          disabled={saving}
+          className="rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-accent-fg disabled:opacity-50"
+        >
+          {saving ? 'Adding…' : 'Add row'}
+        </button>
       </div>
     </div>
   );
@@ -272,10 +419,12 @@ function Row({
   editing,
   active,
   selected,
+  isAdmin,
   onActivate,
   onStartEdit,
   onCancelEdit,
   onSave,
+  onDelete,
 }: {
   tx: TransactionRow;
   periodStart: string | null;
@@ -283,10 +432,12 @@ function Row({
   editing: boolean;
   active: boolean;
   selected: boolean;
+  isAdmin?: boolean | undefined;
   onActivate: () => void;
   onStartEdit: () => void;
   onCancelEdit: () => void;
   onSave: (patch: TransactionPatch) => Promise<unknown>;
+  onDelete?: (() => Promise<unknown>) | undefined;
 }) {
   const [desc, setDesc] = useState(tx.description);
   const [amount, setAmount] = useState(decimalString(BigInt(tx.amountCents)));
@@ -441,6 +592,24 @@ function Row({
           )}
         />
       </td>
+      {isAdmin ? (
+        <td className="px-2 py-2 text-right">
+          {onDelete ? (
+            <button
+              type="button"
+              onClick={async (e) => {
+                e.stopPropagation();
+                if (!window.confirm(`Delete this transaction (${tx.description})?`)) return;
+                await onDelete();
+              }}
+              title="Admin: delete transaction"
+              className="rounded text-xs text-ink-subtle hover:text-danger"
+            >
+              ✕
+            </button>
+          ) : null}
+        </td>
+      ) : null}
     </tr>
   );
 }

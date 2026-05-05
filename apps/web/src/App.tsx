@@ -10,6 +10,7 @@ import { LoginPage } from './pages/LoginPage';
 import { RegisterFirstAdminPage } from './pages/RegisterFirstAdminPage';
 import { AdminHomePage } from './pages/AdminHomePage';
 import { AuditLogPage } from './pages/AuditLogPage';
+import { DiagnosticsPage } from './pages/DiagnosticsPage';
 import { StatementReviewPage } from './pages/StatementReviewPage';
 import { StatementsListPage } from './pages/StatementsListPage';
 import { UsersAdminPage } from './pages/UsersAdminPage';
@@ -53,6 +54,14 @@ export function App() {
                   element={
                     <AdminGate>
                       <UsersAdminPage />
+                    </AdminGate>
+                  }
+                />
+                <Route
+                  path="/admin/diagnostics"
+                  element={
+                    <AdminGate>
+                      <DiagnosticsPage />
                     </AdminGate>
                   }
                 />

@@ -3,10 +3,12 @@ import { eq, sql } from 'drizzle-orm';
 
 import { db } from '../db/client.js';
 import { statements, transactions } from '../db/schema.js';
-import { NotFoundError, ValidationError } from '../lib/errors.js';
+import { ForbiddenError, NotFoundError, ValidationError } from '../lib/errors.js';
+import { requireAdmin } from '../middleware/auth.js';
 import { writeAudit } from '../services/audit.js';
 import { overrideReconciliation } from '../services/exports.js';
-import { computeFitid } from '@vibe-tx-converter/exporters';
+import { computeFitid, inferTrntype, normalizeDescription } from '@vibe-tx-converter/exporters';
+import { enqueueExtraction } from '../jobs/queues.js';
 
 const serializeBigint = <T extends Record<string, unknown>>(row: T): T => {
   const out: Record<string, unknown> = {};
@@ -117,6 +119,135 @@ export const statementsRouter = (): Router => {
       const reason = String(req.body?.reason ?? '').trim();
       if (reason.length < 5) throw new ValidationError('reason must be at least 5 characters');
       await overrideReconciliation(db, req.user!, id, reason);
+      res.json({ ok: true });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // Admin: insert a manual transaction. Used for rescue when the LLM
+  // missed a row that's clearly on the statement. Phase 18 item 11.
+  router.post('/:id/transactions', requireAdmin, async (req, res, next) => {
+    try {
+      const statementId = String(req.params.id);
+      const body = req.body ?? {};
+      const postedDate = String(body.posted_date ?? '');
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(postedDate)) {
+        throw new ValidationError('posted_date must be YYYY-MM-DD');
+      }
+      const description = String(body.description ?? '').trim();
+      if (description.length === 0) throw new ValidationError('description is required');
+      if (typeof body.amount_cents !== 'number' && typeof body.amount_cents !== 'string') {
+        throw new ValidationError('amount_cents is required');
+      }
+      const amountCents = BigInt(body.amount_cents);
+      if (amountCents === 0n) throw new ValidationError('amount must be non-zero');
+
+      const sourcePage = Number.parseInt(String(body.source_page ?? '1'), 10) || 1;
+
+      // Determine seq_in_day for the new row — find the max existing
+      // seq for this date and add 1.
+      const existing = await db
+        .select()
+        .from(transactions)
+        .where(eq(transactions.statementId, statementId));
+      const seqInDay =
+        existing
+          .filter((t) => t.postedDate === postedDate)
+          .reduce((m, t) => Math.max(m, t.seqInDay), -1) + 1;
+
+      const fitid = computeFitid({ postedDate, amountCents, description, seqInDay });
+      const trntype =
+        typeof body.trntype === 'string'
+          ? body.trntype
+          : inferTrntype({ description, amountCents });
+
+      const [created] = await db
+        .insert(transactions)
+        .values({
+          statementId,
+          seqInDay,
+          postedDate,
+          description,
+          normalizedDescription: normalizeDescription(description),
+          amountCents,
+          runningBalanceCents: null,
+          checkNumber: typeof body.check_number === 'string' ? body.check_number : null,
+          trntype: trntype as never,
+          fitid,
+          sourcePage,
+          sourceBboxJson: null,
+          confidence: 1,
+          userEdited: true,
+        })
+        .returning();
+      if (!created) throw new Error('insert returned no row');
+      await writeAudit(db, {
+        actorUserId: req.user!.id,
+        entityType: 'transaction',
+        entityId: created.id,
+        action: 'transaction.admin-insert',
+        payload: { statementId, postedDate, amountCents: amountCents.toString() },
+      });
+      res.status(201).json(serializeBigint(created));
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // Admin: delete a transaction. Recompute reconciliation lazily — the
+  // review widget recalculates from the live tx list.
+  router.delete('/transactions/:txId', requireAdmin, async (req, res, next) => {
+    try {
+      const txId = String(req.params.txId);
+      const rows = await db.select().from(transactions).where(eq(transactions.id, txId));
+      const tx = rows[0];
+      if (!tx) throw new NotFoundError(`transaction ${txId}`);
+      await db.delete(transactions).where(eq(transactions.id, txId));
+      await writeAudit(db, {
+        actorUserId: req.user!.id,
+        entityType: 'transaction',
+        entityId: txId,
+        action: 'transaction.admin-delete',
+        payload: { statementId: tx.statementId, fitid: tx.fitid },
+      });
+      res.status(204).end();
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // Admin: re-enqueue extraction. Useful when the source PDF was
+  // re-uploaded or the LLM provider changed. Idempotent at the queue
+  // level by virtue of the (account_id, source_pdf_hash) job ID.
+  router.post('/:id/re-extract', requireAdmin, async (req, res, next) => {
+    try {
+      const id = String(req.params.id);
+      const rows = await db.select().from(statements).where(eq(statements.id, id));
+      const stmt = rows[0];
+      if (!stmt) throw new NotFoundError(`statement ${id}`);
+      if (!process.env.REDIS_URL) {
+        throw new ForbiddenError('REDIS_URL not configured — extraction queue unavailable');
+      }
+      // Wipe prior transactions so the new run isn't deduped against the
+      // old FITIDs. Keep the source PDF.
+      await db.delete(transactions).where(eq(transactions.statementId, id));
+      await db
+        .update(statements)
+        .set({ status: 'uploaded', errorMessage: null, updatedAt: sql`now()` })
+        .where(eq(statements.id, id));
+      await enqueueExtraction({
+        statementId: id,
+        accountId: stmt.accountId,
+        sourcePdfHash: stmt.sourcePdfHash,
+        sourcePdfPath: stmt.sourcePdfPath,
+      });
+      await writeAudit(db, {
+        actorUserId: req.user!.id,
+        entityType: 'statement',
+        entityId: id,
+        action: 'statement.re-extract',
+      });
       res.json({ ok: true });
     } catch (err) {
       next(err);

@@ -104,6 +104,40 @@ export const useUpdateTransaction = (statementId: string) => {
   });
 };
 
+export interface AddTransactionInput {
+  posted_date: string;
+  description: string;
+  amount_cents: string | number;
+  trntype?: string;
+  check_number?: string;
+  source_page?: number;
+}
+
+export const useAddTransaction = (statementId: string) => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: AddTransactionInput) =>
+      api.post<TransactionRow>(`/api/statements/${statementId}/transactions`, input),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['statement', statementId] }),
+  });
+};
+
+export const useDeleteTransaction = (statementId: string) => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (txId: string) => api.delete<void>(`/api/statements/transactions/${txId}`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['statement', statementId] }),
+  });
+};
+
+export const useReExtract = (statementId: string) => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => api.post<{ ok: boolean }>(`/api/statements/${statementId}/re-extract`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['statement', statementId] }),
+  });
+};
+
 export const useOverrideReconciliation = (statementId: string) => {
   const qc = useQueryClient();
   return useMutation({

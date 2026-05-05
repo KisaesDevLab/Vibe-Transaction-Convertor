@@ -12,11 +12,19 @@ export interface Company {
 
 export const companiesKey = ['companies'] as const;
 
-export const useCompanies = (q?: string) =>
+export const useCompanies = (
+  params: { q?: string | undefined; limit?: number | undefined; offset?: number | undefined } = {},
+) =>
   useQuery({
-    queryKey: [...companiesKey, q ?? ''],
-    queryFn: () =>
-      api.get<{ rows: Company[]; total: number }>('/api/companies', q ? { q } : undefined),
+    queryKey: [...companiesKey, params.q ?? '', params.limit ?? 50, params.offset ?? 0],
+    queryFn: () => {
+      const query: Record<string, string | number> = {
+        limit: params.limit ?? 50,
+        offset: params.offset ?? 0,
+      };
+      if (params.q && params.q.length > 0) query.q = params.q;
+      return api.get<{ rows: Company[]; total: number }>('/api/companies', query);
+    },
   });
 
 // Single-company fetch — the list endpoint is paginated, so a deep link

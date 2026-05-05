@@ -69,6 +69,9 @@ export function AdminHomePage() {
           <Link to="/admin/audit" className="text-accent hover:underline">
             Audit log →
           </Link>
+          <Link to="/admin/diagnostics" className="text-accent hover:underline">
+            Diagnostics →
+          </Link>
         </nav>
       </header>
 
