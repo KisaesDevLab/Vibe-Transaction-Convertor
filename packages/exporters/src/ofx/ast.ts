@@ -23,7 +23,16 @@ export interface BankAccountInfo {
   // Intuit-specific (QBO + QFX writers emit, OFX 2.x optional):
   intuBid?: string | undefined;
   intuOrg?: string | undefined;
+  // QFX only — synthetic per-account user identifier. Phase 23 #2/#3.
+  // When undefined the QFX writer derives one from intuUseridSeed.
+  intuUserid?: string | undefined;
+  intuUseridSeed?: string | undefined; // typically account.id (UUID)
 }
+
+// Phase 23 #3: synthesize INTU.USERID = 'VTC' + UUID without dashes.
+// Stable across re-exports because it's a pure function of the seed.
+export const deriveIntuUserid = (seed: string): string =>
+  `VTC${seed.replace(/-/g, '').toUpperCase()}`;
 
 export interface StmtTrn {
   trntype: Trntype;
@@ -35,8 +44,29 @@ export interface StmtTrn {
   checkNumber?: string | undefined;
 }
 
-export const FALLBACK_BANK_ID = '999999999'; // 9-digit placeholder when no
-// routing on file (Phase 22 item 19). QuickBooks doesn't validate BANKID.
+// Phase 22 items 19/21: BANKID fallback ladder when no routing is on file.
+// Order: account.routing → 9-digit BID padded with leading zeros →
+// '000000000'. QuickBooks doesn't validate BANKID, so a numeric placeholder
+// keeps the import happy. The previous '999999999' was non-canonical.
+export const FALLBACK_BANK_ID = '000000000';
+
+export type BankIdSource = 'routing' | 'bid-9' | 'bid-padded' | 'fallback';
+
+export const resolveBankId = (
+  routingNumber: string | null | undefined,
+  intuBid: string | null | undefined,
+): { bankId: string; source: BankIdSource } => {
+  if (routingNumber && /^\d{9}$/.test(routingNumber)) {
+    return { bankId: routingNumber, source: 'routing' };
+  }
+  if (intuBid && /^\d{9}$/.test(intuBid)) {
+    return { bankId: intuBid, source: 'bid-9' };
+  }
+  if (intuBid && /^\d{1,9}$/.test(intuBid)) {
+    return { bankId: intuBid.padStart(9, '0'), source: 'bid-padded' };
+  }
+  return { bankId: FALLBACK_BANK_ID, source: 'fallback' };
+};
 
 export const ofxDate = (iso: string): string => iso.replace(/-/g, ''); // YYYYMMDD
 export const ofxDateTime = (d: Date): string => {

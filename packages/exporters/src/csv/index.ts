@@ -11,7 +11,11 @@ export interface CsvRow {
   postedDate: string; // YYYY-MM-DD
   description: string;
   amountCents: bigint;
+  // generic-only fields below; the four QBO/Xero templates ignore them.
+  runningBalanceCents?: bigint | null | undefined;
   checkNumber?: string | undefined;
+  trntype?: string | undefined;
+  fitid?: string | undefined;
   memo?: string | undefined;
 }
 
@@ -37,45 +41,60 @@ const renderQbo3 = (rows: CsvRow[]): string => {
   return toCsv(out);
 };
 
-// QBO 4-column: Date, Description, Debit, Credit (positive in their column)
+// QBO 4-column: Date, Description, Credit, Debit (positive in its column,
+// the other column blank). Per BuildPlan Phase 20 item 2 — Credit is the
+// LEFT column, Debit is the RIGHT column.
 const renderQbo4 = (rows: CsvRow[]): string => {
-  const out: string[][] = [['Date', 'Description', 'Debit', 'Credit']];
+  const out: string[][] = [['Date', 'Description', 'Credit', 'Debit']];
   for (const r of rows) {
     const negative = r.amountCents < 0n;
     const abs = negative ? -r.amountCents : r.amountCents;
     out.push([
       isoToMdy(r.postedDate),
       r.description,
-      negative ? centsToDecimal(abs) : '',
       negative ? '' : centsToDecimal(abs),
+      negative ? centsToDecimal(abs) : '',
     ]);
   }
   return toCsv(out);
 };
 
-// Xero: *Date, *Amount, Payee, Description, Reference, Cheque Number
+// Xero: *Date, *Amount, Payee, Description, Reference (5 columns per spec).
+// Payee is the leading payee phrase; we use the description as both Payee
+// and Description (Xero deduplicates), and place the optional check number
+// or memo into Reference.
 const renderXero = (rows: CsvRow[]): string => {
+  const out: string[][] = [['*Date', '*Amount', 'Payee', 'Description', 'Reference']];
+  for (const r of rows) {
+    const reference = r.checkNumber ?? r.memo ?? '';
+    out.push([
+      isoToMdy(r.postedDate),
+      centsToDecimal(r.amountCents),
+      r.description,
+      r.description,
+      reference,
+    ]);
+  }
+  return toCsv(out);
+};
+
+// Generic: full denormalized row — Date, Description, Amount,
+// RunningBalance, CheckNumber, TRNTYPE, FITID. Used for spreadsheet
+// review and as the audit-friendly fallback. Phase 20 item 2.
+const renderGeneric = (rows: CsvRow[]): string => {
   const out: string[][] = [
-    ['*Date', '*Amount', 'Payee', 'Description', 'Reference', 'Cheque Number'],
+    ['Date', 'Description', 'Amount', 'RunningBalance', 'CheckNumber', 'TRNTYPE', 'FITID'],
   ];
   for (const r of rows) {
     out.push([
       isoToMdy(r.postedDate),
-      centsToDecimal(r.amountCents),
-      r.description.split('  ')[0] ?? '',
       r.description,
-      r.memo ?? '',
+      centsToDecimal(r.amountCents),
+      r.runningBalanceCents == null ? '' : centsToDecimal(r.runningBalanceCents),
       r.checkNumber ?? '',
+      r.trntype ?? '',
+      r.fitid ?? '',
     ]);
-  }
-  return toCsv(out);
-};
-
-// Generic: Date,Description,Amount,Memo
-const renderGeneric = (rows: CsvRow[]): string => {
-  const out: string[][] = [['Date', 'Description', 'Amount', 'Memo']];
-  for (const r of rows) {
-    out.push([isoToMdy(r.postedDate), r.description, centsToDecimal(r.amountCents), r.memo ?? '']);
   }
   return toCsv(out);
 };

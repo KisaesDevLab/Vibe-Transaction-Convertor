@@ -148,6 +148,9 @@ export const accounts = vibetc.table(
     ),
     routingNumber: text('routing_number'),
     routingNumberAbaValid: boolean('routing_number_aba_valid'),
+    // Phase 23 item 17: optional admin override of the synthetic
+    // INTU.USERID emitted in QFX exports. NULL → derive from account.id.
+    intuUseridOverride: text('intu_userid_override'),
     currency: text('currency').notNull().default('USD'),
     defaultCsvTemplate: csvTemplate('default_csv_template').notNull().default('qbo3'),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),

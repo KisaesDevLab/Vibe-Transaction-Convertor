@@ -2,11 +2,12 @@ import { eq, sql } from 'drizzle-orm';
 
 import { FALLBACK_INTU_BID } from '@vibe-tx-converter/shared';
 import {
-  FALLBACK_BANK_ID,
   renderCsv,
   renderOfxXml,
   renderQbo,
   renderQfx,
+  resolveBankId,
+  type BankIdSource,
   type CsvTemplate,
   type Stmt,
 } from '@vibe-tx-converter/exporters';
@@ -44,21 +45,32 @@ const fetchStatementContext = async (
   return { stmt, account, txs };
 };
 
-const buildOfxStmt = (stmt: Statement, account: Account, txs: Transaction[]): Stmt => {
+interface BuildOfxResult {
+  stmt: Stmt;
+  bankIdSource: BankIdSource;
+}
+
+const buildOfxStmt = (stmt: Statement, account: Account, txs: Transaction[]): BuildOfxResult => {
   if (stmt.openingBalanceCents === null || stmt.closingBalanceCents === null) {
     throw new ConflictError('statement has no opening/closing balance — cannot build OFX');
   }
   if (!stmt.periodStart || !stmt.periodEnd) {
     throw new ConflictError('statement has no period bounds — cannot build OFX');
   }
-  const bankId = account.routingNumber ?? FALLBACK_BANK_ID;
-  return {
+  // Phase 22 item 19/21: resolve BANKID via the canonical fallback ladder.
+  const { bankId, source: bankIdSource } = resolveBankId(account.routingNumber, account.intuBid);
+  const ofxStmt: Stmt = {
     bankAccountInfo: {
       bankId,
       accountId: account.accountNumber,
       accountType: account.accountType,
       intuBid: account.intuBid || FALLBACK_INTU_BID,
       intuOrg: account.intuOrg,
+      // Phase 23 #2/#3: emit INTU.USERID in QFX. The override field is
+      // verbatim if set, otherwise we derive from account.id so re-exports
+      // are byte-stable across runs.
+      ...(account.intuUseridOverride ? { intuUserid: account.intuUseridOverride } : {}),
+      intuUseridSeed: account.id,
     },
     transactions: txs.map((t) => ({
       trntype: t.trntype,
@@ -74,6 +86,7 @@ const buildOfxStmt = (stmt: Statement, account: Account, txs: Transaction[]): St
     asOf: stmt.createdAt,
     currency: 'USD',
   };
+  return { stmt: ofxStmt, bankIdSource };
 };
 
 export interface RenderedExport {
@@ -82,6 +95,7 @@ export interface RenderedExport {
   filename: string;
   bytes: Buffer;
   intuBidUsed?: string;
+  bankIdSource?: BankIdSource;
 }
 
 export const renderExport = async (
@@ -112,6 +126,9 @@ export const renderExport = async (
         postedDate: t.postedDate,
         description: t.description,
         amountCents: t.amountCents,
+        runningBalanceCents: t.runningBalanceCents,
+        trntype: t.trntype,
+        fitid: t.fitid,
         ...(t.checkNumber ? { checkNumber: t.checkNumber } : {}),
       })),
       overridden && tmpl === 'generic'
@@ -126,13 +143,14 @@ export const renderExport = async (
     };
   }
 
-  const ast = buildOfxStmt(stmt, account, txs);
+  const { stmt: ast, bankIdSource } = buildOfxStmt(stmt, account, txs);
   if (format === 'ofx') {
     return {
       format,
       contentType: 'application/x-ofx',
       filename: `${baseName}.ofx`,
       bytes: Buffer.from(renderOfxXml(ast, overrideNote ? { overrideNote } : {}), 'utf8'),
+      bankIdSource,
     };
   }
   if (format === 'qbo') {
@@ -142,6 +160,7 @@ export const renderExport = async (
       filename: `${baseName}.qbo`,
       bytes: Buffer.from(renderQbo(ast), 'utf8'),
       intuBidUsed: ast.bankAccountInfo.intuBid ?? FALLBACK_INTU_BID,
+      bankIdSource,
     };
   }
   if (format === 'qfx') {
@@ -151,6 +170,7 @@ export const renderExport = async (
       filename: `${baseName}.qfx`,
       bytes: Buffer.from(renderQfx(ast), 'utf8'),
       intuBidUsed: ast.bankAccountInfo.intuBid ?? FALLBACK_INTU_BID,
+      bankIdSource,
     };
   }
   throw new Error(`unknown export format: ${format as string}`);
@@ -184,7 +204,7 @@ export const renderExportSlices = async (
   for (let i = 0; i < txs.length; i += QBO_SPLIT_THRESHOLD) {
     const chunkTxs = txs.slice(i, i + QBO_SPLIT_THRESHOLD);
     const part = Math.floor(i / QBO_SPLIT_THRESHOLD) + 1;
-    const ast = buildOfxStmt(stmt, account, chunkTxs);
+    const { stmt: ast, bankIdSource } = buildOfxStmt(stmt, account, chunkTxs);
     const ext = format === 'qbo' ? 'qbo' : 'qfx';
     slices.push({
       format,
@@ -192,6 +212,7 @@ export const renderExportSlices = async (
       filename: `${baseName}_part${part}.${ext}`,
       bytes: Buffer.from(format === 'qbo' ? renderQbo(ast) : renderQfx(ast), 'utf8'),
       intuBidUsed: ast.bankAccountInfo.intuBid ?? FALLBACK_INTU_BID,
+      bankIdSource,
     });
   }
   return slices;

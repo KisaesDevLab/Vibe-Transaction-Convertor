@@ -18,35 +18,61 @@ export const normalizeDescription = (raw: string): string => {
 };
 
 interface Rule {
+  id: string;
   re: RegExp;
   trntype: Trntype;
   // When the sign matters (e.g. PAYMENT must be a credit on a CC), specify.
   sign?: 'positive' | 'negative' | 'any';
 }
 
-// First-match-wins. Order from most specific to most general.
+// First-match-wins. Order is the BuildPlan Phase 17 rule list verbatim
+// (item 2). Any rule reordering is a behavior change — keep this aligned
+// with the spec list and `docs/extraction.md`.
 const RULES: Rule[] = [
-  { re: /\batm\b/i, trntype: 'ATM' },
-  { re: /\b(direct\s*dep(?:osit)?|payroll|dir\s*dep)\b/i, trntype: 'DIRECTDEP' },
-  { re: /\b(direct\s*deb(?:it)?|ach\s*debit|preauth\s*debit)\b/i, trntype: 'DIRECTDEBIT' },
-  { re: /\bach\b/i, trntype: 'XFER' },
-  { re: /\bwire\b/i, trntype: 'XFER' },
-  { re: /\bcheck\s*#?\d+\b/i, trntype: 'CHECK' },
-  { re: /\bsrvchg|service\s*charge|account\s*fee\b/i, trntype: 'SRVCHG' },
-  { re: /\boverdraft|nsf|insufficient\s*funds\b/i, trntype: 'FEE' },
-  { re: /\bint(?:erest)?\s*(?:earned|paid|credit)?\b/i, trntype: 'INT' },
-  { re: /\bdiv(?:idend)?\b/i, trntype: 'DIV' },
+  // INTEREST — both directions (interest credit / int paid / int earned).
+  { id: 'interest', re: /\binterest|int paid|int earned|interest credit\b/i, trntype: 'INT' },
+  // DIVIDENDS.
+  { id: 'dividend', re: /\bdividend|div paid\b/i, trntype: 'DIV' },
+  // Service / maintenance / monthly fees.
   {
-    re: /\b(payment|pmt)\s*(?:received|thank\s*you|credit)\b/i,
-    trntype: 'PAYMENT',
-    sign: 'negative',
+    id: 'service-charge',
+    re: /\bservice charge|maintenance fee|monthly fee\b/i,
+    trntype: 'SRVCHG',
   },
-  { re: /\btransfer\b/i, trntype: 'XFER' },
-  { re: /\b(deposit|dep)\b/i, trntype: 'DEP' },
-  { re: /\bpos\s*(?:purchase|debit)?\b/i, trntype: 'POS' },
-  { re: /\bcash\b/i, trntype: 'CASH' },
-  { re: /\bhold\b/i, trntype: 'HOLD' },
-  { re: /\b(?:fee|charge)\b/i, trntype: 'FEE' },
+  // Generic / NSF / overdraft fees. Excludes the more specific words above.
+  { id: 'fee', re: /\bfee\b|overdraft fee|nsf fee\b/i, trntype: 'FEE' },
+  // ATM withdrawals — narrower than just /atm/ to avoid matching
+  // "ATM Mastercard rebate".
+  {
+    id: 'atm',
+    re: /\batm withdrawal|atm w\/d|withdrawal at machine|atm cash\b/i,
+    trntype: 'ATM',
+  },
+  // Direct deposits — includes the major payroll providers.
+  {
+    id: 'direct-deposit',
+    re: /\bdirect deposit|payroll|adp|paychex|gusto|salary deposit\b/i,
+    trntype: 'DIRECTDEP',
+  },
+  // Direct/ACH debits.
+  {
+    id: 'direct-debit',
+    re: /\bach debit|preauthorized debit|direct debit\b/i,
+    trntype: 'DIRECTDEBIT',
+  },
+  // Internal transfers.
+  { id: 'transfer', re: /\btransfer|xfer|to acct|from acct|tfr to|tfr from\b/i, trntype: 'XFER' },
+  // POS card purchases.
+  { id: 'pos', re: /\bpos purchase|debit card purchase|visa purchase\b/i, trntype: 'POS' },
+  // Online bill pay / electronic payment.
+  { id: 'online-payment', re: /\bonline payment|bill pay|web pay|epay\b/i, trntype: 'PAYMENT' },
+  // Wire transfers — always XFER regardless of direction.
+  { id: 'wire-in', re: /\bwire (in|received)\b/i, trntype: 'XFER' },
+  { id: 'wire-out', re: /\bwire (out|sent)\b/i, trntype: 'XFER' },
+  // Plain deposits (after we've ruled out direct-deposit and dividend).
+  { id: 'deposit', re: /\bdeposit\b/i, trntype: 'DEP' },
+  // Cash withdrawals (narrowed — not just /\bcash\b/).
+  { id: 'cash', re: /\bcash withdrawal|cash out\b/i, trntype: 'CASH' },
 ];
 
 export interface InferTrntypeInput {
@@ -54,22 +80,49 @@ export interface InferTrntypeInput {
   amountCents: bigint | number;
   llmHint?: Trntype | undefined;
   isCreditCard?: boolean | undefined;
+  checkNumber?: string | null | undefined;
 }
 
-export const inferTrntype = (input: InferTrntypeInput): Trntype => {
-  const norm = normalizeDescription(input.description);
+export interface TrntypeDecision {
+  trntype: Trntype;
+  reason: string;
+}
+
+// Phase 17 #21: returns both the result and a human-readable reason
+// (rule id, "user override", or "sign-fallback"). Used in the review UI
+// tooltip so operators can see why a row got its TRNTYPE.
+export const inferTrntypeWithReason = (input: InferTrntypeInput): TrntypeDecision => {
   const amt = typeof input.amountCents === 'bigint' ? input.amountCents : BigInt(input.amountCents);
+  // 1. checkNumber present → CHECK (Phase 17 item 2 first bullet).
+  if (input.checkNumber && input.checkNumber.trim().length > 0) {
+    return { trntype: 'CHECK', reason: 'rule:check-number' };
+  }
+  // 2. LLM hint, when present and a known enum value.
+  if (input.llmHint) return { trntype: input.llmHint, reason: 'llm-hint' };
+  // 3. Description-rule pass.
+  const norm = normalizeDescription(input.description);
   for (const rule of RULES) {
     if (!rule.re.test(norm)) continue;
     if (rule.sign === 'negative' && amt >= 0n) continue;
     if (rule.sign === 'positive' && amt <= 0n) continue;
-    return rule.trntype;
+    return { trntype: rule.trntype, reason: `rule:${rule.id}` };
   }
-  // LLM tiebreaker
-  if (input.llmHint) return input.llmHint;
-  // Fallback by sign
+  // 4. Sign fallback. On credit cards, positive amounts are debits/charges
+  // and negative amounts are payments/credits (the customer's side of the
+  // ledger is reversed vs a checking account).
   if (input.isCreditCard) {
-    return amt > 0n ? 'DEBIT' : 'PAYMENT';
+    return amt > 0n
+      ? { trntype: 'DEBIT', reason: 'sign-fallback:cc-positive' }
+      : { trntype: 'PAYMENT', reason: 'sign-fallback:cc-negative' };
   }
-  return amt >= 0n ? 'CREDIT' : 'DEBIT';
+  return amt >= 0n
+    ? { trntype: 'CREDIT', reason: 'sign-fallback:positive' }
+    : { trntype: 'DEBIT', reason: 'sign-fallback:negative' };
 };
+
+export const inferTrntype = (input: InferTrntypeInput): Trntype =>
+  inferTrntypeWithReason(input).trntype;
+
+// Phase 17 #21: explanation helper for the review UI tooltip.
+export const getTrntypeReason = (input: InferTrntypeInput): string =>
+  inferTrntypeWithReason(input).reason;

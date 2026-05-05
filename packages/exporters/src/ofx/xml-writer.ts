@@ -90,7 +90,17 @@ ${trnList}
     ? `<CREDITCARDMSGSRSV1>${stmtBlock}</CREDITCARDMSGSRSV1>`
     : `<BANKMSGSRSV1>${stmtBlock}</BANKMSGSRSV1>`;
 
-  return `<?xml version="1.0" encoding="UTF-8"?>
+  // SONRS includes the <FI> block when the institution is known —
+  // Phase 21 item 8. ORG defaults to the bank's intuOrg or "Unknown";
+  // FID falls back to the intuBid (or BANK_ID for routing-only setups).
+  const fiOrg = stmt.bankAccountInfo.intuOrg ?? 'Unknown';
+  const fiFid = stmt.bankAccountInfo.intuBid ?? stmt.bankAccountInfo.bankId;
+  const fiBlock = `      <FI>
+        ${tag('ORG', xmlEscape(fiOrg))}
+        ${tag('FID', xmlEscape(fiFid))}
+      </FI>`;
+
+  const lf = `<?xml version="1.0" encoding="UTF-8"?>
 <?OFX OFXHEADER="200" VERSION="211" SECURITY="NONE" OLDFILEUID="NONE" NEWFILEUID="NONE"?>
 ${forensicComment}
 <OFX>
@@ -99,8 +109,12 @@ ${forensicComment}
       <STATUS><CODE>0</CODE><SEVERITY>INFO</SEVERITY></STATUS>
       ${tag('DTSERVER', ofxDateTime(stmt.asOf))}
       ${tag('LANGUAGE', 'ENG')}
+${fiBlock}
     </SONRS>
   </SIGNONMSGSRSV1>
   ${messages}
 </OFX>`;
+  // Phase 21 item 3: OFX 2.x consumers (Quicken, GnuCash, ofxhome
+  // validators) expect CRLF line endings to match the OFX 1.x norm.
+  return lf.replaceAll('\n', '\r\n');
 };

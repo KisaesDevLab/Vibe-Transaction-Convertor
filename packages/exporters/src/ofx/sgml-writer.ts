@@ -2,7 +2,20 @@
 // Web Connect (.qfx). The two share the same body shape; only INTU.BID
 // (and INTU.ORG for QBO) presence differs.
 
-import { accountTypeForBank, centsToDecimal, ofxDate, ofxDateTime, type Stmt } from './ast.js';
+import {
+  accountTypeForBank,
+  centsToDecimal,
+  deriveIntuUserid,
+  ofxDate,
+  ofxDateTime,
+  type Stmt,
+} from './ast.js';
+
+// Phase 22 items 5/7/15/16: QBO Web Connect requires INTU.BID — when an
+// account has no Intuit BID on file we fall back to '3000' (Wells Fargo's
+// generic ID, accepted everywhere) and surface the fallback to the audit
+// log so operators can see how often we're guessing.
+const HARDCODED_INTU_BID_FALLBACK = '3000';
 
 const SGML_HEADER = [
   'OFXHEADER:100',
@@ -47,11 +60,11 @@ const renderStmtTrnSgml = (trn: Stmt['transactions'][number]): string => {
 
 export interface SgmlWriterOptions {
   emitIntuBid?: boolean | undefined;
-  // Toggles the standard OFX <FI><ORG><FID></FI> block, present in both
-  // QBO and QFX. The intentionally-removed `INTU.USERID` was a wrong
-  // field — it's a per-user identifier we don't have, not the bank's
-  // org name. QuickBooks accepts files without it.
+  // Toggles the standard OFX <FI><ORG><FID></FI> block. QBO emits it,
+  // QFX skips it (Quicken).
   emitFiBlock?: boolean | undefined;
+  // QFX writers emit INTU.USERID; QBO does not. Phase 23 #2/#3.
+  emitIntuUserid?: boolean | undefined;
 }
 
 export const renderOfxSgml = (stmt: Stmt, opts: SgmlWriterOptions = {}): string => {
@@ -67,13 +80,31 @@ export const renderOfxSgml = (stmt: Stmt, opts: SgmlWriterOptions = {}): string 
     stag('DTSERVER', ofxDateTime(stmt.asOf)),
     stag('LANGUAGE', 'ENG'),
   ];
-  if (opts.emitFiBlock !== false && stmt.bankAccountInfo.intuOrg) {
-    sonrs.push('<FI>', stag('ORG', sgmlEscape(stmt.bankAccountInfo.intuOrg)));
-    if (stmt.bankAccountInfo.intuBid) sonrs.push(stag('FID', stmt.bankAccountInfo.intuBid));
-    sonrs.push('</FI>');
+  const effectiveIntuBid = stmt.bankAccountInfo.intuBid ?? HARDCODED_INTU_BID_FALLBACK;
+  if (opts.emitFiBlock !== false) {
+    sonrs.push(
+      '<FI>',
+      stag('ORG', sgmlEscape(stmt.bankAccountInfo.intuOrg ?? 'Unknown')),
+      stag('FID', effectiveIntuBid),
+      '</FI>',
+    );
   }
-  if (opts.emitIntuBid !== false && stmt.bankAccountInfo.intuBid) {
-    sonrs.push(stag('INTU.BID', stmt.bankAccountInfo.intuBid));
+  if (opts.emitIntuBid !== false) {
+    // Always emit INTU.BID — falling back to '3000' if the account has no
+    // BID configured. This matches Phase 22 item 5/7/15/16.
+    sonrs.push(stag('INTU.BID', effectiveIntuBid));
+  }
+  if (opts.emitIntuUserid) {
+    // Phase 23 #2/#3: QFX requires INTU.USERID. Use the explicit value if
+    // the caller provided one (operator override), otherwise derive
+    // deterministically from the seed (typically account.id) so re-exports
+    // are byte-stable.
+    const userid =
+      stmt.bankAccountInfo.intuUserid ??
+      (stmt.bankAccountInfo.intuUseridSeed
+        ? deriveIntuUserid(stmt.bankAccountInfo.intuUseridSeed)
+        : undefined);
+    if (userid) sonrs.push(stag('INTU.USERID', sgmlEscape(userid)));
   }
   sonrs.push('</SONRS>');
 
@@ -152,7 +183,7 @@ export const renderOfxSgml = (stmt: Stmt, opts: SgmlWriterOptions = {}): string 
 export const renderQbo = (stmt: Stmt): string =>
   renderOfxSgml(stmt, { emitIntuBid: true, emitFiBlock: true });
 
-// Phase 23: QFX is the SGML writer with INTU.BID only — Quicken doesn't
-// require the <FI> block when INTU.BID is present.
+// Phase 23: QFX is the SGML writer with INTU.BID + INTU.USERID. Quicken
+// doesn't require the <FI> block when INTU.BID is present.
 export const renderQfx = (stmt: Stmt): string =>
-  renderOfxSgml(stmt, { emitIntuBid: true, emitFiBlock: false });
+  renderOfxSgml(stmt, { emitIntuBid: true, emitFiBlock: false, emitIntuUserid: true });

@@ -144,4 +144,58 @@ describe('inferTrntype', () => {
       }),
     ).toBe('PAYMENT');
   });
+  it('credit-card positive amount is DEBIT (charge)', () => {
+    expect(inferTrntype({ description: 'STARBUCKS', amountCents: 500n, isCreditCard: true })).toBe(
+      'DEBIT',
+    );
+  });
+
+  // Phase 17 #2 expanded rules.
+  it('routes interest credit to INT', () => {
+    expect(inferTrntype({ description: 'INTEREST CREDIT', amountCents: 412n })).toBe('INT');
+    expect(inferTrntype({ description: 'INT EARNED', amountCents: 412n })).toBe('INT');
+  });
+  it('routes dividend to DIV', () => {
+    expect(inferTrntype({ description: 'DIVIDEND PAYMENT', amountCents: 1_500n })).toBe('DIV');
+    expect(inferTrntype({ description: 'DIV PAID', amountCents: 1_500n })).toBe('DIV');
+  });
+  it('routes NSF / overdraft fees to FEE', () => {
+    expect(inferTrntype({ description: 'NSF FEE', amountCents: -3500n })).toBe('FEE');
+    expect(inferTrntype({ description: 'OVERDRAFT FEE', amountCents: -3500n })).toBe('FEE');
+  });
+  it('routes maintenance / monthly fees to SRVCHG', () => {
+    expect(inferTrntype({ description: 'MAINTENANCE FEE', amountCents: -1500n })).toBe('SRVCHG');
+    expect(inferTrntype({ description: 'MONTHLY FEE', amountCents: -1500n })).toBe('SRVCHG');
+  });
+  it('routes payroll vendors to DIRECTDEP', () => {
+    for (const vendor of ['ADP PAYROLL', 'PAYCHEX', 'GUSTO INC', 'SALARY DEPOSIT']) {
+      expect(inferTrntype({ description: vendor, amountCents: 320_000n })).toBe('DIRECTDEP');
+    }
+  });
+  it('routes BILL PAY / online payment to PAYMENT', () => {
+    for (const desc of ['ONLINE PAYMENT', 'BILL PAY', 'WEB PAY', 'EPAY']) {
+      expect(inferTrntype({ description: desc, amountCents: -10_000n })).toBe('PAYMENT');
+    }
+  });
+  it('routes WIRE in/out to XFER', () => {
+    expect(inferTrntype({ description: 'WIRE OUT TO ACME', amountCents: -100_000n })).toBe('XFER');
+    expect(inferTrntype({ description: 'WIRE IN FROM CUSTOMER', amountCents: 100_000n })).toBe(
+      'XFER',
+    );
+  });
+  it('narrowed CASH rule does not match generic /cash/', () => {
+    // "CASH BACK REWARD" should NOT route to CASH.
+    expect(inferTrntype({ description: 'CASH BACK REWARD', amountCents: 500n })).not.toBe('CASH');
+    // "CASH WITHDRAWAL" should.
+    expect(inferTrntype({ description: 'CASH WITHDRAWAL', amountCents: -10_000n })).toBe('CASH');
+  });
+  it('checkNumber short-circuits to CHECK regardless of description', () => {
+    expect(
+      inferTrntype({
+        description: 'BILL PAY',
+        amountCents: -10_000n,
+        checkNumber: '1234',
+      }),
+    ).toBe('CHECK');
+  });
 });

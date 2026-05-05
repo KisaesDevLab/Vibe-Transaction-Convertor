@@ -21,7 +21,7 @@ import {
 import { schemas } from '@vibe-tx-converter/shared';
 
 import { db } from '../db/client.js';
-import { statements, transactions } from '../db/schema.js';
+import { accounts, statements, transactions } from '../db/schema.js';
 import { logger } from '../lib/logger.js';
 import { buildProvider } from '../services/llm-provider.js';
 import { writeAudit } from '../services/audit.js';
@@ -44,6 +44,11 @@ const setStatus = async (
 export const processExtraction = async (data: ExtractionJobData): Promise<void> => {
   const stmtId = data.statementId;
   await setStatus(stmtId, 'preprocessing');
+
+  // Look up the account up front so TRNTYPE inference can apply the
+  // credit-card sign convention (Phase 17 — `isCreditCard` flag).
+  const acctRows = await db.select().from(accounts).where(eq(accounts.id, data.accountId));
+  const isCreditCard = acctRows[0]?.accountType === 'CREDITCARD';
 
   // pdfjs-dist takes ownership of the underlying ArrayBuffer per call,
   // so we re-read the file before each pdfjs call rather than passing
@@ -222,6 +227,8 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
     const trntype = inferTrntype({
       description: tx.description,
       amountCents: tx.amountCents,
+      isCreditCard,
+      ...(tx.checkNumber ? { checkNumber: tx.checkNumber } : {}),
       ...(tx.trntypeHint ? { llmHint: tx.trntypeHint } : {}),
     });
     await db

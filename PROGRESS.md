@@ -1,57 +1,93 @@
 # Build Progress
 
-Phase-by-phase progress against `BuildPlan.md`. Acceptance gauntlet
-for every phase: `pnpm acceptance` (runs typecheck → lint → test →
-build).
+Phase-by-phase status against `BuildPlan.md`. Status reflects **acceptance
+verbatim** against the BuildPlan's Acceptance bullet for each phase, not
+just whether the happy path runs. Acceptance gauntlet: `pnpm acceptance`
+(typecheck → lint → test → build).
 
-| Phase | Title                                        | Status | Commit    | Notes                               |
-| ----- | -------------------------------------------- | ------ | --------- | ----------------------------------- |
-| 0     | Repo Bootstrap                               | ✅     | `9838a8f` | runnable monorepo skeleton          |
-| 1     | ADRs, Docs Skeleton, License                 | ✅     | `77c429d` | 20 ADRs landed                      |
-| 2     | Workspace, TS, Lint, Test Config             | ✅     | `0cf9a8b` | helpers + 18 tests passing          |
-| 3     | Database Schema & Migrations                 | ✅     | `894247d` | 10 tables + live smoke OK           |
-| 4     | API Scaffolding & Health                     | ✅     | `ae36853` | health/ready/version + 7 supertests |
-| 5     | FIDIR Mirror, Parser, Seeder                 | ✅     | `36c2ac8` | 127-bank starter + parser + routes  |
-| 6     | Auth & Session                               | ✅     | `331c6f2` | argon2 + cookie sessions + admin    |
-| 7     | Companies CRUD (API + UI)                    | ✅     | `2e53a6a` | CRUD + 8 supertests + minimal UI    |
-| 8     | Accounts CRUD with Bank Picker               | ✅     | `387fe08` | masking + ABA + 7 supertests + UI   |
-| 9     | PDF Upload, Storage, Hashing                 | ✅     | `dc560c7` | sha256 + dedup + dropzone           |
-| 10    | PDF Pre-Processing & Routing                 | ✅     | `5c8b41b` | analyze + route + textLayer + bbox  |
-| 11    | GLM-OCR HTTP Client                          | ✅     | `c76d8cf` | retry+concurrency+cache, mocked     |
-| 12    | LLM Extractor — Schema, Prompts, Exemplars   | ✅     | `ebecc34` | Zod + JSON-schema + 1 exemplar      |
-| 13    | LLM Provider Abstraction (Local + Anthropic) | ✅     | `4abbdaf` | both providers + AES-GCM key wrap   |
-| 14    | Multi-Account Auto-Split                     | ✅     | `9e34173` | regex+forward-fill split heuristic  |
-| 15    | BullMQ Extraction Pipeline                   | ✅     | `56e80e0` | end-to-end worker (analyze→export)  |
-| 16    | Golden Rule Reconciler & Repair Pass         | ✅     | `9e34173` | cents-exact + sign-flip repair      |
-| 17    | TRNTYPE Inference + FITID Generator          | ✅     | `9e34173` | rules-first + LLM tiebreaker        |
-| 18    | Statement & Transaction Review UI            | ✅     | `d22cccd` | inline edit + override modal        |
-| 19    | PDF Viewer with Bounding-Box Highlighting    | ✅     | `9a1fc2f` | react-pdf + bbox overlay + fit-mode |
-| 20    | CSV Exporter                                 | ✅     | `d22cccd` | qbo3/qbo4/xero/generic              |
-| 21    | OFX 2.x XML Exporter                         | ✅     | `d22cccd` | shared AST                          |
-| 22    | QBO Exporter (OFX 1.x SGML + INTU.BID)       | ✅     | `d22cccd` | renderQbo()                         |
-| 23    | QFX Exporter                                 | ✅     | `d22cccd` | renderQfx()                         |
-| 24    | Export UI & Download Bundling                | ✅     | `d22cccd` | 7 format buttons + override         |
-| 25    | Audit Log                                    | ✅     | `d22cccd` | append-only viewer                  |
-| 26    | Admin / Settings                             | ✅     | `d22cccd` | LLM provider + FIDIR refresh        |
-| 27    | Testing — Unit, Integration, E2E             | ⚠      | —         | unit + supertest exist; E2E TBD     |
-| 28    | Standalone Docker Compose                    | ✅     | `51c7f17` | full multi-service compose          |
-| 29    | Vibe Appliance Mode + Manifest               | ✅     | `51c7f17` | appliance.manifest.json + overlay   |
-| 30    | GHCR Publishing & Release Automation         | ✅     | `51c7f17` | signed images + SBOM + Trivy        |
-| 31    | Documentation Pass                           | ✅     | `51c7f17` | operator + user + api + data-flow   |
-| 32    | Final QA & Release Checklist                 | ✅     | `51c7f17` | full pnpm acceptance green          |
+| Phase | Title                                     | Status | Last commit | Notes                                                          |
+| ----- | ----------------------------------------- | ------ | ----------- | -------------------------------------------------------------- |
+| 0     | Repo Bootstrap                            | ✅     | `9838a8f`   | clean                                                          |
+| 1     | ADRs, Docs Skeleton, License              | ✅     | `77c429d`   | 20 ADRs                                                        |
+| 2     | Workspace, TS, Lint, Test Config          | ✅     | `0cf9a8b`   | clean                                                          |
+| 3     | Database Schema & Migrations              | ✅     | `894247d`   | clean                                                          |
+| 4     | API Scaffolding & Health                  | ✅     | `ae36853`   | clean (101st-req rate-limit test missing)                      |
+| 5     | FIDIR Mirror, Parser, Seeder              | ⚠      | `36c2ac8`   | 127-bank stub, not vendored Intuit                             |
+| 6     | Auth & Session                            | ✅     | `331c6f2`   | clean                                                          |
+| 7     | Companies CRUD (API + UI)                 | ⚠      | `2e53a6a`   | no shadcn/Radix; no detail-page edit/delete                    |
+| 8     | Accounts CRUD with Bank Picker            | ⚠      | `387fe08`   | no edit/delete on detail; no test-stamp preview                |
+| 9     | PDF Upload, Storage, Hashing              | ⚠      | `dc560c7`   | no ZIP batch; no MIME sniffing; no .tmp 1h cleanup             |
+| 10    | PDF Pre-Processing & Routing              | ⚠      | `5c8b41b`   | no fixture suite; no per-page timeouts; no force-OCR flag      |
+| 11    | GLM-OCR HTTP Client                       | ⚠      | `c76d8cf`   | in-memory cache (spec: Redis); no version probe; no breaker    |
+| 12    | LLM Extractor                             | ⚠      | `ebecc34`   | 1 of 10 exemplars; flat schema; no token budget                |
+| 13    | LLM Provider Abstraction                  | ⚠      | `4abbdaf`   | no 60-s cache, no withValidationRepair, no @anthropic-ai/sdk   |
+| 14    | Multi-Account Auto-Split                  | ⚠      | `9e34173`   | detection only — never splits into multiple statements         |
+| 15    | BullMQ Extraction Pipeline                | ⚠      | `56e80e0`   | no SSE progress; no cancel; no awaiting-locale gate            |
+| 16    | Golden Rule Reconciler & Repair Pass      | ⚠      | `9e34173`   | repair is heuristic (spec: LLM 2nd pass); no findSuspectRows   |
+| 17    | TRNTYPE Inference + FITID Generator       | ⚠      | `9e34173`   | ~10 spec rules missing; isCreditCard not wired through worker  |
+| 18    | Statement & Transaction Review UI         | ⚠      | `d22cccd`   | no global /statements; no full-detail header                   |
+| 19    | PDF Viewer with Bounding-Box Highlighting | ⚠      | `9a1fc2f`   | PDF→txn click selection not wired                              |
+| 20    | CSV Exporter                              | ⚠      | `d22cccd`   | qbo4 column order swapped; xero 6-col; generic missing 4 cols  |
+| 21    | OFX 2.x XML Exporter                      | ⚠      | `d22cccd`   | uses LF not CRLF; no <FI> in SONRS; no ofx4js parse roundtrip  |
+| 22    | QBO Exporter                              | ⚠      | `d22cccd`   | INTU.BID conditional (spec: always); no fallback ladder        |
+| 23    | QFX Exporter                              | ⚠      | `d22cccd`   | <INTU.USERID> missing entirely                                 |
+| 24    | Export UI & Download Bundling             | ⚠      | `d22cccd`   | no <ExportPage>; no preview; no download list endpoint         |
+| 25    | Audit Log                                 | ⚠      | `d22cccd`   | no diffs / no JSON tree / no downloads / no retention          |
+| 26    | Admin / Settings                          | ⚠      | `d22cccd`   | no LlmProviderAdminPage; no real BackupAdminPage; no FidirPage |
+| 27    | Testing — Unit, Integration, Goldens, E2E | ⚠      | —           | 102 unit/supertests; no Playwright; no fixture suite           |
+| 28    | Standalone Docker Compose                 | ⚠      | `51c7f17`   | no Caddy; no separate worker service; runs as root             |
+| 29    | Vibe Appliance Mode + Manifest            | ⚠      | `51c7f17`   | manifest is JSON not vibe-app.yaml; no installer integration   |
+| 30    | GHCR Publishing & Release Automation      | ⚠      | `51c7f17`   | no cosign sig; no syft SBOM; no CHANGELOG                      |
+| 31    | Documentation Pass                        | ⚠      | `51c7f17`   | half the spec'd docs missing                                   |
+| 32    | Final QA & Release Checklist              | ⚠      | `51c7f17`   | v0.1.0 not tagged; no documented smoke against Quicken/QB      |
 
-Legend: ✅ done · ⏳ in progress · ⏸ pending · ⚠ partial (deferred)
+Legend: ✅ done (passes BuildPlan acceptance verbatim) · ⚠ partial (functional but
+acceptance bullet not satisfied) · ⏸ pending · ⏳ in progress
+
+## State of the build
+
+The **core happy path works end-to-end**: register first admin → create
+company → add account with bank-picker → upload PDF → BullMQ worker
+analyzes / extracts / reconciles → review grid with inline edits and
+PDF viewer → export to CSV/OFX/QBO/QFX → audit-log every mutation. The
+acceptance suite is green (102 unit + supertests pass, build clean).
+
+What's missing is **breadth, polish and several spec invariants**:
+
+- Frontend stack is raw HTML+Tailwind (CLAUDE.md locks shadcn/Radix).
+- No fixture corpus / golden-master files; no Playwright; no React
+  Testing Library.
+- LLM extraction is wired but thin — 1 of 10 exemplars, flat schema,
+  no token budget, no LLM-driven repair pass.
+- Multi-account detection works but does not split into multiple
+  statement rows (no `page_range` column, no confirm-split route).
+- Exporter byte shapes diverge from spec on multiple formats (CSV
+  columns, OFX line endings, QBO INTU.BID conditional, QFX
+  INTU.USERID missing entirely, no BANKID fallback ladder).
+- Admin, audit, export, and review UIs are missing dialog / preview /
+  listing surfaces.
+- Release pipeline lacks cosign signing, syft SBOM, CHANGELOG.
+- Half the spec'd docs are not written.
+
+A full audit log is in conversation history (2026-05-05). A complete
+gap punch-list per phase is in `docs/GAPS.md` (TBD). The honest count
+is **6 of 33 phases pass acceptance verbatim** (0, 1, 2, 3, 4, 6).
 
 ## Open questions
 
-See `QUESTIONS.md` (6 entries — all worked-around or deferred).
+See `QUESTIONS.md`. Q-001 through Q-006 are all worked-around or
+resolved. Q-006 (rasterizePdf) — resolved 2026-05-05 via pdftoppm
+shell-out.
 
-## Deferred work (Phase 27)
+## Deferred / not-yet-started
 
-- **Phase 27** (testing pass). The codebase ships ~97 unit + supertest
-  cases. A dedicated Playwright E2E suite, golden-master test
-  fixtures for exporters, and load tests against the worker queue
-  are deferred.
-- **Q-006: rasterizePdf()** — resolved. Shells out to `pdftoppm`
-  (poppler-utils). Standalone Dockerfile installs poppler; host operators
-  install via brew / apt / choco.
+- **Phase 27 testing pass** beyond unit + supertest: Playwright E2E,
+  fixture-corpus golden masters per exporter, load tests, contract
+  tests for both LLM providers, "no API key in logs" regression test,
+  "no PDF/page-image bytes in payload" outbound assertion.
+- **Phase 14 real split** — the upload-time split decision and per-
+  account-segment statement insert.
+- **Phase 16 LLM-driven repair** — currently in-process heuristics.
+- **Phase 24 ExportPage** — full preview + per-format checkbox UI.
+- **Phase 26 LlmProviderAdminPage** — typed-confirm phrase, model
+  dropdown, monthly cost cap, test-connection.
