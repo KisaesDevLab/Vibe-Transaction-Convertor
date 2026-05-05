@@ -52,8 +52,8 @@ export type ExtractionTransaction = z.infer<typeof ExtractionTransaction>;
 
 // Phase 12 #1: split top-level fields into structured groups so the LLM
 // has a clearer mental model and the worker reads richly-typed data.
-// Backwards-compatible flat aliases live in the runtime layer
-// (`legacy.ts`) so existing call sites keep working during the rollout.
+// No backwards-compatible flat shape — every consumer was updated in
+// the same change.
 
 export const ExtractionAccount = z.object({
   masked_number: z.string().nullable().optional(),

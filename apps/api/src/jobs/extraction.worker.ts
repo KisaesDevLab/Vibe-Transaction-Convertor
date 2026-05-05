@@ -43,6 +43,33 @@ const setStatus = async (
     .where(eq(statements.id, statementId));
 };
 
+class CancelledError extends Error {
+  constructor() {
+    super('extraction cancelled by operator');
+    this.name = 'CancelledError';
+  }
+}
+
+// Phase 15 #17 cooperative cancellation. The /cancel route flips
+// status='failed' with errorMessage 'cancelled by operator'; this
+// helper polls between phases and bails before doing more LLM/DB work
+// that would race the route's transaction wipe.
+const checkCancelled = async (statementId: string): Promise<void> => {
+  const rows = await db
+    .select({ status: statements.status, errorMessage: statements.errorMessage })
+    .from(statements)
+    .where(eq(statements.id, statementId));
+  const row = rows[0];
+  if (
+    row &&
+    row.status === 'failed' &&
+    typeof row.errorMessage === 'string' &&
+    row.errorMessage.startsWith('cancelled')
+  ) {
+    throw new CancelledError();
+  }
+};
+
 export const processExtraction = async (data: ExtractionJobData): Promise<void> => {
   const stmtId = data.statementId;
   await setStatus(stmtId, 'preprocessing');
@@ -123,6 +150,7 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
   // LLM extraction. Pass the JSON Schema explicitly so the local Vibe
   // Gateway uses guided_json mode (ADR-004); the Anthropic provider
   // gets the same schema via its tool_use input_schema (ADR-020).
+  await checkCancelled(stmtId);
   await setStatus(stmtId, 'extracting');
   const provider = await buildProvider(db);
 
@@ -215,6 +243,7 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
     })
     .where(eq(statements.id, stmtId));
 
+  await checkCancelled(stmtId);
   await setStatus(stmtId, 'reconciling');
 
   // Reconcile, then attempt the repair pass (ADR-010 + Phase 16) when
@@ -484,6 +513,12 @@ export const startExtractionWorker = (): Worker<ExtractionJobData> => {
       try {
         await processExtraction(job.data);
       } catch (err) {
+        if (err instanceof CancelledError) {
+          // The /cancel route already wrote status=failed +
+          // errorMessage; don't overwrite the cancel reason.
+          logger.info({ jobId: job.id }, 'extraction cancelled cooperatively');
+          return;
+        }
         logger.error({ err, jobId: job.id }, 'extraction job failed');
         await db
           .update(statements)

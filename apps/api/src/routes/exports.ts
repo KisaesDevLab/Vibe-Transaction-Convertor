@@ -13,6 +13,7 @@ import {
   renderExportSlices,
   type ExportFormat,
 } from '../services/exports.js';
+import { writeAudit } from '../services/audit.js';
 
 const VALID: ExportFormat[] = [
   'csv-qbo3',
@@ -182,6 +183,16 @@ export const exportJobsRouter = (): Router => {
             : job.format === 'ofx'
               ? 'application/x-ofx'
               : 'text/csv; charset=utf-8';
+      // Phase 25: re-downloads of an exported file leave an audit
+      // trail just like the original render. Write before piping so a
+      // download that races with a delete still records the attempt.
+      await writeAudit(db, {
+        actorUserId: req.user!.id,
+        entityType: 'statement',
+        entityId: job.statementId,
+        action: 'statement.export-redownload',
+        payload: { exportJobId: jobId, format: job.format, bytes: job.fileBytes },
+      });
       res.setHeader('content-type', contentType);
       res.setHeader('content-disposition', `attachment; filename="${filename}"`);
       res.setHeader('content-length', job.fileBytes.toString());

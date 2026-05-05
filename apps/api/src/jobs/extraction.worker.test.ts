@@ -23,12 +23,11 @@ const __dirname = dirname(__filename);
 const migrationsFolder = join(__dirname, '..', 'db', 'migrations');
 
 const SAMPLE = {
-  period_start: '2026-03-01',
-  period_end: '2026-03-31',
-  opening_balance_cents: 100_000,
-  closing_balance_cents: 110_000,
-  source_date_format: 'MDY' as const,
-  source_date_format_confidence: 0.9,
+  account: { masked_number: null, type_hint: null },
+  institution: { name: 'Acme Bank', intu_org_hint: null },
+  period: { start: '2026-03-01', end: '2026-03-31' },
+  balances: { opening_cents: 100_000, closing_cents: 110_000 },
+  source_date_format: { format: 'MDY' as const, confidence: 0.9 },
   transactions: [
     {
       posted_date: '2026-03-08',
@@ -206,8 +205,7 @@ live('processExtraction worker (live Postgres, mocked LLM)', () => {
     //   flip GROCERY (+5000 → -5000):   newDelta = -10000 + 10000 = 0   (✓)
     mockExtractedData = {
       ...SAMPLE,
-      opening_balance_cents: 100_000,
-      closing_balance_cents: 125_000,
+      balances: { opening_cents: 100_000, closing_cents: 125_000 },
       transactions: [
         {
           posted_date: '2026-03-08',

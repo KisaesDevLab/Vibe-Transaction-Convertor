@@ -30,10 +30,14 @@ const newFilename = (): string => {
   return `vibetc-${iso}.dump`;
 };
 
-// Reject path-traversal attempts and any filename that doesn't match the
-// shape we generate. Routes call this before fs.stat / fs.unlink.
+// Reject path-traversal attempts and any filename that doesn't match
+// the exact shape `newFilename()` emits: `vibetc-{ISO-with-:-and-.
+// swapped-for--}.dump`. This is stricter than necessary for security
+// (the original /[\w-]+/ already blocked `..`, `/`, and `\`), but
+// means the routes only ever surface filenames they could plausibly
+// have created, which simplifies reasoning.
 export const assertSafeFilename = (name: string): void => {
-  if (!/^vibetc-[\w-]+\.dump$/.test(name)) {
+  if (!/^vibetc-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{1,4}Z\.dump$/.test(name)) {
     throw new Error(`unsafe backup filename: ${name}`);
   }
 };
@@ -54,7 +58,7 @@ export const listBackups = async (): Promise<BackupSummary[]> => {
   }
   const out: BackupSummary[] = [];
   for (const f of entries) {
-    if (!/^vibetc-.+\.dump$/.test(f)) continue;
+    if (!/^vibetc-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{1,4}Z\.dump$/.test(f)) continue;
     try {
       const s = await stat(join(dir, f));
       out.push({
@@ -84,15 +88,32 @@ export const createBackup = async (): Promise<BackupSummary> => {
   const dir = await ensureDir();
   const filename = newFilename();
   const path = join(dir, filename);
+  // Parse the DSN so we can pass --host/--port/--username/--dbname
+  // explicitly and put the password in PGPASSWORD env. Otherwise
+  // pg_dump's argv (visible to `ps`/Get-Process) would leak the
+  // password to anyone with a process listing on the host.
+  const parsed = (() => {
+    try {
+      return new URL(url);
+    } catch {
+      throw new Error('DATABASE_URL is not a valid URL');
+    }
+  })();
+  const args: string[] = [
+    '--no-owner',
+    '--schema=vibetc',
+    '--format=custom',
+    '--file',
+    path,
+    `--host=${parsed.hostname}`,
+    `--port=${parsed.port || '5432'}`,
+    `--dbname=${parsed.pathname.replace(/^\//, '') || 'postgres'}`,
+  ];
+  if (parsed.username) args.push(`--username=${decodeURIComponent(parsed.username)}`);
+  const env: Record<string, string | undefined> = { ...process.env };
+  if (parsed.password) env.PGPASSWORD = decodeURIComponent(parsed.password);
   try {
-    // --no-owner: dump doesn't reference local OS users; restore is portable.
-    // --schema=vibetc: only the app schema, not the entire database.
-    // --format=custom: compressed binary format restorable via pg_restore.
-    await execFileP(
-      'pg_dump',
-      ['--no-owner', '--schema=vibetc', '--format=custom', '--file', path, url],
-      { maxBuffer: 64 * 1024 * 1024 },
-    );
+    await execFileP('pg_dump', args, { maxBuffer: 64 * 1024 * 1024, env });
   } catch (err) {
     const e = err as { code?: string; message?: string; stderr?: Buffer | string };
     if (e.code === 'ENOENT') {
@@ -131,7 +152,7 @@ export const cleanupExpiredBackups = async (): Promise<{ removed: number }> => {
   }
   let removed = 0;
   for (const f of entries) {
-    if (!/^vibetc-.+\.dump$/.test(f)) continue;
+    if (!/^vibetc-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{1,4}Z\.dump$/.test(f)) continue;
     const path = join(dir, f);
     try {
       const s = await stat(path);

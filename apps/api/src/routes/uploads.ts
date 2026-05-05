@@ -9,6 +9,7 @@ import { db } from '../db/client.js';
 import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from '../lib/errors.js';
 import { logger } from '../lib/logger.js';
 import { findByHash, ingestUpload, streamSourcePdf } from '../services/statements.js';
+import { writeAudit } from '../services/audit.js';
 import { checkFreeSpace, isPdfMagicBytes, sha256Of, storePdf } from '../services/upload-storage.js';
 import { eq } from 'drizzle-orm';
 import { accounts, statements } from '../db/schema.js';
@@ -199,6 +200,16 @@ export const uploadsRawRouter = (): Router => {
       const rows = await db.select().from(statements).where(eq(statements.sourcePdfHash, hash));
       const row = rows[0];
       if (!row) throw new NotFoundError(`no statement with hash ${hash}`);
+      // Source PDFs are the most sensitive artifact ("never leave the
+      // firm's database"); admins downloading them should leave a
+      // forensic trail just like account-number reveal does.
+      await writeAudit(db, {
+        actorUserId: req.user!.id,
+        entityType: 'statement',
+        entityId: row.id,
+        action: 'statement.download-raw-pdf',
+        payload: { hash },
+      });
       res.setHeader('content-type', 'application/pdf');
       res.setHeader('content-disposition', `inline; filename="${hash}.pdf"`);
       streamSourcePdf(row.sourcePdfPath)

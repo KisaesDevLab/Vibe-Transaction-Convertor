@@ -306,18 +306,11 @@ export const statementsRouter = (): Router => {
         parsed.push({ accountId, pageStart, pageEnd });
       }
 
-      // Verify all referenced accounts exist in the same company as the parent.
-      // (Cross-company splits are out of scope — operator should set up the
-      // accounts under the parent's company first.)
-      const parentAccountRows = await db
-        .select()
-        .from(transactions)
-        .where(eq(transactions.statementId, id));
       // Wipe parent's transactions so the parent row is purely an audit
-      // marker; its FITIDs would all be wrong post-split anyway.
-      if (parentAccountRows.length > 0) {
-        await db.delete(transactions).where(eq(transactions.statementId, id));
-      }
+      // marker; its FITIDs would all be wrong post-split anyway. The
+      // delete-with-zero-rows case is a no-op (drizzle still requires
+      // a WHERE — `transactions.statementId = id` satisfies it).
+      await db.delete(transactions).where(eq(transactions.statementId, id));
 
       // Mark the parent as superseded — keep the row for audit, but flag
       // it so the UI doesn't re-pester to acknowledge / split.
@@ -496,13 +489,22 @@ export const statementsRouter = (): Router => {
       res.flushHeaders?.();
 
       const TERMINAL = new Set(['review', 'exported', 'failed', 'awaiting-locale-confirmation']);
+      // Bound the stream so a stuck statement doesn't have us polling
+      // Postgres every 1.5s forever. 30 minutes is plenty for the
+      // worst-case OCR + LLM extraction; clients reconnect after that.
+      const MAX_DURATION_MS = 30 * 60_000;
+      const startedAt = Date.now();
       let lastSerialized = '';
       let cancelled = false;
       req.on('close', () => {
         cancelled = true;
       });
 
-      while (!cancelled) {
+      // Emit a heartbeat comment up front so proxies (Caddy, Nginx)
+      // don't kill the connection before the first data event.
+      res.write(`: heartbeat\n\n`);
+
+      while (!cancelled && Date.now() - startedAt < MAX_DURATION_MS) {
         const rows = await db.select().from(statements).where(eq(statements.id, id));
         const row = rows[0];
         if (!row) {
@@ -514,9 +516,18 @@ export const statementsRouter = (): Router => {
         if (serialized !== lastSerialized) {
           res.write(`data: ${serialized}\n\n`);
           lastSerialized = serialized;
+        } else {
+          // Same status snapshot — emit a comment-only heartbeat so
+          // proxies don't kill the idle connection during slow phases.
+          res.write(`: heartbeat\n\n`);
         }
         if (TERMINAL.has(row.status)) break;
         await new Promise((resolve) => setTimeout(resolve, 1500));
+      }
+      if (Date.now() - startedAt >= MAX_DURATION_MS) {
+        res.write(
+          `event: timeout\ndata: ${JSON.stringify({ message: 'progress stream timed out — reconnect to resume' })}\n\n`,
+        );
       }
       res.end();
     } catch (err) {
@@ -549,6 +560,12 @@ export const statementsRouter = (): Router => {
           // the DB-state mutation is still the right call.
         }
       }
+      // Phase 15 #17: wipe any transactions the worker already inserted
+      // before the cancel — leaving them around would surface as
+      // "partial extraction" garbage tied to a failed statement and
+      // confuse the review UI. Worker also polls statements.status at
+      // each phase boundary to bail cooperatively (see worker code).
+      await db.delete(transactions).where(eq(transactions.statementId, id));
       await db
         .update(statements)
         .set({

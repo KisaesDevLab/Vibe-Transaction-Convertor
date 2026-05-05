@@ -110,9 +110,15 @@ export const repairPromptFor = (input: RepairPromptInput): string => {
     `3. A row was missed (look for indented continuation lines under a date).\n` +
     `4. An amount has the wrong magnitude (10x error from a misplaced decimal).\n\n` +
     `${input.suspectRowIndices.length > 0 ? `The rows marked SUSPECT have running-balance values that don't match the prior row + this row's amount. Inspect them first.\n\n` : ''}` +
-    `Re-emit the FULL transaction list (not a diff), under the same schema. ` +
-    `If you still cannot reconcile, emit your best-guess corrections and ` +
-    `set "notes" explaining what's irreducibly off.\n\n` +
+    `Re-emit the FULL extraction object under the same schema — every ` +
+    `top-level field (account, institution, period, balances, ` +
+    `source_date_format, transactions). The schema is strict and ` +
+    `additionalProperties=false, so partial outputs (e.g. ` +
+    `{ "transactions": [...] } alone) will fail validation. Echo period, ` +
+    `balances, and source_date_format from the prior call unless you ` +
+    `genuinely re-detect a different set. If you still cannot reconcile, ` +
+    `emit your best-guess corrections and set "notes" explaining ` +
+    `what's irreducibly off.\n\n` +
     `=== STATEMENT MARKDOWN ===\n${input.markdown}\n=== END ===`
   );
 };
