@@ -32,7 +32,7 @@ just whether the happy path runs. Acceptance gauntlet: `pnpm acceptance`
 | 22    | QBO Exporter                              | ⚠      | `702449e`   | INTU.BID always; BANKID ladder; no transliteration             |
 | 23    | QFX Exporter                              | ⚠      | `702449e`   | INTU.USERID stable; needs golden-master + qfx-import.md        |
 | 24    | Export UI & Download Bundling             | ⚠      | `11a57ad`   | <ExportPage> + preview + listing + per-job re-download         |
-| 25    | Audit Log                                 | ⚠      | `<next>`    | actor email, filters, JSON tree, downloads; diffs still TBD    |
+| 25    | Audit Log                                 | ⚠      | `13950d1`   | actor email, filters, JSON tree, downloads; diffs still TBD    |
 | 26    | Admin / Settings                          | ⚠      | `dd2e3ef`   | LlmProviderAdminPage + monthly cap + cost dash; no real Backup |
 | 27    | Testing — Unit, Integration, Goldens, E2E | ⚠      | —           | 102 unit/supertests; no Playwright; no fixture suite           |
 | 28    | Standalone Docker Compose                 | ⚠      | `51c7f17`   | no Caddy; no separate worker service; runs as root             |
