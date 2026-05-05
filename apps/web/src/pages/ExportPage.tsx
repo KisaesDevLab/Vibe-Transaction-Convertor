@@ -8,8 +8,15 @@
 import { useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 
+import { EntityAuditLog } from '../components/EntityAuditLog';
 import { useToast } from '../components/Toast';
-import { useStatement, useExportJobs, useExportPreview } from '../hooks/useStatementsList';
+import {
+  useDeleteExportJob,
+  useExportJobs,
+  useExportPreview,
+  useStatement,
+} from '../hooks/useStatementsList';
+import { useMe } from '../hooks/useAuth';
 import { ApiError } from '../lib/api';
 
 const FORMATS: Array<{ value: string; label: string; description: string }> = [
@@ -75,6 +82,9 @@ export function ExportPage() {
   const { statementId = '' } = useParams();
   const stmt = useStatement(statementId);
   const jobs = useExportJobs(statementId);
+  const deleteJob = useDeleteExportJob(statementId);
+  const me = useMe();
+  const isAdmin = me.data?.role === 'admin';
   const toast = useToast();
   const [selected, setSelected] = useState<Set<string>>(() => new Set(['csv-qbo3', 'qbo']));
   const [previewFormat, setPreviewFormat] = useState<string>('csv-qbo3');
@@ -140,6 +150,22 @@ export function ExportPage() {
       toast.success('Downloaded prior export');
     } catch (err) {
       toast.error(err instanceof ApiError ? err.message : 'download failed');
+    }
+  };
+
+  const onDeleteJob = async (jobId: string, fmt: string): Promise<void> => {
+    // Native confirm is enough here — this is admin-only and the
+    // action is reversible by re-exporting. Audit trail survives the
+    // delete (audit_log is append-only per ADR-013).
+    const ok = window.confirm(
+      `Delete this ${fmt} export? The file is removed from disk; the audit trail stays.`,
+    );
+    if (!ok) return;
+    try {
+      await deleteJob.mutateAsync(jobId);
+      toast.success(`Deleted ${fmt} export`);
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : 'delete failed');
     }
   };
 
@@ -282,19 +308,31 @@ export function ExportPage() {
                       {formatBytes(j.fileBytes)}
                     </td>
                     <td className="px-3 py-2 text-right">
-                      <button
-                        type="button"
-                        onClick={() => void onDownloadJob(j.id)}
-                        disabled={!j.available}
-                        title={
-                          j.available
-                            ? 'Re-download this exact file'
-                            : 'Expired (>30 days) — re-export to refresh'
-                        }
-                        className="rounded-md border border-surface-muted px-2 py-1 text-xs disabled:opacity-50"
-                      >
-                        ↓ Download
-                      </button>
+                      <div className="flex justify-end gap-1">
+                        <button
+                          type="button"
+                          onClick={() => void onDownloadJob(j.id)}
+                          disabled={!j.available}
+                          title={
+                            j.available
+                              ? 'Re-download this exact file'
+                              : 'Expired (>30 days) — re-export to refresh'
+                          }
+                          className="rounded-md border border-surface-muted px-2 py-1 text-xs disabled:opacity-50"
+                        >
+                          ↓ Download
+                        </button>
+                        {isAdmin ? (
+                          <button
+                            type="button"
+                            onClick={() => void onDeleteJob(j.id, j.format)}
+                            title="Delete this export (admin only)"
+                            className="rounded-md border border-danger px-2 py-1 text-xs text-danger hover:bg-danger/10"
+                          >
+                            Delete
+                          </button>
+                        ) : null}
+                      </div>
                     </td>
                   </tr>
                 ))}
@@ -308,6 +346,10 @@ export function ExportPage() {
           </p>
         ) : null}
       </section>
+
+      {/* Audit trail — every render, re-download, override, and now
+          delete is logged. Useful here for "who exported what when". */}
+      <EntityAuditLog entityType="statement" entityId={statementId} title="Export audit log" />
     </section>
   );
 }

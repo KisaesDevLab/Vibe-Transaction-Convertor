@@ -34,6 +34,14 @@ export interface GridFilters {
   search: string;
   trntype: string | null;
   editedOnly: boolean;
+  // Phase 18 #17 — suspect-only toggle. Mirrors the suspect badge in
+  // the row (confidence < 0.7).
+  suspectOnly: boolean;
+  // Inclusive amount-range filter expressed in dollars (decimal string
+  // is what the user types). Empty string = unbounded on that side.
+  // Sign matters: -50 to 0 returns only debits between $0 and $50.
+  amountMin: string;
+  amountMax: string;
 }
 
 export interface AddTxInput {
@@ -48,8 +56,10 @@ export function TransactionGrid({
   periodStart,
   periodEnd,
   onSave,
+  onBulkSave,
   onDelete,
   onAdd,
+  onRecompute,
   isAdmin,
   onSelect,
   selectedId,
@@ -58,8 +68,17 @@ export function TransactionGrid({
   periodStart: string | null;
   periodEnd: string | null;
   onSave: (id: string, patch: TransactionPatch) => Promise<unknown>;
+  // Optional bulk-save path. When provided, the grid issues a single
+  // PATCH for all selected rows. Falls back to per-row onSave loop
+  // when omitted.
+  onBulkSave?:
+    | ((edits: Array<{ id: string; patch: TransactionPatch }>) => Promise<unknown>)
+    | undefined;
   onDelete?: ((id: string) => Promise<unknown>) | undefined;
   onAdd?: ((input: AddTxInput) => Promise<unknown>) | undefined;
+  // Hot-key `r` triggers this when set; renders a Recompute toolbar
+  // button when provided.
+  onRecompute?: (() => Promise<unknown>) | undefined;
   isAdmin?: boolean | undefined;
   onSelect?: ((tx: TransactionRow) => void) | undefined;
   selectedId?: string | null | undefined;
@@ -68,6 +87,9 @@ export function TransactionGrid({
     search: '',
     trntype: null,
     editedOnly: false,
+    suspectOnly: false,
+    amountMin: '',
+    amountMax: '',
   });
   const [sortField, setSortField] = useState<SortField>('postedDate');
   const [sortOrder, setSortOrder] = useState<SortOrder>('asc');
@@ -79,6 +101,15 @@ export function TransactionGrid({
     { kind: 'one'; tx: TransactionRow } | { kind: 'bulk'; ids: string[] } | null
   >(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
+  // Phase 18 #16: when on, the row's edit fields commit on blur instead
+  // of needing the explicit Save button. Persisted in localStorage so
+  // the operator's preference survives reloads.
+  const [autoSave, setAutoSave] = useState<boolean>(() => {
+    return localStorage.getItem('vibetc:txgrid:autosave') === '1';
+  });
+  useEffect(() => {
+    localStorage.setItem('vibetc:txgrid:autosave', autoSave ? '1' : '0');
+  }, [autoSave]);
   const tableRef = useRef<HTMLTableElement>(null);
 
   const rows = useMemo(() => {
@@ -92,6 +123,35 @@ export function TransactionGrid({
     }
     if (filters.editedOnly) {
       filtered = filtered.filter((t) => t.userEdited);
+    }
+    if (filters.suspectOnly) {
+      filtered = filtered.filter((t) => (t.confidence ?? 1) < 0.7);
+    }
+    // Amount-range filter. We parse the decimal-cent strings only when
+    // the operator has typed something — empty input is unbounded on
+    // that side. Bad input falls through silently rather than wiping
+    // results out from under the user.
+    const minCents = (() => {
+      if (filters.amountMin.trim().length === 0) return null;
+      try {
+        return parseDecimalToCents(filters.amountMin);
+      } catch {
+        return null;
+      }
+    })();
+    const maxCents = (() => {
+      if (filters.amountMax.trim().length === 0) return null;
+      try {
+        return parseDecimalToCents(filters.amountMax);
+      } catch {
+        return null;
+      }
+    })();
+    if (minCents !== null) {
+      filtered = filtered.filter((t) => BigInt(t.amountCents) >= minCents);
+    }
+    if (maxCents !== null) {
+      filtered = filtered.filter((t) => BigInt(t.amountCents) <= maxCents);
     }
     const dir = sortOrder === 'asc' ? 1 : -1;
     return [...filtered].sort((a, b) => {
@@ -116,8 +176,8 @@ export function TransactionGrid({
   );
 
   // Hot-keys (Phase 18 item 23): j/k move row, e edit, Esc cancel,
-  // x toggle row select, Shift+S save (no-op without dirty fields), and
-  // r forces a refetch of the statement which re-runs reconciliation.
+  // x toggle row select, s submits the editing row's form, r runs
+  // recompute-reconciliation against the live transactions.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement | null)?.tagName;
@@ -130,6 +190,16 @@ export function TransactionGrid({
         setEditingId(rows[activeRow]!.id);
       } else if (e.key === 'x' && rows[activeRow]) {
         toggleSelectOne(rows[activeRow]!.id);
+      } else if (e.key === 's' && editingId) {
+        // Click the editing row's Save button via DOM. Each row carries
+        // a data-tx-save-button="<id>" attribute when in edit mode.
+        const btn = document.querySelector<HTMLButtonElement>(
+          `[data-tx-save-button="${editingId}"]`,
+        );
+        btn?.click();
+      } else if (e.key === 'r' && onRecompute) {
+        e.preventDefault();
+        void onRecompute();
       } else if (e.key === 'Escape') {
         setEditingId(null);
         setSelectedIds(new Set());
@@ -137,7 +207,7 @@ export function TransactionGrid({
     };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
-  }, [rows, activeRow]);
+  }, [rows, activeRow, editingId, onRecompute]);
 
   const toggleSort = (field: SortField) => {
     if (sortField === field) setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc');
@@ -186,8 +256,14 @@ export function TransactionGrid({
             disabled={!bulkTrntype}
             onClick={async () => {
               const ids = Array.from(selectedIds);
-              for (const id of ids) {
-                await onSave(id, { trntype: bulkTrntype });
+              if (onBulkSave) {
+                await onBulkSave(ids.map((id) => ({ id, patch: { trntype: bulkTrntype } })));
+              } else {
+                // Fallback for callers that haven't wired onBulkSave yet —
+                // loop through per-row PATCHes.
+                for (const id of ids) {
+                  await onSave(id, { trntype: bulkTrntype });
+                }
               }
               setBulkTrntype('');
               setSelectedIds(new Set());
@@ -249,6 +325,58 @@ export function TransactionGrid({
           />
           Edited only
         </label>
+        <label
+          className="flex items-center gap-1.5 text-sm"
+          title="Show only rows the LLM marked low-confidence (< 0.7)"
+        >
+          <input
+            type="checkbox"
+            checked={filters.suspectOnly}
+            onChange={(e) => setFilters({ ...filters, suspectOnly: e.target.checked })}
+          />
+          Suspect only
+        </label>
+        <div className="flex items-center gap-1 text-xs text-ink-muted">
+          <span>Amount</span>
+          <input
+            inputMode="decimal"
+            placeholder="min"
+            aria-label="Minimum amount in dollars"
+            value={filters.amountMin}
+            onChange={(e) => setFilters({ ...filters, amountMin: e.target.value })}
+            className="w-20 rounded-md border border-surface-muted px-2 py-1 text-right"
+          />
+          <span>–</span>
+          <input
+            inputMode="decimal"
+            placeholder="max"
+            aria-label="Maximum amount in dollars"
+            value={filters.amountMax}
+            onChange={(e) => setFilters({ ...filters, amountMax: e.target.value })}
+            className="w-20 rounded-md border border-surface-muted px-2 py-1 text-right"
+          />
+        </div>
+        {onRecompute ? (
+          <button
+            type="button"
+            onClick={() => void onRecompute()}
+            title="Recompute reconciliation against the current transaction list (hot-key: r)"
+            className="rounded-md border border-surface-muted px-3 py-1.5 text-xs hover:bg-surface-subtle"
+          >
+            Recompute
+          </button>
+        ) : null}
+        <label
+          className="flex items-center gap-1.5 text-xs text-ink-muted"
+          title="When on, edits commit on field blur instead of needing the Save button"
+        >
+          <input
+            type="checkbox"
+            checked={autoSave}
+            onChange={(e) => setAutoSave(e.target.checked)}
+          />
+          Auto-save
+        </label>
       </div>
 
       <p className="text-xs text-ink-subtle">
@@ -257,7 +385,9 @@ export function TransactionGrid({
         {suspectCount > 0 ? ` · ${suspectCount} suspect` : ''}
         {' · '}
         absolute total {formatUsd(totalAbs)}
-        <span className="ml-2 text-ink-subtle">(j/k row · e edit · x select · Esc cancel)</span>
+        <span className="ml-2 text-ink-subtle">
+          (j/k row · e edit · x select · s save · r recompute · Esc cancel)
+        </span>
       </p>
 
       <div className="overflow-hidden rounded-lg border border-surface-muted bg-white">
@@ -319,6 +449,7 @@ export function TransactionGrid({
                 checked={selectedIds.has(tx.id)}
                 onToggleCheck={() => toggleSelectOne(tx.id)}
                 isAdmin={isAdmin}
+                autoSave={autoSave}
                 onActivate={() => {
                   setActiveRow(i);
                   onSelect?.(tx);
@@ -560,6 +691,7 @@ function Row({
   selected,
   checked,
   isAdmin,
+  autoSave,
   onActivate,
   onToggleCheck,
   onStartEdit,
@@ -575,6 +707,7 @@ function Row({
   selected: boolean;
   checked: boolean;
   isAdmin?: boolean | undefined;
+  autoSave?: boolean | undefined;
   onActivate: () => void;
   onToggleCheck: () => void;
   onStartEdit: () => void;
@@ -591,6 +724,48 @@ function Row({
   const outsidePeriod =
     periodStart && periodEnd && (tx.postedDate < periodStart || tx.postedDate > periodEnd);
   const suspect = (tx.confidence ?? 1) < 0.7;
+
+  // Single source of truth for the row's commit logic. Both the Save
+  // button onClick and (when autoSave is on) the per-input onBlur fire
+  // through here. Returns a boolean for downstream chaining if needed.
+  const commitEdit = async (): Promise<boolean> => {
+    let cents: bigint;
+    try {
+      cents = parseDecimalToCents(amount);
+    } catch {
+      setError('decimal like -4.50');
+      return false;
+    }
+    if (cents === 0n) {
+      setError('non-zero');
+      return false;
+    }
+    try {
+      await onSave({
+        description: desc,
+        amount_cents: cents.toString(),
+        trntype,
+        posted_date: postedDate,
+      });
+      setError(null);
+      return true;
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'failed');
+      return false;
+    }
+  };
+
+  // Auto-save fires on blur when (a) the toggle is on, (b) we're in
+  // edit mode, and (c) focus is moving outside the row entirely
+  // (relatedTarget not contained). This avoids spamming PATCHes when
+  // tabbing between fields within the row.
+  const onFieldBlur = (e: React.FocusEvent<HTMLElement>): void => {
+    if (!autoSave || !editing) return;
+    const next = e.relatedTarget as HTMLElement | null;
+    const row = e.currentTarget.closest('tr');
+    if (next && row && row.contains(next)) return;
+    void commitEdit();
+  };
 
   return (
     <tr
@@ -616,6 +791,7 @@ function Row({
             type="date"
             value={postedDate}
             onChange={(e) => setPostedDate(e.target.value)}
+            onBlur={onFieldBlur}
             className="rounded-md border border-surface-muted px-2 py-1"
           />
         ) : (
@@ -627,6 +803,7 @@ function Row({
           <input
             value={desc}
             onChange={(e) => setDesc(e.target.value)}
+            onBlur={onFieldBlur}
             className="w-full rounded-md border border-surface-muted px-2 py-1"
           />
         ) : (
@@ -648,6 +825,7 @@ function Row({
           <select
             value={trntype}
             onChange={(e) => setTrntype(e.target.value)}
+            onBlur={onFieldBlur}
             className="rounded-md border border-surface-muted bg-white px-2 py-1 text-xs"
           >
             {TRNTYPE_OPTIONS.map((t) => (
@@ -670,6 +848,7 @@ function Row({
               setAmount(e.target.value);
               setError(null);
             }}
+            onBlur={onFieldBlur}
             className="w-28 rounded-md border border-surface-muted px-2 py-1 text-right"
           />
         ) : (
@@ -682,29 +861,8 @@ function Row({
             {error ? <span className="text-xs text-danger">{error}</span> : null}
             <button
               type="button"
-              onClick={async () => {
-                let cents: bigint;
-                try {
-                  cents = parseDecimalToCents(amount);
-                } catch {
-                  setError('decimal like -4.50');
-                  return;
-                }
-                if (cents === 0n) {
-                  setError('non-zero');
-                  return;
-                }
-                try {
-                  await onSave({
-                    description: desc,
-                    amount_cents: cents.toString(),
-                    trntype,
-                    posted_date: postedDate,
-                  });
-                } catch (err) {
-                  setError(err instanceof Error ? err.message : 'failed');
-                }
-              }}
+              onClick={() => void commitEdit()}
+              data-tx-save-button={tx.id}
               className="rounded-md bg-accent px-2 py-1 text-xs text-accent-fg"
             >
               Save

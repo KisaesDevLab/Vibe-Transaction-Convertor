@@ -164,6 +164,122 @@ export const statementsRouter = (): Router => {
     }
   });
 
+  // Phase 18 #15: bulk PATCH. Reviewers commonly fix 5–20 rows at once
+  // (TRNTYPE re-mapping, date corrections after locale confirm). Looping
+  // per-row through PATCH /transactions/:id costs N round trips; this
+  // does it in one. Recomputes reconciliation once at the end.
+  // Body shape: { edits: [{ id, patch: { description?, amount_cents?, trntype?, posted_date? } }] }
+  router.patch('/:id/transactions', async (req, res, next) => {
+    try {
+      const statementId = String(req.params.id);
+      const body = req.body ?? {};
+      const edits = Array.isArray(body.edits) ? body.edits : null;
+      if (!edits || edits.length === 0) {
+        throw new ValidationError('edits[] is required and must be non-empty');
+      }
+      if (edits.length > 500) {
+        throw new ValidationError('bulk PATCH accepts at most 500 edits at a time');
+      }
+      // Load all referenced rows up-front so we can validate and short-
+      // circuit no-ops without a round trip per row.
+      const ids = edits.map((e: unknown) => String((e as { id?: string }).id ?? ''));
+      if (ids.some((id: string) => id.length === 0)) {
+        throw new ValidationError('every edit needs an id');
+      }
+      const existing = await db
+        .select()
+        .from(transactions)
+        .where(eq(transactions.statementId, statementId));
+      const byId = new Map(existing.map((t) => [t.id, t]));
+
+      const results: Array<{ id: string; status: 'updated' | 'noop' | 'not-found' }> = [];
+      let anyChanged = false;
+
+      for (const edit of edits) {
+        const id = String((edit as { id?: string }).id ?? '');
+        const patchInput = (edit as { patch?: Record<string, unknown> }).patch ?? {};
+        const tx = byId.get(id);
+        if (!tx) {
+          results.push({ id, status: 'not-found' });
+          continue;
+        }
+        const next: {
+          description?: string;
+          normalizedDescription?: string;
+          amountCents?: bigint;
+          trntype?: string;
+          postedDate?: string;
+        } = {};
+        if (typeof patchInput.description === 'string') {
+          const d = patchInput.description.trim();
+          if (d !== tx.description) {
+            next.description = d;
+            next.normalizedDescription = normalizeDescription(d);
+          }
+        }
+        if (
+          typeof patchInput.amount_cents === 'number' ||
+          typeof patchInput.amount_cents === 'string'
+        ) {
+          const amt = BigInt(patchInput.amount_cents as string | number);
+          if (amt === 0n) {
+            throw new ValidationError(`amount must be non-zero (row ${id})`);
+          }
+          if (amt !== tx.amountCents) next.amountCents = amt;
+        }
+        if (typeof patchInput.trntype === 'string' && patchInput.trntype !== tx.trntype) {
+          next.trntype = patchInput.trntype;
+        }
+        if (typeof patchInput.posted_date === 'string') {
+          if (!/^\d{4}-\d{2}-\d{2}$/.test(patchInput.posted_date)) {
+            throw new ValidationError(`posted_date must be YYYY-MM-DD (row ${id})`);
+          }
+          if (patchInput.posted_date !== tx.postedDate) next.postedDate = patchInput.posted_date;
+        }
+        if (Object.keys(next).length === 0) {
+          results.push({ id, status: 'noop' });
+          continue;
+        }
+        const updateSet: Record<string, unknown> = {
+          userEdited: true,
+          updatedAt: sql`now()`,
+          ...next,
+        };
+        const recomputeFitid =
+          next.description !== undefined ||
+          next.amountCents !== undefined ||
+          next.postedDate !== undefined;
+        if (recomputeFitid) {
+          updateSet.fitid = computeFitid({
+            postedDate: next.postedDate ?? tx.postedDate,
+            amountCents: next.amountCents ?? tx.amountCents,
+            description: next.description ?? tx.description,
+            seqInDay: tx.seqInDay,
+          });
+        }
+        await db.update(transactions).set(updateSet).where(eq(transactions.id, id));
+        await writeAudit(db, {
+          actorUserId: req.user!.id,
+          entityType: 'transaction',
+          entityId: id,
+          action: 'transaction.update',
+          payload: {
+            ...next,
+            amountCents: next.amountCents?.toString(),
+            bulk: true,
+          } as Record<string, unknown>,
+        });
+        results.push({ id, status: 'updated' });
+        anyChanged = true;
+      }
+
+      if (anyChanged) await recomputeReconciliation(db, statementId);
+      res.json({ results });
+    } catch (err) {
+      next(err);
+    }
+  });
+
   router.post('/:id/override-reconciliation', async (req, res, next) => {
     try {
       const id = String(req.params.id);

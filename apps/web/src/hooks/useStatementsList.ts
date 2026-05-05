@@ -114,6 +114,27 @@ export const useUpdateTransaction = (statementId: string) => {
   });
 };
 
+export interface BulkEdit {
+  id: string;
+  patch: TransactionPatch;
+}
+
+export interface BulkEditResult {
+  results: Array<{ id: string; status: 'updated' | 'noop' | 'not-found' }>;
+}
+
+// Phase 18 #15: bulk PATCH. Sends every edit in a single round trip and
+// recomputes reconciliation once. The server short-circuits no-ops, so
+// shipping every visible row through it is fine.
+export const useBulkUpdateTransactions = (statementId: string) => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (edits: BulkEdit[]) =>
+      api.patch<BulkEditResult>(`/api/statements/${statementId}/transactions`, { edits }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['statement', statementId] }),
+  });
+};
+
 export interface AddTransactionInput {
   posted_date: string;
   description: string;
@@ -144,6 +165,17 @@ export const useReExtract = (statementId: string) => {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: () => api.post<{ ok: boolean }>(`/api/statements/${statementId}/re-extract`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['statement', statementId] }),
+  });
+};
+
+export const useRecomputeReconciliation = (statementId: string) => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () =>
+      api.post<{ status: string; deltaCents: string }>(
+        `/api/statements/${statementId}/recompute-reconciliation`,
+      ),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['statement', statementId] }),
   });
 };
@@ -182,6 +214,17 @@ export const useExportJobs = (statementId: string) =>
     queryFn: () => api.get<ExportJobSummary[]>(`/api/statements/${statementId}/exports`),
     enabled: statementId.length > 0,
   });
+
+// Phase 18 #18 — admin-only export deletion. Removes the rendered file
+// from disk and the export_jobs row. Re-uploading or re-exporting
+// repopulates it; audit trail is preserved.
+export const useDeleteExportJob = (statementId: string) => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (jobId: string) => api.delete<{ ok: boolean }>(`/api/exports/${jobId}`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['exports', statementId] }),
+  });
+};
 
 export interface ExportPreview {
   format: string;

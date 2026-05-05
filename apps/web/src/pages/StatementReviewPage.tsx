@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 
+import { EntityAuditLog } from '../components/EntityAuditLog';
 import { LocaleConfirmBanner } from '../components/LocaleConfirmBanner';
 import { ReconciliationBadge, StatusBadge } from '../components/StatusBadge';
 import { ReconciliationWidget } from '../components/ReconciliationWidget';
@@ -13,8 +14,10 @@ import {
   useConfirmDateFormat,
   useDeleteTransaction,
   useReExtract,
+  useRecomputeReconciliation,
   useSplitStatement,
   useStatement,
+  useBulkUpdateTransactions,
   useUpdateTransaction,
   type TransactionRow,
 } from '../hooks/useStatementsList';
@@ -83,9 +86,11 @@ export function StatementReviewPage() {
   const { statementId = '' } = useParams();
   const stmt = useStatement(statementId);
   const update = useUpdateTransaction(statementId);
+  const bulkUpdate = useBulkUpdateTransactions(statementId);
   const addTx = useAddTransaction(statementId);
   const deleteTx = useDeleteTransaction(statementId);
   const reExtract = useReExtract(statementId);
+  const recompute = useRecomputeReconciliation(statementId);
   const confirmFormat = useConfirmDateFormat(statementId);
   const ackMultiAccount = useAcknowledgeMultiAccount(statementId);
   const splitStmt = useSplitStatement(statementId);
@@ -351,6 +356,29 @@ export function StatementReviewPage() {
                 throw err;
               }
             }}
+            onBulkSave={async (edits) => {
+              try {
+                const result = await bulkUpdate.mutateAsync(edits);
+                const updated = result.results.filter((r) => r.status === 'updated').length;
+                toast.success(
+                  updated === 0
+                    ? 'No changes — every row was already at the new value'
+                    : `Updated ${updated} of ${edits.length} rows`,
+                );
+              } catch (err) {
+                toast.error(err instanceof ApiError ? err.message : 'bulk update failed');
+                throw err;
+              }
+            }}
+            onRecompute={async () => {
+              try {
+                const result = await recompute.mutateAsync();
+                toast.success(`Reconciliation: ${result.status} (Δ ${result.deltaCents}¢)`);
+              } catch (err) {
+                toast.error(err instanceof ApiError ? err.message : 'recompute failed');
+                throw err;
+              }
+            }}
             onAdd={
               isAdmin
                 ? async (input) => {
@@ -433,6 +461,10 @@ export function StatementReviewPage() {
         </div>
         <ReconciliationWidget stmt={s} txCount={txs.length} txSumCents={txSumCents} />
       </div>
+
+      {/* Embedded audit panel — admin-only, scoped to this statement.
+          Useful when investigating discrepancies / overrides. */}
+      <EntityAuditLog entityType="statement" entityId={s.id} />
     </section>
   );
 }

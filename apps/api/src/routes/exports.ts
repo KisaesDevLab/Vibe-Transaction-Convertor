@@ -2,11 +2,11 @@ import { Router } from 'express';
 import { eq, desc } from 'drizzle-orm';
 import JSZip from 'jszip';
 import { createReadStream } from 'node:fs';
-import { stat } from 'node:fs/promises';
+import { stat, unlink } from 'node:fs/promises';
 
 import { db } from '../db/client.js';
 import { exportJobs, statements } from '../db/schema.js';
-import { NotFoundError, ValidationError } from '../lib/errors.js';
+import { ForbiddenError, NotFoundError, ValidationError } from '../lib/errors.js';
 import {
   recordExportJob,
   renderExport,
@@ -197,6 +197,43 @@ export const exportJobsRouter = (): Router => {
       res.setHeader('content-disposition', `attachment; filename="${filename}"`);
       res.setHeader('content-length', job.fileBytes.toString());
       createReadStream(job.filePath).pipe(res);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // Phase 18 #18: admin-only export deletion. Removes the rendered file
+  // from disk and the row from export_jobs. The action is audit-logged
+  // (audit_log is append-only, so the trail survives even though the
+  // job row is gone). Idempotent: missing-on-disk is treated as success.
+  router.delete('/:jobId', async (req, res, next) => {
+    try {
+      if (req.user?.role !== 'admin') {
+        throw new ForbiddenError('admin required to delete exports');
+      }
+      const jobId = String(req.params.jobId);
+      const rows = await db.select().from(exportJobs).where(eq(exportJobs.id, jobId));
+      const job = rows[0];
+      if (!job) throw new NotFoundError(`export job ${jobId}`);
+      // Best-effort unlink — sentinel paths (<pending>, <expired>) and
+      // already-missing files should not block the row delete.
+      const isSentinel = job.filePath === '<pending>' || job.filePath === '<expired>';
+      if (!isSentinel) {
+        try {
+          await unlink(job.filePath);
+        } catch {
+          // Already gone — proceed.
+        }
+      }
+      await db.delete(exportJobs).where(eq(exportJobs.id, jobId));
+      await writeAudit(db, {
+        actorUserId: req.user!.id,
+        entityType: 'statement',
+        entityId: job.statementId,
+        action: 'statement.export-delete',
+        payload: { exportJobId: jobId, format: job.format, bytes: job.fileBytes },
+      });
+      res.json({ ok: true });
     } catch (err) {
       next(err);
     }

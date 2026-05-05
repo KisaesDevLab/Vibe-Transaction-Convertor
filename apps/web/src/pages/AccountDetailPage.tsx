@@ -3,6 +3,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom';
 
 import { ACCOUNT_TYPE_LABELS, type AccountTypeCode } from '@vibe-tx-converter/shared';
 
+import { EntityAuditLog } from '../components/EntityAuditLog';
 import { StatusBadge, ReconciliationBadge } from '../components/StatusBadge';
 import { UploadDropzone } from '../components/UploadDropzone';
 import { useToast } from '../components/Toast';
@@ -342,6 +343,8 @@ export function AccountDetailPage() {
           </ul>
         )}
       </section>
+
+      <EntityAuditLog entityType="account" entityId={accountId} />
     </section>
   );
 }
