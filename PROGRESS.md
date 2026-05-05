@@ -93,5 +93,4 @@ shell-out.
   "no PDF/page-image bytes in payload" outbound assertion.
 - ~~Phase 16 LLM-driven repair.~~ Landed 2026-05-05 in `ec3de5c`.
 - ~~Phase 24 ExportPage.~~ Landed 2026-05-05 in `11a57ad`.
-- **Phase 26 LlmProviderAdminPage** — typed-confirm phrase, model
-  dropdown, monthly cost cap, test-connection.
+- ~~Phase 26 LlmProviderAdminPage.~~ Landed 2026-05-05 in `dd2e3ef`.
