@@ -36,6 +36,12 @@ export function AccountDetailPage() {
 
       <h2 className="mb-2 text-lg font-medium">Upload statements</h2>
       <UploadDropzone accountId={a.id} />
+
+      <p className="mt-4 text-sm">
+        <Link to={`/accounts/${a.id}/statements`} className="text-accent hover:underline">
+          View statements →
+        </Link>
+      </p>
     </section>
   );
 }

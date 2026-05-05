@@ -7,6 +7,10 @@ import { CompaniesPage } from './pages/CompaniesPage';
 import { CompanyDetailPage } from './pages/CompanyDetailPage';
 import { LoginPage } from './pages/LoginPage';
 import { RegisterFirstAdminPage } from './pages/RegisterFirstAdminPage';
+import { AdminHomePage } from './pages/AdminHomePage';
+import { AuditLogPage } from './pages/AuditLogPage';
+import { StatementReviewPage } from './pages/StatementReviewPage';
+import { StatementsListPage } from './pages/StatementsListPage';
 
 export function App() {
   return (
@@ -23,8 +27,11 @@ export function App() {
                 <Route path="/companies" element={<CompaniesPage />} />
                 <Route path="/companies/:companyId" element={<CompanyDetailPage />} />
                 <Route path="/accounts/:accountId" element={<AccountDetailPage />} />
+                <Route path="/accounts/:accountId/statements" element={<StatementsListPage />} />
+                <Route path="/statements/:statementId" element={<StatementReviewPage />} />
                 <Route path="/statements" element={<Placeholder title="Statements" />} />
-                <Route path="/admin" element={<Placeholder title="Admin" />} />
+                <Route path="/admin" element={<AdminHomePage />} />
+                <Route path="/admin/audit" element={<AuditLogPage />} />
                 <Route path="*" element={<Placeholder title="Not found" />} />
               </Routes>
             </AppShell>

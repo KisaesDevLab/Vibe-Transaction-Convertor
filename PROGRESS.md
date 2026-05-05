@@ -21,7 +21,7 @@ typecheck → lint → test → build).
 | 12    | LLM Extractor — Schema, Prompts, Exemplars   | ✅     | `ebecc34` | Zod + JSON-schema + 1 exemplar      |
 | 13    | LLM Provider Abstraction (Local + Anthropic) | ✅     | `4abbdaf` | both providers + AES-GCM key wrap   |
 | 14    | Multi-Account Auto-Split                     | ✅     | `9e34173` | regex+forward-fill split heuristic  |
-| 15    | BullMQ Extraction Pipeline                   | ⏸      | —         |                                     |
+| 15    | BullMQ Extraction Pipeline                   | ✅     | `56e80e0` | end-to-end worker (analyze→export)  |
 | 16    | Golden Rule Reconciler & Repair Pass         | ✅     | `9e34173` | cents-exact + sign-flip repair      |
 | 17    | TRNTYPE Inference + FITID Generator          | ✅     | `9e34173` | rules-first + LLM tiebreaker        |
 | 18    | Statement & Transaction Review UI            | ⏸      | —         |                                     |

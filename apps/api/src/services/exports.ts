@@ -1,0 +1,191 @@
+import { eq, sql } from 'drizzle-orm';
+
+import { FALLBACK_INTU_BID } from '@vibe-tx-converter/shared';
+import {
+  FALLBACK_BANK_ID,
+  renderCsv,
+  renderOfxXml,
+  renderQbo,
+  renderQfx,
+  type CsvTemplate,
+  type Stmt,
+} from '@vibe-tx-converter/exporters';
+
+import type { Db } from '../db/client.js';
+import { accounts, exportJobs, statements, transactions } from '../db/schema.js';
+import { ConflictError, NotFoundError } from '../lib/errors.js';
+import type { Account, Statement, Transaction, User } from '../db/types.js';
+import { writeAudit } from './audit.js';
+
+export type ExportFormat =
+  | 'csv-qbo3'
+  | 'csv-qbo4'
+  | 'csv-xero'
+  | 'csv-generic'
+  | 'ofx'
+  | 'qbo'
+  | 'qfx';
+
+const fetchStatementContext = async (
+  db: Db,
+  statementId: string,
+): Promise<{ stmt: Statement; account: Account; txs: Transaction[] }> => {
+  const stmtRows = await db.select().from(statements).where(eq(statements.id, statementId));
+  const stmt = stmtRows[0];
+  if (!stmt) throw new NotFoundError(`statement ${statementId}`);
+  const acctRows = await db.select().from(accounts).where(eq(accounts.id, stmt.accountId));
+  const account = acctRows[0];
+  if (!account) throw new NotFoundError(`account ${stmt.accountId}`);
+  const txs = await db
+    .select()
+    .from(transactions)
+    .where(eq(transactions.statementId, statementId))
+    .orderBy(transactions.postedDate, transactions.seqInDay);
+  return { stmt, account, txs };
+};
+
+const buildOfxStmt = (stmt: Statement, account: Account, txs: Transaction[]): Stmt => {
+  if (stmt.openingBalanceCents === null || stmt.closingBalanceCents === null) {
+    throw new ConflictError('statement has no opening/closing balance — cannot build OFX');
+  }
+  if (!stmt.periodStart || !stmt.periodEnd) {
+    throw new ConflictError('statement has no period bounds — cannot build OFX');
+  }
+  const bankId = account.routingNumber ?? FALLBACK_BANK_ID;
+  return {
+    bankAccountInfo: {
+      bankId,
+      accountId: account.accountNumber,
+      accountType: account.accountType,
+      intuBid: account.intuBid || FALLBACK_INTU_BID,
+      intuOrg: account.intuOrg,
+    },
+    transactions: txs.map((t) => ({
+      trntype: t.trntype,
+      postedDate: t.postedDate,
+      amountCents: t.amountCents,
+      fitid: t.fitid,
+      name: t.description,
+      ...(t.checkNumber ? { memo: undefined, checkNumber: t.checkNumber } : {}),
+    })),
+    ledgerBalanceCents: stmt.closingBalanceCents,
+    startDate: stmt.periodStart,
+    endDate: stmt.periodEnd,
+    asOf: stmt.createdAt,
+    currency: 'USD',
+  };
+};
+
+export interface RenderedExport {
+  format: ExportFormat;
+  contentType: string;
+  filename: string;
+  bytes: Buffer;
+  intuBidUsed?: string;
+}
+
+export const renderExport = async (
+  db: Db,
+  statementId: string,
+  format: ExportFormat,
+  opts: { allowOverride?: boolean } = {},
+): Promise<RenderedExport> => {
+  const { stmt, account, txs } = await fetchStatementContext(db, statementId);
+  if (stmt.reconciliationStatus === 'discrepancy' && !opts.allowOverride) {
+    throw new ConflictError('reconciliation discrepancy — export requires override');
+  }
+
+  const baseName = `${account.financialInstitution.replace(/\s+/g, '-')}_${
+    account.accountNumberLast4 ?? account.accountNumber.slice(-4)
+  }_${stmt.periodStart ?? 'unknown'}_${stmt.periodEnd ?? 'unknown'}`;
+
+  if (format.startsWith('csv-')) {
+    const tmpl = format.slice(4) as CsvTemplate;
+    const csv = renderCsv(
+      tmpl,
+      txs.map((t) => ({
+        postedDate: t.postedDate,
+        description: t.description,
+        amountCents: t.amountCents,
+        ...(t.checkNumber ? { checkNumber: t.checkNumber } : {}),
+      })),
+    );
+    return {
+      format,
+      contentType: 'text/csv; charset=utf-8',
+      filename: `${baseName}.csv`,
+      bytes: Buffer.from(csv, 'utf8'),
+    };
+  }
+
+  const ast = buildOfxStmt(stmt, account, txs);
+  if (format === 'ofx') {
+    return {
+      format,
+      contentType: 'application/x-ofx',
+      filename: `${baseName}.ofx`,
+      bytes: Buffer.from(renderOfxXml(ast), 'utf8'),
+    };
+  }
+  if (format === 'qbo') {
+    return {
+      format,
+      contentType: 'application/vnd.intu.qbo',
+      filename: `${baseName}.qbo`,
+      bytes: Buffer.from(renderQbo(ast), 'utf8'),
+      intuBidUsed: ast.bankAccountInfo.intuBid ?? FALLBACK_INTU_BID,
+    };
+  }
+  if (format === 'qfx') {
+    return {
+      format,
+      contentType: 'application/vnd.intu.qfx',
+      filename: `${baseName}.qfx`,
+      bytes: Buffer.from(renderQfx(ast), 'utf8'),
+      intuBidUsed: ast.bankAccountInfo.intuBid ?? FALLBACK_INTU_BID,
+    };
+  }
+  throw new Error(`unknown export format: ${format as string}`);
+};
+
+export const recordExportJob = async (
+  db: Db,
+  actor: User,
+  statementId: string,
+  result: RenderedExport,
+): Promise<void> => {
+  await db.insert(exportJobs).values({
+    statementId,
+    format: result.format,
+    requestedBy: actor.id,
+    intuBidUsed: result.intuBidUsed ?? null,
+    filePath: '<inline>', // export bytes are streamed directly; nothing on disk
+    fileBytes: result.bytes.length,
+  });
+  await writeAudit(db, {
+    actorUserId: actor.id,
+    entityType: 'statement',
+    entityId: statementId,
+    action: 'statement.export',
+    payload: { format: result.format, bytes: result.bytes.length },
+  });
+};
+
+export const overrideReconciliation = async (
+  db: Db,
+  actor: User,
+  statementId: string,
+  reason: string,
+): Promise<void> => {
+  await db
+    .update(statements)
+    .set({ reconciliationStatus: 'overridden', updatedAt: sql`now()` })
+    .where(eq(statements.id, statementId));
+  await writeAudit(db, {
+    actorUserId: actor.id,
+    entityType: 'statement',
+    entityId: statementId,
+    action: 'statement.reconciliation-override',
+    payload: { reason },
+  });
+};

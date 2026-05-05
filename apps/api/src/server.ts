@@ -14,8 +14,12 @@ import { requestId } from './middleware/request-id.js';
 import { accountsByCompanyRouter, accountsRouter } from './routes/accounts.js';
 import { authRouter, usersRouter } from './routes/auth.js';
 import { companiesRouter } from './routes/companies.js';
+import { adminRouter } from './routes/admin.js';
+import { auditRouter } from './routes/audit.js';
+import { exportsRouter } from './routes/exports.js';
 import { fidirRouter } from './routes/fidir.js';
 import { healthRouter } from './routes/health.js';
+import { statementsRouter } from './routes/statements.js';
 import { uploadsByAccountRouter, uploadsRawRouter } from './routes/uploads.js';
 import { versionRouter } from './routes/version.js';
 
@@ -82,6 +86,10 @@ export const createApp = (): Express => {
   app.use('/api/accounts', requireAuth, accountsRouter());
   app.use('/api/accounts/:accountId/uploads', requireAuth, uploadsByAccountRouter());
   app.use('/api/uploads', requireAuth, uploadsRawRouter());
+  app.use('/api/statements', requireAuth, statementsRouter());
+  app.use('/api/statements', requireAuth, exportsRouter());
+  app.use('/api/audit', requireAuth, auditRouter());
+  app.use('/api/admin', requireAuth, adminRouter());
 
   app.use(notFoundHandler);
   app.use(errorHandler);
