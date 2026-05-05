@@ -14,8 +14,9 @@ export const getJobConnection = (): Redis => {
   return _connection;
 };
 
-export const QUEUE_EXTRACTION = 'vibetc:extraction';
-export const QUEUE_MAINTENANCE = 'vibetc:maintenance';
+// BullMQ refuses queue names containing ':' since v5.x — use hyphens.
+export const QUEUE_EXTRACTION = 'vibetc-extraction';
+export const QUEUE_MAINTENANCE = 'vibetc-maintenance';
 
 export interface ExtractionJobData {
   statementId: string;
