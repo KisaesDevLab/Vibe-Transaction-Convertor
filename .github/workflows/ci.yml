@@ -28,5 +28,7 @@ jobs:
       - run: pnpm install --frozen-lockfile=false
       - run: pnpm typecheck
       - run: pnpm lint
-      - run: pnpm test --run
+      # Root pnpm test is already `vitest run --passWithNoTests` so we
+      # don't pass `--run` (which pnpm 9 swallows as an unknown option).
+      - run: pnpm test
       - run: pnpm build
