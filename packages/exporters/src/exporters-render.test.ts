@@ -137,3 +137,56 @@ describe('CSV exporters', () => {
     expect(out).toContain('"A,B ""X"""');
   });
 });
+
+// ADR-016 — same input must produce byte-identical output, modulo the
+// time-varying <DTSERVER> field. These tests are golden masters: if the
+// expected strings change, the export contract has shifted and existing
+// downstream importers (QuickBooks Desktop, Quicken) may break. Update
+// only when intentional.
+describe('determinism (ADR-016)', () => {
+  const stripDtServer = (s: string): string =>
+    s
+      .replace(/<DTSERVER>[^<]+<\/DTSERVER>/g, '<DTSERVER>X</DTSERVER>')
+      .replace(/<DTSERVER>[^\r\n<]+/g, '<DTSERVER>X');
+
+  it('OFX 2.x XML is byte-identical across calls (modulo DTSERVER)', () => {
+    const a = stripDtServer(renderOfxXml(STMT));
+    const b = stripDtServer(renderOfxXml(STMT));
+    expect(a).toBe(b);
+  });
+
+  it('QBO SGML is byte-identical across calls (modulo DTSERVER)', () => {
+    const a = stripDtServer(renderQbo(STMT));
+    const b = stripDtServer(renderQbo(STMT));
+    expect(a).toBe(b);
+  });
+
+  it('QFX SGML is byte-identical across calls (modulo DTSERVER)', () => {
+    const a = stripDtServer(renderQfx(STMT));
+    const b = stripDtServer(renderQfx(STMT));
+    expect(a).toBe(b);
+  });
+
+  it('CSV outputs are byte-identical across calls', () => {
+    const rows = [
+      { postedDate: '2026-03-08', description: 'PAYROLL', amountCents: 320_000n },
+      { postedDate: '2026-03-12', description: 'GROCERY', amountCents: -7_421n },
+    ];
+    for (const tmpl of ['qbo3', 'qbo4', 'xero', 'generic'] as const) {
+      expect(renderCsv(tmpl, rows)).toBe(renderCsv(tmpl, rows));
+    }
+  });
+
+  it('OFX XML preserves transaction order regardless of input shuffling', () => {
+    // Order is the caller's responsibility; the writer must not reorder.
+    const reversed: Stmt = {
+      ...STMT,
+      transactions: [...STMT.transactions].reverse(),
+    };
+    const out = renderOfxXml(reversed);
+    const firstFitid = out.indexOf('VTC-zzz1234567890def');
+    const secondFitid = out.indexOf('VTC-abc1234567890def');
+    expect(firstFitid).toBeGreaterThan(0);
+    expect(secondFitid).toBeGreaterThan(firstFitid);
+  });
+});

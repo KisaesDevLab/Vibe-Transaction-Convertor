@@ -111,23 +111,10 @@ fetchers; swapping to the real contract is a one-file change.
 **Where to revisit:** Operator stands up `glm-ocr-server` and
 confirms the actual surface; update `glm-ocr-client.ts` accordingly.
 
-### Q-006 — rasterizePdf still throws (Phase 11 item 12) — 2026-05-04
+### Q-006 — rasterizePdf — RESOLVED 2026-05-05
 
-**Question:** OCR-path extraction needs a rasterized PNG per page.
-Two implementation choices (see Q-004) both have constraints:
-`pdftoppm` shell-out needs poppler in the container; `pdfjs+canvas`
-needs a native canvas build that's flaky on Windows.
-
-**Assumption made:** `rasterizePdf()` still throws "not implemented".
-Phase 11 ships the OCR client without raster — operators must install
-poppler-utils in the API container (Phase 28 Dockerfile) and the
-shell-out implementation lands when the canonical compose Postgres
-
-- GLM-OCR services are first co-deployed.
-
-**Where to revisit:** When wiring the BullMQ extraction worker
-(Phase 15). Implementation options (in priority order):
-
-1. Shell out to `pdftoppm -r 300 -png input.pdf out`. Tested in CI
-   on Linux containers.
-2. `pdf-to-img` (pdfjs + sharp). Cross-platform, slower, larger image.
+**Resolution:** `rasterizePdf` shells out to `pdftoppm` (poppler-utils).
+The standalone Dockerfile already installs poppler; host operators need
+`brew install poppler` / `apt install poppler-utils` /
+`choco install poppler`. On ENOENT we throw a clear error pointing the
+operator at the install commands. See `packages/extractor/src/preprocess.ts`.

@@ -111,8 +111,17 @@ describe('extractTextLayer', () => {
 });
 
 describe('rasterizePdf', () => {
-  it('throws — implementation lands in Phase 11', async () => {
-    await expect(rasterizePdf('/anywhere.pdf')).rejects.toThrow(/Phase 11/);
+  it('errors helpfully when pdftoppm is missing from PATH', async () => {
+    // Force ENOENT by pointing PATH at an empty directory. This works on
+    // both POSIX and Windows since execFile honors PATH for unqualified
+    // binaries.
+    const originalPath = process.env.PATH;
+    process.env.PATH = '';
+    try {
+      await expect(rasterizePdf('/anywhere.pdf')).rejects.toThrow(/pdftoppm not found/);
+    } finally {
+      process.env.PATH = originalPath;
+    }
   });
 });
 

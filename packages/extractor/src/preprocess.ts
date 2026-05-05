@@ -1,5 +1,9 @@
-import { mkdir, readFile, rm } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { mkdir, readdir, readFile, rm } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
+import { promisify } from 'node:util';
+
+const execFileP = promisify(execFile);
 
 // pdfjs-dist's legacy build is the right one for Node — no DOM, no
 // canvas required for text-only paths.
@@ -177,22 +181,47 @@ export interface RasterizedPage {
   height: number;
 }
 
-// pdfjs-dist + node-canvas is the closest pure-JS rasterization path. The
-// canonical choice in this project is pdftoppm from poppler-utils, called
-// over the shell. The Phase 11 GLM-OCR client wires this up; for Phase 10
-// we expose the contract and a stub so callers can be typed and tested.
-//
-// QUESTIONS.md Q-004 captures the open call: rasterize via shell-out to
-// pdftoppm (small + fast, requires the operator install poppler) vs.
-// rasterize via pdfjs + node-canvas (pure JS, heavier dep, slower).
-
+// Shells out to `pdftoppm` from poppler-utils. The standalone Dockerfile
+// installs poppler; on host machines the operator needs `brew install
+// poppler` (or apt/choco equivalent). One invocation produces one PNG per
+// page named `<prefix>-NNNN.png` at the given DPI.
 export const rasterizePdf = async (
-  _path: string,
-  _opts: RasterizeOptions = {},
+  path: string,
+  opts: RasterizeOptions = {},
 ): Promise<RasterizedPage[]> => {
-  throw new Error(
-    'rasterizePdf is not implemented yet — wired up by Phase 11 (GLM-OCR client). See QUESTIONS.md Q-004.',
-  );
+  const dpi = opts.dpi ?? 300;
+  const outDir = opts.outDir ?? join(dirname(path), 'pages');
+  await mkdir(outDir, { recursive: true });
+  const prefix = join(outDir, 'page');
+  // -png: emit PNG; -r: dpi; pdftoppm pads page numbers to enough digits
+  // to fit the highest page number, but always at least 4 by default
+  // (see -aaVector / -aa flags too — defaults are fine for OCR).
+  try {
+    await execFileP('pdftoppm', ['-png', '-r', String(dpi), path, prefix], {
+      maxBuffer: 64 * 1024 * 1024,
+    });
+  } catch (err) {
+    const e = err as { code?: string; message?: string };
+    if (e.code === 'ENOENT') {
+      throw new Error(
+        'pdftoppm not found on PATH — install poppler-utils to enable PDF rasterization. ' +
+          '(brew install poppler / apt install poppler-utils / choco install poppler)',
+      );
+    }
+    throw new Error(`pdftoppm failed: ${e.message ?? String(err)}`);
+  }
+  const entries = await readdir(outDir);
+  const pageFiles = entries.filter((f) => f.startsWith('page-') && f.endsWith('.png')).sort();
+  // Geometry is reported by pdfjs analyze() in callers; we deliberately
+  // don't re-open the PDF here. Width/height are filled in as 0 — the
+  // GLM-OCR client only needs the path. If a caller needs dimensions,
+  // it can stat the PNG (out of scope for v1).
+  return pageFiles.map((file, i) => ({
+    index: i,
+    pngPath: join(outDir, file),
+    width: 0,
+    height: 0,
+  }));
 };
 
 // ---- Cleanup ----------------------------------------------------------------

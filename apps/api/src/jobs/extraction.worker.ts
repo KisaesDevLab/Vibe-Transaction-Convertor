@@ -76,9 +76,9 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
       );
     }
   } else {
-    // OCR path. rasterizePdf throws today (Q-006) until poppler is wired
-    // in the container; this code path is exercised end-to-end once the
-    // extraction worker runs in Docker.
+    // OCR path. rasterizePdf shells out to pdftoppm (poppler-utils).
+    // The standalone Dockerfile installs poppler; on host machines the
+    // operator needs `brew install poppler` (or apt/choco equivalent).
     const rasters = await rasterizePdf(data.sourcePdfPath, { dpi: 300 });
     const images = await Promise.all(rasters.map(async (r) => readFile(r.pngPath)));
     const ocr = await ocrPdfPages(images);

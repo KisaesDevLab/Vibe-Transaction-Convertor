@@ -25,7 +25,7 @@ build).
 | 16    | Golden Rule Reconciler & Repair Pass         | ✅     | `9e34173` | cents-exact + sign-flip repair      |
 | 17    | TRNTYPE Inference + FITID Generator          | ✅     | `9e34173` | rules-first + LLM tiebreaker        |
 | 18    | Statement & Transaction Review UI            | ✅     | `d22cccd` | inline edit + override modal        |
-| 19    | PDF Viewer with Bounding-Box Highlighting    | ⚠      | —         | bbox stored; viewer in polish pass  |
+| 19    | PDF Viewer with Bounding-Box Highlighting    | ✅     | `9a1fc2f` | react-pdf + bbox overlay + fit-mode |
 | 20    | CSV Exporter                                 | ✅     | `d22cccd` | qbo3/qbo4/xero/generic              |
 | 21    | OFX 2.x XML Exporter                         | ✅     | `d22cccd` | shared AST                          |
 | 22    | QBO Exporter (OFX 1.x SGML + INTU.BID)       | ✅     | `d22cccd` | renderQbo()                         |
@@ -46,17 +46,12 @@ Legend: ✅ done · ⏳ in progress · ⏸ pending · ⚠ partial (deferred)
 
 See `QUESTIONS.md` (6 entries — all worked-around or deferred).
 
-## Deferred work (Phases 19, 27)
+## Deferred work (Phase 27)
 
-- **Phase 19** (PDF viewer with bbox highlighting). Bounding-box data
-  is already extracted by `extractTextLayer()` and stored in
-  `transactions.source_bbox_json`. The viewer needs `react-pdf`
-  - an overlay layer; deferred to a polish pass.
-- **Phase 27** (testing pass). The codebase ships ~90 unit + supertest
+- **Phase 27** (testing pass). The codebase ships ~97 unit + supertest
   cases. A dedicated Playwright E2E suite, golden-master test
   fixtures for exporters, and load tests against the worker queue
   are deferred.
-- **Q-006: rasterizePdf()** still throws. The Phase 28 Dockerfile
-  installs poppler-utils, so the operator just needs to flip the
-  switch from JS-stub to `pdftoppm` shell-out when GLM-OCR is first
-  exercised against a scanned PDF.
+- **Q-006: rasterizePdf()** — resolved. Shells out to `pdftoppm`
+  (poppler-utils). Standalone Dockerfile installs poppler; host operators
+  install via brew / apt / choco.
