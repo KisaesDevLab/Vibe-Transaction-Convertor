@@ -417,6 +417,41 @@ export function StatementReviewPage() {
                     }
                   : null
               }
+              onPdfClick={(loc) => {
+                // Phase 19 #7: PDF→txn click selection. Find the row whose
+                // source_page matches and whose bbox contains the click;
+                // when no exact hit, fall back to the closest center on
+                // the same page (Euclidean distance in PDF user-space).
+                const onPage = txs.filter((t) => t.sourcePage === loc.page);
+                if (onPage.length === 0) return;
+                const inBbox = onPage.find(
+                  (t) =>
+                    t.sourceBboxJson &&
+                    loc.x >= t.sourceBboxJson[0] &&
+                    loc.x <= t.sourceBboxJson[2] &&
+                    loc.y >= t.sourceBboxJson[1] &&
+                    loc.y <= t.sourceBboxJson[3],
+                );
+                if (inBbox) {
+                  setSelectedTx(inBbox);
+                  return;
+                }
+                let best: TransactionRow | null = null;
+                let bestDist = Infinity;
+                for (const t of onPage) {
+                  if (!t.sourceBboxJson) continue;
+                  const cx = (t.sourceBboxJson[0] + t.sourceBboxJson[2]) / 2;
+                  const cy = (t.sourceBboxJson[1] + t.sourceBboxJson[3]) / 2;
+                  const dx = cx - loc.x;
+                  const dy = cy - loc.y;
+                  const d = dx * dx + dy * dy;
+                  if (d < bestDist) {
+                    bestDist = d;
+                    best = t;
+                  }
+                }
+                if (best) setSelectedTx(best);
+              }}
             />
           </div>
         </div>

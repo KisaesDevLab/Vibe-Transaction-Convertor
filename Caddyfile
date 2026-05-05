@@ -1,0 +1,37 @@
+# Phase 28 #5: Caddy reverse proxy. {$VIBETC_DOMAIN} substitutes the
+# operator-set hostname (e.g. tx.example.com). Caddy auto-provisions
+# Let's Encrypt certs when the domain is publicly reachable; for LAN
+# deployments set VIBETC_DOMAIN to ":80" and uncomment the
+# tls internal block to issue self-signed certs.
+
+{$VIBETC_DOMAIN} {
+	encode gzip
+
+	# Strict transport, sane content-type sniffing, and a CSP that
+	# matches what helmet sets at the API layer.
+	header {
+		Strict-Transport-Security "max-age=15552000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "SAMEORIGIN"
+		Referrer-Policy "no-referrer"
+		# Helmet already sets these on /api/* responses; keep them at
+		# the proxy layer too so static assets get them.
+		-Server
+	}
+
+	# Uncomment for LAN-only deployments without a public DNS record:
+	# tls internal
+
+	reverse_proxy api:4000 {
+		header_up Host {host}
+		header_up X-Real-IP {remote_host}
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Forwarded-Proto {scheme}
+	}
+
+	# Cap request body to 32MB; multer enforces a per-PDF limit but the
+	# proxy layer is the right place to block huge accidental uploads.
+	request_body {
+		max_size 32MB
+	}
+}

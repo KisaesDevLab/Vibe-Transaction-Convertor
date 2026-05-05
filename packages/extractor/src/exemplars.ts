@@ -293,6 +293,502 @@ Closing Balance ........................ $4,315.79`,
       ],
     },
   },
+  {
+    label: 'bofa-checking',
+    markdown: `# Bank of America — Advantage Checking
+Account ending ••••8821
+Statement Period: 05/01/2026 through 05/31/2026
+
+Beginning Balance on 05/01/2026 ............... $5,200.00
+
+Deposits and other additions
+05/02  DIRECT DEPOSIT ACME CORP PAYROLL              2,400.00
+05/20  MOBILE CHECK DEPOSIT                            540.00
+05/30  WIRE TRANSFER RECEIVED FROM GLOBEX INC        1,250.00
+
+Withdrawals and other subtractions
+05/05  ONLINE TRANSFER TO SAVINGS ••••2244            -300.00
+05/10  POS PURCHASE TRADER JOES #421                   -82.55
+05/14  ATM WITHDRAWAL MAIN STREET BRANCH              -100.00
+05/27  MONTHLY MAINTENANCE FEE                         -12.00
+
+Ending Balance on 05/31/2026 .................. $8,895.45`,
+    expected: {
+      account_number_masked: '8821',
+      account_type_hint: 'CHECKING',
+      period_start: '2026-05-01',
+      period_end: '2026-05-31',
+      opening_balance_cents: 520_000,
+      closing_balance_cents: 889_545,
+      source_date_format: 'MDY',
+      source_date_format_confidence: 0.95,
+      transactions: [
+        {
+          posted_date: '2026-05-02',
+          description: 'DIRECT DEPOSIT ACME CORP PAYROLL',
+          amount_cents: 240_000,
+          trntype: 'DIRECTDEP',
+          source_page: 1,
+          confidence: 0.99,
+        },
+        {
+          posted_date: '2026-05-05',
+          description: 'ONLINE TRANSFER TO SAVINGS ••••2244',
+          amount_cents: -30_000,
+          trntype: 'XFER',
+          source_page: 1,
+          confidence: 0.99,
+        },
+        {
+          posted_date: '2026-05-10',
+          description: 'POS PURCHASE TRADER JOES #421',
+          amount_cents: -8_255,
+          trntype: 'POS',
+          source_page: 1,
+          confidence: 0.95,
+        },
+        {
+          posted_date: '2026-05-14',
+          description: 'ATM WITHDRAWAL MAIN STREET BRANCH',
+          amount_cents: -10_000,
+          trntype: 'ATM',
+          source_page: 1,
+          confidence: 0.99,
+        },
+        {
+          posted_date: '2026-05-20',
+          description: 'MOBILE CHECK DEPOSIT',
+          amount_cents: 54_000,
+          trntype: 'DEP',
+          source_page: 1,
+          confidence: 0.97,
+        },
+        {
+          posted_date: '2026-05-27',
+          description: 'MONTHLY MAINTENANCE FEE',
+          amount_cents: -1_200,
+          trntype: 'SRVCHG',
+          source_page: 1,
+          confidence: 0.99,
+        },
+        {
+          posted_date: '2026-05-30',
+          description: 'WIRE TRANSFER RECEIVED FROM GLOBEX INC',
+          amount_cents: 125_000,
+          trntype: 'XFER',
+          source_page: 1,
+          confidence: 0.95,
+        },
+      ],
+    },
+  },
+  {
+    label: 'capital-one-credit-card',
+    markdown: `# Capital One Quicksilver
+Account ending ••••3344
+Statement Closing Date: 06/30/2026
+Previous Balance: $850.45
+Payments/Credits: -$850.45
+New Charges: $42.84
+New Balance: $42.84
+
+Statement Period: 06/01/2026 — 06/30/2026
+
+Date     Description                                       Amount
+06/02    CAPITAL ONE MOBILE PAYMENT - THANK YOU          -850.45
+06/05    SHELL OIL 12345                                   48.20
+06/10    NETFLIX.COM                                       15.99
+06/15    TARGET T-1234 MINNEAPOLIS                        132.78
+06/20    SPOTIFY USA                                       11.99
+06/25    HOME DEPOT 0987                                  215.43`,
+    expected: {
+      account_number_masked: '3344',
+      account_type_hint: 'CREDITCARD',
+      period_start: '2026-06-01',
+      period_end: '2026-06-30',
+      opening_balance_cents: 85_045,
+      closing_balance_cents: 42_439,
+      source_date_format: 'MDY',
+      source_date_format_confidence: 0.95,
+      transactions: [
+        {
+          posted_date: '2026-06-02',
+          description: 'CAPITAL ONE MOBILE PAYMENT - THANK YOU',
+          amount_cents: -85_045,
+          trntype: 'PAYMENT',
+          source_page: 1,
+          confidence: 0.99,
+        },
+        {
+          posted_date: '2026-06-05',
+          description: 'SHELL OIL 12345',
+          amount_cents: 4_820,
+          trntype: 'POS',
+          source_page: 1,
+          confidence: 0.95,
+        },
+        {
+          posted_date: '2026-06-10',
+          description: 'NETFLIX.COM',
+          amount_cents: 1_599,
+          trntype: 'POS',
+          source_page: 1,
+          confidence: 0.95,
+        },
+        {
+          posted_date: '2026-06-15',
+          description: 'TARGET T-1234 MINNEAPOLIS',
+          amount_cents: 13_278,
+          trntype: 'POS',
+          source_page: 1,
+          confidence: 0.95,
+        },
+        {
+          posted_date: '2026-06-20',
+          description: 'SPOTIFY USA',
+          amount_cents: 1_199,
+          trntype: 'POS',
+          source_page: 1,
+          confidence: 0.95,
+        },
+        {
+          posted_date: '2026-06-25',
+          description: 'HOME DEPOT 0987',
+          amount_cents: 21_543,
+          trntype: 'POS',
+          source_page: 1,
+          confidence: 0.95,
+        },
+      ],
+    },
+  },
+  {
+    label: 'discover-credit-card',
+    markdown: `# Discover it Cash Back
+Account ending ••••7711
+Statement Closing Date: 07/31/2026
+Previous Balance: $1,580.20
+Payments and Credits: -$1,605.20
+Purchases: $828.02
+New Balance: $783.02
+
+Statement Period: 07/01/2026 — 07/31/2026
+
+Trans Date   Description                                   Amount
+07/03        INTERNET PAYMENT - THANK YOU                -1,580.20
+07/08        WALMART STORE 4421                              87.65
+07/12        COSTCO WHOLESALE 0815                          412.93
+07/18        STARBUCKS STORE 09182                            7.45
+07/22        BEST BUY #1230                                 299.99
+07/28        CASHBACK BONUS REDEMPTION                      -25.00`,
+    expected: {
+      account_number_masked: '7711',
+      account_type_hint: 'CREDITCARD',
+      period_start: '2026-07-01',
+      period_end: '2026-07-31',
+      opening_balance_cents: 158_020,
+      closing_balance_cents: 78_302,
+      source_date_format: 'MDY',
+      source_date_format_confidence: 0.95,
+      transactions: [
+        {
+          posted_date: '2026-07-03',
+          description: 'INTERNET PAYMENT - THANK YOU',
+          amount_cents: -158_020,
+          trntype: 'PAYMENT',
+          source_page: 1,
+          confidence: 0.99,
+        },
+        {
+          posted_date: '2026-07-08',
+          description: 'WALMART STORE 4421',
+          amount_cents: 8_765,
+          trntype: 'POS',
+          source_page: 1,
+          confidence: 0.95,
+        },
+        {
+          posted_date: '2026-07-12',
+          description: 'COSTCO WHOLESALE 0815',
+          amount_cents: 41_293,
+          trntype: 'POS',
+          source_page: 1,
+          confidence: 0.95,
+        },
+        {
+          posted_date: '2026-07-18',
+          description: 'STARBUCKS STORE 09182',
+          amount_cents: 745,
+          trntype: 'POS',
+          source_page: 1,
+          confidence: 0.95,
+        },
+        {
+          posted_date: '2026-07-22',
+          description: 'BEST BUY #1230',
+          amount_cents: 29_999,
+          trntype: 'POS',
+          source_page: 1,
+          confidence: 0.95,
+        },
+        {
+          posted_date: '2026-07-28',
+          description: 'CASHBACK BONUS REDEMPTION',
+          amount_cents: -2_500,
+          trntype: 'CREDIT',
+          source_page: 1,
+          confidence: 0.95,
+        },
+      ],
+    },
+  },
+  {
+    label: 'citi-credit-card',
+    markdown: `# Citi Business / AAdvantage Platinum Select
+Account ending ••••5599
+Statement Period: 01/08/2026 — 31/08/2026
+Statement Closing Date: 31/08/2026
+
+Previous Balance: $645.30
+Payments/Credits: -$645.30
+Purchases: $1,904.40
+New Balance: $1,904.40
+
+Trans Date    Description                                  Amount
+03/08/2026    PAYMENT RECEIVED THANK YOU                  -645.30
+12/08/2026    LONDON UNDERGROUND TFL                        28.50
+15/08/2026    SAINSBURYS LONDON                            142.65
+19/08/2026    BRITISH AIRWAYS LHR-JFK                    1,289.00
+24/08/2026    PRET A MANGER 0123                            18.45
+28/08/2026    HILTON LONDON PADDINGTON                     425.80`,
+    expected: {
+      account_number_masked: '5599',
+      account_type_hint: 'CREDITCARD',
+      period_start: '2026-08-01',
+      period_end: '2026-08-31',
+      opening_balance_cents: 64_530,
+      closing_balance_cents: 190_440,
+      source_date_format: 'DMY',
+      source_date_format_confidence: 0.92,
+      transactions: [
+        {
+          posted_date: '2026-08-03',
+          description: 'PAYMENT RECEIVED THANK YOU',
+          amount_cents: -64_530,
+          trntype: 'PAYMENT',
+          source_page: 1,
+          confidence: 0.99,
+        },
+        {
+          posted_date: '2026-08-12',
+          description: 'LONDON UNDERGROUND TFL',
+          amount_cents: 2_850,
+          trntype: 'POS',
+          source_page: 1,
+          confidence: 0.95,
+        },
+        {
+          posted_date: '2026-08-15',
+          description: 'SAINSBURYS LONDON',
+          amount_cents: 14_265,
+          trntype: 'POS',
+          source_page: 1,
+          confidence: 0.95,
+        },
+        {
+          posted_date: '2026-08-19',
+          description: 'BRITISH AIRWAYS LHR-JFK',
+          amount_cents: 128_900,
+          trntype: 'POS',
+          source_page: 1,
+          confidence: 0.95,
+        },
+        {
+          posted_date: '2026-08-24',
+          description: 'PRET A MANGER 0123',
+          amount_cents: 1_845,
+          trntype: 'POS',
+          source_page: 1,
+          confidence: 0.95,
+        },
+        {
+          posted_date: '2026-08-28',
+          description: 'HILTON LONDON PADDINGTON',
+          amount_cents: 42_580,
+          trntype: 'POS',
+          source_page: 1,
+          confidence: 0.95,
+        },
+      ],
+    },
+  },
+  {
+    label: 'us-bank-checking',
+    markdown: `# U.S. Bank — Easy Checking
+Account ending ••••6644
+Statement Period: 2026-09-01 to 2026-09-30
+
+Beginning Balance 2026-09-01 .................... $3,650.75
+
+Date         Description                                       Amount
+2026-09-02   ACH DEPOSIT GUSTO PAYROLL                       2,850.00
+2026-09-04   EXTERNAL TRANSFER FROM SAV ••••7766               500.00
+2026-09-09   DEBIT CARD PURCHASE WHOLE FOODS #4429            -156.78
+2026-09-15   ATM WITHDRAWAL US BANK BRANCH 0182               -200.00
+2026-09-22   ONLINE BILL PAY DUKE ENERGY                      -184.20
+2026-09-28   INTEREST PAYMENT                                    1.85
+
+Ending Balance 2026-09-30 ....................... $6,461.62`,
+    expected: {
+      account_number_masked: '6644',
+      account_type_hint: 'CHECKING',
+      period_start: '2026-09-01',
+      period_end: '2026-09-30',
+      opening_balance_cents: 365_075,
+      closing_balance_cents: 646_162,
+      source_date_format: 'YMD',
+      source_date_format_confidence: 0.98,
+      transactions: [
+        {
+          posted_date: '2026-09-02',
+          description: 'ACH DEPOSIT GUSTO PAYROLL',
+          amount_cents: 285_000,
+          trntype: 'DIRECTDEP',
+          source_page: 1,
+          confidence: 0.99,
+        },
+        {
+          posted_date: '2026-09-04',
+          description: 'EXTERNAL TRANSFER FROM SAV ••••7766',
+          amount_cents: 50_000,
+          trntype: 'XFER',
+          source_page: 1,
+          confidence: 0.99,
+        },
+        {
+          posted_date: '2026-09-09',
+          description: 'DEBIT CARD PURCHASE WHOLE FOODS #4429',
+          amount_cents: -15_678,
+          trntype: 'POS',
+          source_page: 1,
+          confidence: 0.95,
+        },
+        {
+          posted_date: '2026-09-15',
+          description: 'ATM WITHDRAWAL US BANK BRANCH 0182',
+          amount_cents: -20_000,
+          trntype: 'ATM',
+          source_page: 1,
+          confidence: 0.99,
+        },
+        {
+          posted_date: '2026-09-22',
+          description: 'ONLINE BILL PAY DUKE ENERGY',
+          amount_cents: -18_420,
+          trntype: 'PAYMENT',
+          source_page: 1,
+          confidence: 0.95,
+        },
+        {
+          posted_date: '2026-09-28',
+          description: 'INTEREST PAYMENT',
+          amount_cents: 185,
+          trntype: 'INT',
+          source_page: 1,
+          confidence: 0.99,
+        },
+      ],
+    },
+  },
+  {
+    label: 'pnc-business-checking',
+    markdown: `# PNC Bank — Business Checking
+Account ending ••••9988
+Statement Period: 2026-10-01 to 2026-10-31
+
+Beginning Balance 2026-10-01 ................... $18,920.40
+
+Deposits and Credits
+2026-10-02   ACH CREDIT CLIENT INVOICE 8821                 5,400.00
+2026-10-14   REMOTE DEPOSIT BATCH                           2,825.50
+2026-10-30   INTEREST EARNED                                   12.45
+
+Withdrawals and Debits
+2026-10-05   WIRE OUT TO VENDOR ZENITH LLC                 -3,200.00
+2026-10-10   PAYROLL ADP TX/FEES                           -8,750.00
+2026-10-20   TREASURY MGMT MONTHLY FEE                        -45.00
+2026-10-25   ONLINE TRANSFER TO MMA ••••3399               -1,000.00
+
+Ending Balance 2026-10-31 ...................... $14,163.35`,
+    expected: {
+      account_number_masked: '9988',
+      account_type_hint: 'CHECKING',
+      period_start: '2026-10-01',
+      period_end: '2026-10-31',
+      opening_balance_cents: 1_892_040,
+      closing_balance_cents: 1_416_335,
+      source_date_format: 'YMD',
+      source_date_format_confidence: 0.98,
+      transactions: [
+        {
+          posted_date: '2026-10-02',
+          description: 'ACH CREDIT CLIENT INVOICE 8821',
+          amount_cents: 540_000,
+          trntype: 'DEP',
+          source_page: 1,
+          confidence: 0.97,
+        },
+        {
+          posted_date: '2026-10-05',
+          description: 'WIRE OUT TO VENDOR ZENITH LLC',
+          amount_cents: -320_000,
+          trntype: 'XFER',
+          source_page: 1,
+          confidence: 0.99,
+        },
+        {
+          posted_date: '2026-10-10',
+          description: 'PAYROLL ADP TX/FEES',
+          amount_cents: -875_000,
+          trntype: 'DIRECTDEBIT',
+          source_page: 1,
+          confidence: 0.95,
+        },
+        {
+          posted_date: '2026-10-14',
+          description: 'REMOTE DEPOSIT BATCH',
+          amount_cents: 282_550,
+          trntype: 'DEP',
+          source_page: 1,
+          confidence: 0.97,
+        },
+        {
+          posted_date: '2026-10-20',
+          description: 'TREASURY MGMT MONTHLY FEE',
+          amount_cents: -4_500,
+          trntype: 'SRVCHG',
+          source_page: 1,
+          confidence: 0.99,
+        },
+        {
+          posted_date: '2026-10-25',
+          description: 'ONLINE TRANSFER TO MMA ••••3399',
+          amount_cents: -100_000,
+          trntype: 'XFER',
+          source_page: 1,
+          confidence: 0.99,
+        },
+        {
+          posted_date: '2026-10-30',
+          description: 'INTEREST EARNED',
+          amount_cents: 1_245,
+          trntype: 'INT',
+          source_page: 1,
+          confidence: 0.99,
+        },
+      ],
+    },
+  },
 ];
 
 export const exemplarsAsMessages = (

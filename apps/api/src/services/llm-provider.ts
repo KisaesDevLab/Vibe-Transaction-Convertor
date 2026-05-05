@@ -35,7 +35,19 @@ export const resolveProviderId = async (db: Db): Promise<ProviderId> => {
   return v === 'anthropic' ? 'anthropic' : 'local';
 };
 
-export const buildProvider = async (db: Db): Promise<LlmProvider> => {
+// Phase 13: 60-second provider cache. Constructing the provider hits
+// system_settings (3 rows) and unwraps the API key. The worker may build
+// 100+ providers per minute under load, so we cache instances and
+// invalidate via invalidateProviderCache(). Admin-routes that mutate
+// LLM settings call the invalidator.
+const PROVIDER_TTL_MS = 60_000;
+let cached: { at: number; provider: LlmProvider } | null = null;
+
+export const invalidateProviderCache = (): void => {
+  cached = null;
+};
+
+const constructProvider = async (db: Db): Promise<LlmProvider> => {
   const id = await resolveProviderId(db);
   if (id === 'local') return new LocalGatewayProvider();
 
@@ -52,4 +64,11 @@ export const buildProvider = async (db: Db): Promise<LlmProvider> => {
   const modelRow = await readSetting(db, KEY_ANTHROPIC_MODEL);
   const model = modelRow?.valuePlaintext ?? process.env.ANTHROPIC_MODEL ?? 'claude-sonnet-4-6';
   return new AnthropicProvider({ apiKey, model });
+};
+
+export const buildProvider = async (db: Db): Promise<LlmProvider> => {
+  if (cached && Date.now() - cached.at < PROVIDER_TTL_MS) return cached.provider;
+  const provider = await constructProvider(db);
+  cached = { at: Date.now(), provider };
+  return provider;
 };

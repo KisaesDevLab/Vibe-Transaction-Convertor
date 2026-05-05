@@ -14,6 +14,7 @@ import { BackupAdminPage } from './pages/BackupAdminPage';
 import { DiagnosticsPage } from './pages/DiagnosticsPage';
 import { EnginesAdminPage } from './pages/EnginesAdminPage';
 import { ExportPage } from './pages/ExportPage';
+import { GlobalStatementsPage } from './pages/GlobalStatementsPage';
 import { LlmProviderAdminPage } from './pages/LlmProviderAdminPage';
 import { MaintenanceAdminPage } from './pages/MaintenanceAdminPage';
 import { StatementReviewPage } from './pages/StatementReviewPage';
@@ -38,7 +39,7 @@ export function App() {
                 <Route path="/accounts/:accountId/statements" element={<StatementsListPage />} />
                 <Route path="/statements/:statementId" element={<StatementReviewPage />} />
                 <Route path="/statements/:statementId/export" element={<ExportPage />} />
-                <Route path="/statements" element={<Placeholder title="Statements" />} />
+                <Route path="/statements" element={<GlobalStatementsPage />} />
                 <Route
                   path="/admin"
                   element={

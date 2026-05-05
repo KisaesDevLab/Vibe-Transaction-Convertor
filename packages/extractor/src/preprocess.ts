@@ -97,6 +97,11 @@ const analyzeLoaded = async (doc: PDFDocumentProxy): Promise<PdfAnalysis> => {
 };
 
 export const routePdf = (analysis: PdfAnalysis): ExtractionMethod => {
+  // Phase 10 #18: VIBETC_FORCE_OCR=true forces the OCR path even when a
+  // text layer is present. Useful when a text-layer PDF has corrupt or
+  // garbled glyph mappings (some bank PDFs do this) and OCR would
+  // produce a cleaner extraction.
+  if (process.env.VIBETC_FORCE_OCR === 'true') return 'ocr';
   if (analysis.pageCount === 0) return 'ocr';
   if (analysis.hasTextLayer && analysis.pages.every((p) => p.hasText)) return 'text';
   if (analysis.textLayerCoverage === 0) return 'ocr';

@@ -27,6 +27,23 @@ const maxBatch = (): number =>
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: maxBytes(), files: maxBatch() },
+  // Phase 9 #23: declared-MIME sniff. We still verify the actual magic
+  // bytes server-side (upload-storage.ts), but this catches the common
+  // "wrong file type" mistake before the bytes hit the disk.
+  fileFilter: (_req, file, cb) => {
+    const ok =
+      file.mimetype === 'application/pdf' ||
+      file.mimetype === 'application/x-pdf' ||
+      // Some browsers send binary/octet-stream; allow but rely on the
+      // magic-byte check downstream.
+      file.mimetype === 'application/octet-stream' ||
+      file.mimetype === 'binary/octet-stream';
+    if (!ok) {
+      cb(new Error(`unsupported MIME type: ${file.mimetype}`));
+      return;
+    }
+    cb(null, true);
+  },
 });
 
 interface IngestedFile {

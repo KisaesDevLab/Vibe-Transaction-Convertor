@@ -37,10 +37,10 @@ const pruneAudit = async (): Promise<{ deleted: number; skipped?: true }> => {
   return { deleted: result.length };
 };
 
-const cleanTmp = async (): Promise<{ removed: number; kept: number }> => {
+const cleanTmp = async (): Promise<{ removed: number; kept: number; tmpUploads: number }> => {
   const dataDir = process.env.DATA_DIR ?? './data';
   const tmpDir = join(dataDir, 'tmp');
-  const cutoff = Date.now() - 6 * 60 * 60 * 1000;
+  const tmpCutoff = Date.now() - 6 * 60 * 60 * 1000;
   let removed = 0;
   let kept = 0;
   try {
@@ -49,7 +49,7 @@ const cleanTmp = async (): Promise<{ removed: number; kept: number }> => {
       const full = join(tmpDir, entry.name);
       try {
         const s = await stat(full);
-        if (s.mtimeMs < cutoff) {
+        if (s.mtimeMs < tmpCutoff) {
           await rm(full, { recursive: true, force: true });
           removed += 1;
         } else {
@@ -62,7 +62,41 @@ const cleanTmp = async (): Promise<{ removed: number; kept: number }> => {
   } catch {
     // tmp dir doesn't exist
   }
-  return { removed, kept };
+
+  // Phase 9 #21: orphaned <hash>.tmp files under uploads/ are
+  // mid-rename casualties (writer crashed before atomic rename). Sweep
+  // anything older than 1 hour so disk doesn't slowly fill.
+  const uploadsDir = join(dataDir, 'uploads');
+  const oneHour = Date.now() - 60 * 60 * 1000;
+  let tmpUploads = 0;
+  const sweep = async (dir: string): Promise<void> => {
+    let entries: import('node:fs').Dirent[];
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        await sweep(full);
+        continue;
+      }
+      if (!entry.name.endsWith('.tmp')) continue;
+      try {
+        const s = await stat(full);
+        if (s.mtimeMs < oneHour) {
+          await rm(full, { force: true });
+          tmpUploads += 1;
+        }
+      } catch {
+        // ignore
+      }
+    }
+  };
+  await sweep(uploadsDir);
+
+  return { removed, kept, tmpUploads };
 };
 
 const processMaintenance = async (data: MaintenanceJobData): Promise<unknown> => {

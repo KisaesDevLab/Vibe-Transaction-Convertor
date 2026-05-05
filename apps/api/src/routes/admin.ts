@@ -12,7 +12,7 @@ import { requireAdmin } from '../middleware/auth.js';
 import { writeAudit } from '../services/audit.js';
 import { backupFilePath, createBackup, deleteBackup, listBackups } from '../services/backup.js';
 import { getFidirStatus, seedFidir } from '../services/fidir-seeder.js';
-import { buildProvider } from '../services/llm-provider.js';
+import { buildProvider, invalidateProviderCache } from '../services/llm-provider.js';
 import { extractionQueue } from '../jobs/queues.js';
 import { logger } from '../lib/logger.js';
 
@@ -94,6 +94,7 @@ export const adminRouter = (): Router => {
           target: systemSettings.key,
           set: { valuePlaintext: provider, updatedAt: sql`now()`, updatedByUserId: req.user!.id },
         });
+      invalidateProviderCache();
       await writeAudit(db, {
         actorUserId: req.user!.id,
         entityType: 'system_settings',
@@ -119,6 +120,7 @@ export const adminRouter = (): Router => {
           target: systemSettings.key,
           set: { valueEncrypted: wrapped, updatedAt: sql`now()`, updatedByUserId: req.user!.id },
         });
+      invalidateProviderCache();
       await writeAudit(db, {
         actorUserId: req.user!.id,
         entityType: 'system_settings',
@@ -144,6 +146,7 @@ export const adminRouter = (): Router => {
           target: systemSettings.key,
           set: { valuePlaintext: model, updatedAt: sql`now()`, updatedByUserId: req.user!.id },
         });
+      invalidateProviderCache();
       await writeAudit(db, {
         actorUserId: req.user!.id,
         entityType: 'system_settings',
@@ -162,6 +165,7 @@ export const adminRouter = (): Router => {
   router.delete('/llm-provider/anthropic-key', async (req, res, next) => {
     try {
       await db.delete(systemSettings).where(eq(systemSettings.key, ANTHROPIC_KEY));
+      invalidateProviderCache();
       await writeAudit(db, {
         actorUserId: req.user!.id,
         entityType: 'system_settings',

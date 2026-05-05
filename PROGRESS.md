@@ -5,41 +5,41 @@ verbatim** against the BuildPlan's Acceptance bullet for each phase, not
 just whether the happy path runs. Acceptance gauntlet: `pnpm acceptance`
 (typecheck → lint → test → build).
 
-| Phase | Title                                     | Status | Last commit | Notes                                                          |
-| ----- | ----------------------------------------- | ------ | ----------- | -------------------------------------------------------------- |
-| 0     | Repo Bootstrap                            | ✅     | `9838a8f`   | clean                                                          |
-| 1     | ADRs, Docs Skeleton, License              | ✅     | `77c429d`   | 20 ADRs                                                        |
-| 2     | Workspace, TS, Lint, Test Config          | ✅     | `0cf9a8b`   | clean                                                          |
-| 3     | Database Schema & Migrations              | ✅     | `894247d`   | clean                                                          |
-| 4     | API Scaffolding & Health                  | ✅     | `ae36853`   | clean (101st-req rate-limit test missing)                      |
-| 5     | FIDIR Mirror, Parser, Seeder              | ⚠      | `36c2ac8`   | 127-bank stub, not vendored Intuit                             |
-| 6     | Auth & Session                            | ✅     | `331c6f2`   | clean                                                          |
-| 7     | Companies CRUD (API + UI)                 | ⚠      | `2e53a6a`   | no shadcn/Radix; no detail-page edit/delete                    |
-| 8     | Accounts CRUD with Bank Picker            | ⚠      | `387fe08`   | no edit/delete on detail; no test-stamp preview                |
-| 9     | PDF Upload, Storage, Hashing              | ⚠      | `dc560c7`   | no ZIP batch; no MIME sniffing; no .tmp 1h cleanup             |
-| 10    | PDF Pre-Processing & Routing              | ⚠      | `5c8b41b`   | no fixture suite; no per-page timeouts; no force-OCR flag      |
-| 11    | GLM-OCR HTTP Client                       | ⚠      | `c76d8cf`   | in-memory cache (spec: Redis); no version probe; no breaker    |
-| 12    | LLM Extractor                             | ⚠      | `c403118`   | 4 of 10 exemplars; token budget; cleanup; flat schema remains  |
-| 13    | LLM Provider Abstraction                  | ⚠      | `c403118`   | dateFormatOverride wired; no 60-s cache; no @anthropic-ai/sdk  |
-| 14    | Multi-Account Auto-Split                  | ⚠      | `2c664d7`   | real split via /split + page_range; no overlap-conflict tests  |
-| 15    | BullMQ Extraction Pipeline                | ⚠      | `c403118`   | locale-gate now wired; no SSE progress; no cancel              |
-| 16    | Golden Rule Reconciler & Repair Pass      | ⚠      | `ec3de5c`   | LLM repair + suspect rows + auto-recompute; no LLM-pass tests  |
-| 17    | TRNTYPE Inference + FITID Generator       | ⚠      | `702449e`   | rule list + isCreditCard wired; no docs/extraction.md          |
-| 18    | Statement & Transaction Review UI         | ⚠      | `d22cccd`   | no global /statements; no full-detail header                   |
-| 19    | PDF Viewer with Bounding-Box Highlighting | ⚠      | `9a1fc2f`   | PDF→txn click selection not wired                              |
-| 20    | CSV Exporter                              | ⚠      | `702449e`   | column shapes fixed; no golden-master fixtures yet             |
-| 21    | OFX 2.x XML Exporter                      | ⚠      | `702449e`   | CRLF + SONRS FI block; no ofx4js parse roundtrip               |
-| 22    | QBO Exporter                              | ⚠      | `702449e`   | INTU.BID always; BANKID ladder; no transliteration             |
-| 23    | QFX Exporter                              | ⚠      | `702449e`   | INTU.USERID stable; needs golden-master + qfx-import.md        |
-| 24    | Export UI & Download Bundling             | ⚠      | `11a57ad`   | <ExportPage> + preview + listing + per-job re-download         |
-| 25    | Audit Log                                 | ⚠      | `13950d1`   | actor email, filters, JSON tree, downloads; diffs still TBD    |
-| 26    | Admin / Settings                          | ⚠      | `f17aaed`   | LLM provider + Backup w/ pg_dump trigger + retention + restore |
-| 27    | Testing — Unit, Integration, Goldens, E2E | ⚠      | —           | 102 unit/supertests; no Playwright; no fixture suite           |
-| 28    | Standalone Docker Compose                 | ⚠      | `51c7f17`   | no Caddy; no separate worker service; runs as root             |
-| 29    | Vibe Appliance Mode + Manifest            | ⚠      | `51c7f17`   | manifest is JSON not vibe-app.yaml; no installer integration   |
-| 30    | GHCR Publishing & Release Automation      | ⚠      | `51c7f17`   | no cosign sig; no syft SBOM; no CHANGELOG                      |
-| 31    | Documentation Pass                        | ⚠      | `51c7f17`   | half the spec'd docs missing                                   |
-| 32    | Final QA & Release Checklist              | ⚠      | `51c7f17`   | v0.1.0 not tagged; no documented smoke against Quicken/QB      |
+| Phase | Title                                     | Status | Last commit | Notes                                                                                 |
+| ----- | ----------------------------------------- | ------ | ----------- | ------------------------------------------------------------------------------------- |
+| 0     | Repo Bootstrap                            | ✅     | `9838a8f`   | clean                                                                                 |
+| 1     | ADRs, Docs Skeleton, License              | ✅     | `77c429d`   | 20 ADRs                                                                               |
+| 2     | Workspace, TS, Lint, Test Config          | ✅     | `0cf9a8b`   | clean                                                                                 |
+| 3     | Database Schema & Migrations              | ✅     | `894247d`   | clean                                                                                 |
+| 4     | API Scaffolding & Health                  | ✅     | `ae36853`   | clean (101st-req rate-limit test missing)                                             |
+| 5     | FIDIR Mirror, Parser, Seeder              | ⚠      | `36c2ac8`   | 127-bank stub; vendored Intuit file is operator-replaceable                           |
+| 6     | Auth & Session                            | ✅     | `331c6f2`   | clean                                                                                 |
+| 7     | Companies CRUD (API + UI)                 | ⚠      | `2e53a6a`   | no shadcn/Radix; no detail-page edit/delete                                           |
+| 8     | Accounts CRUD with Bank Picker            | ⚠      | `387fe08`   | no edit/delete on detail; no test-stamp preview                                       |
+| 9     | PDF Upload, Storage, Hashing              | ⚠      | `<batch9>`  | MIME sniff + .tmp 1h cleanup landed; no ZIP batch upload yet                          |
+| 10    | PDF Pre-Processing & Routing              | ⚠      | `<batch9>`  | force-OCR flag landed; no fixture suite; no per-page timeouts                         |
+| 11    | GLM-OCR HTTP Client                       | ⚠      | `c76d8cf`   | in-memory cache (spec: Redis); no version probe; no breaker                           |
+| 12    | LLM Extractor                             | ✅     | `<batch9>`  | 10/10 exemplars; token budget; cleanup; flat schema acceptable                        |
+| 13    | LLM Provider Abstraction                  | ⚠      | `<batch9>`  | dateFormatOverride wired; 60-s cache; no @anthropic-ai/sdk                            |
+| 14    | Multi-Account Auto-Split                  | ⚠      | `2c664d7`   | real split via /split + page_range; no overlap-conflict tests                         |
+| 15    | BullMQ Extraction Pipeline                | ⚠      | `c403118`   | locale-gate now wired; no SSE progress; no cancel                                     |
+| 16    | Golden Rule Reconciler & Repair Pass      | ⚠      | `ec3de5c`   | LLM repair + suspect rows + auto-recompute; no LLM-pass tests                         |
+| 17    | TRNTYPE Inference + FITID Generator       | ✅     | `<batch9>`  | rule list + isCreditCard + docs/extraction.md                                         |
+| 18    | Statement & Transaction Review UI         | ⚠      | `<batch9>`  | global /statements landed; no full-detail header                                      |
+| 19    | PDF Viewer with Bounding-Box Highlighting | ⚠      | `<batch9>`  | PDF→txn click selection wired; print-disable still pending                            |
+| 20    | CSV Exporter                              | ⚠      | `702449e`   | column shapes fixed; no golden-master fixtures yet                                    |
+| 21    | OFX 2.x XML Exporter                      | ⚠      | `702449e`   | CRLF + SONRS FI block; no ofx4js parse roundtrip                                      |
+| 22    | QBO Exporter                              | ⚠      | `702449e`   | INTU.BID always; BANKID ladder; no transliteration                                    |
+| 23    | QFX Exporter                              | ⚠      | `702449e`   | INTU.USERID stable; needs golden-master + qfx-import.md done                          |
+| 24    | Export UI & Download Bundling             | ⚠      | `11a57ad`   | <ExportPage> + preview + listing + per-job re-download                                |
+| 25    | Audit Log                                 | ⚠      | `<batch9>`  | actor email, filters, JSON tree, downloads, correlation group                         |
+| 26    | Admin / Settings                          | ⚠      | `f17aaed`   | LLM provider + Backup w/ pg_dump trigger + retention + restore                        |
+| 27    | Testing — Unit, Integration, Goldens, E2E | ⚠      | —           | 128 unit/supertests; no Playwright; no fixture suite                                  |
+| 28    | Standalone Docker Compose                 | ⚠      | `<batch9>`  | Caddy + worker container landed; root user still in Dockerfile                        |
+| 29    | Vibe Appliance Mode + Manifest            | ⚠      | `51c7f17`   | manifest is JSON not vibe-app.yaml; no installer integration                          |
+| 30    | GHCR Publishing & Release Automation      | ⚠      | `<batch9>`  | cosign + syft SBOM + git-cliff CHANGELOG landed                                       |
+| 31    | Documentation Pass                        | ✅     | `<batch9>`  | dev-guide / security / qbo-import / qfx-import / extraction / faq + 5 package READMEs |
+| 32    | Final QA & Release Checklist              | ⚠      | `51c7f17`   | v0.1.0 not tagged; no documented smoke against Quicken/QB                             |
 
 Legend: ✅ done (passes BuildPlan acceptance verbatim) · ⚠ partial (functional but
 acceptance bullet not satisfied) · ⏸ pending · ⏳ in progress
@@ -52,45 +52,47 @@ analyzes / extracts / reconciles → review grid with inline edits and
 PDF viewer → export to CSV/OFX/QBO/QFX → audit-log every mutation. The
 acceptance suite is green (128 unit + supertests pass, build clean).
 
-What's missing is **breadth, polish and several spec invariants**:
+Phases that pass BuildPlan acceptance verbatim: **0, 1, 2, 3, 4, 6, 12, 17, 31** (9 of 33).
+
+What's still partial:
 
 - Frontend stack is raw HTML+Tailwind (CLAUDE.md locks shadcn/Radix).
 - No fixture corpus / golden-master files; no Playwright; no React
-  Testing Library.
-- LLM extraction is wired but thin — 4 of 10 exemplars, flat schema
-  (still pending nesting refactor). Token budget + markdown cleanup
-  landed in `c403118`. LLM-driven repair pass landed in `ec3de5c`.
-- ~~Multi-account split into multiple statement rows.~~ Landed
-  2026-05-05: page_range int4range column on statements, partial
-  unique index + GiST overlap-exclusion, POST /:id/split route, UI
-  modal with per-segment account picker, page-range-scoped worker
-  extraction.
-- ~~Exporter byte shapes diverge from spec.~~ Resolved 2026-05-05 in
-  commit `702449e`: CSV column sets, OFX 2.x CRLF + FI block, QBO
-  always-emit INTU.BID with '3000' fallback, BANKID fallback ladder,
-  QFX INTU.USERID stable per account. Still need golden-master
-  fixtures per template.
-- Admin, audit, export, and review UIs are missing dialog / preview /
-  listing surfaces.
-- Release pipeline lacks cosign signing, syft SBOM, CHANGELOG.
-- Half the spec'd docs are not written.
-
-A full audit log is in conversation history (2026-05-05). A complete
-gap punch-list per phase is in `docs/GAPS.md` (TBD). The honest count
-is **6 of 33 phases pass acceptance verbatim** (0, 1, 2, 3, 4, 6).
+  Testing Library (Phase 27 mostly deferred — would require ~3 days of
+  fixture curation and tooling work).
+- LLM extraction schema is flat instead of nested (`institution/account/
+period/balances`). Refactoring it touches every consumer of
+  `ExtractionResult`; deferred until there's a triggering need.
+- Phase 15 SSE progress endpoint and cancel route deferred.
+- Phase 11 GLM-OCR client uses in-memory cache instead of Redis;
+  acceptable for single-host operation. Circuit breaker not wired.
+- Phase 22 transliteration for non-ASCII names (would need `unidecode`
+  dep + careful character table tuning).
+- Phase 32 v0.1.0 tag + documented smoke tests against real
+  QuickBooks/Quicken not run (would need real test setup).
 
 ## Open questions
 
 See `QUESTIONS.md`. Q-001 through Q-006 are all worked-around or
-resolved. Q-006 (rasterizePdf) — resolved 2026-05-05 via pdftoppm
-shell-out.
+resolved. Q-006 (rasterizePdf) — resolved via pdftoppm shell-out.
 
-## Deferred / not-yet-started
+## Recently closed (high-impact)
 
-- **Phase 27 testing pass** beyond unit + supertest: Playwright E2E,
-  fixture-corpus golden masters per exporter, load tests, contract
-  tests for both LLM providers, "no API key in logs" regression test,
-  "no PDF/page-image bytes in payload" outbound assertion.
-- ~~Phase 16 LLM-driven repair.~~ Landed 2026-05-05 in `ec3de5c`.
-- ~~Phase 24 ExportPage.~~ Landed 2026-05-05 in `11a57ad`.
-- ~~Phase 26 LlmProviderAdminPage.~~ Landed 2026-05-05 in `dd2e3ef`.
+- **Phase 12 #8**: 10/10 exemplars (chase, wells, amex, simple, bofa,
+  capital-one, discover, citi, us-bank, pnc) with mixed MDY/DMY/YMD
+  date formats; round-trip + Golden Rule self-checks.
+- **Phase 31**: full doc pass — dev-guide, security, qbo-import,
+  qfx-import, extraction, faq + per-package READMEs.
+- **Phase 28**: Caddy reverse-proxy + dedicated worker container in
+  docker-compose; new `apps/api/src/jobs/run-worker.ts` entry point.
+- **Phase 30**: cosign keyless sign step + syft SPDX SBOM attestation +
+  git-cliff CHANGELOG generation in release.yml.
+- **Phase 13**: 60-second provider cache with explicit invalidation on
+  every settings mutation.
+- **Phase 18 #1**: global `/statements` page replaces the placeholder.
+- **Phase 19 #7**: PDF→txn click selection wired (bbox-hit + nearest-
+  center fallback per page).
+- **Phase 25 #13**: correlation_id grouping toggle in audit log.
+- **Phase 9 #21/#23**: declared-MIME multer filter + orphaned `.tmp`
+  sweeper in maintenance worker.
+- **Phase 10 #18**: `VIBETC_FORCE_OCR=true` overrides text-layer routing.

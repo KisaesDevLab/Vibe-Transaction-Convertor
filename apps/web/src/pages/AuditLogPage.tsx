@@ -136,6 +136,33 @@ export function AuditLogPage() {
     actionContains.length > 0 ||
     mutationsOnly;
 
+  const groupByCorrelation = searchParams.get('groupByCorrelation') === '1';
+  // Phase 25 #13: when grouping is on, sort rows so events sharing a
+  // correlation_id appear next to each other (within a correlation,
+  // newest event last so the chain reads top-to-bottom in chronological
+  // order). Rows with no correlation float to the top.
+  const orderedRows = groupByCorrelation
+    ? [...(list.data?.rows ?? [])].sort((a, b) => {
+        const ca = a.correlationId ?? '';
+        const cb = b.correlationId ?? '';
+        if (ca === cb) return a.id - b.id;
+        if (ca === '') return -1;
+        if (cb === '') return 1;
+        return ca < cb ? -1 : 1;
+      })
+    : (list.data?.rows ?? []);
+
+  // Distinct background tint per correlation_id so groups are visually
+  // separable. Hashing the id to a small palette keeps things stable
+  // across renders.
+  const correlationTint = (cid: string | null): string => {
+    if (!cid) return '';
+    let h = 0;
+    for (let i = 0; i < cid.length; i += 1) h = (h * 31 + cid.charCodeAt(i)) >>> 0;
+    const palette = ['bg-amber-50', 'bg-emerald-50', 'bg-sky-50', 'bg-violet-50', 'bg-rose-50'];
+    return palette[h % palette.length] ?? '';
+  };
+
   return (
     <section className="mx-auto max-w-6xl space-y-4">
       <Link to="/admin" className="text-sm text-ink-muted hover:text-ink">
@@ -234,6 +261,15 @@ export function AuditLogPage() {
             Mutations only
           </label>
 
+          <label className="flex items-center gap-1 text-xs">
+            <input
+              type="checkbox"
+              checked={searchParams.get('groupByCorrelation') === '1'}
+              onChange={(e) => setFilter({ groupByCorrelation: e.target.checked ? '1' : null })}
+            />
+            Group by correlation
+          </label>
+
           {hasFilters ? (
             <button
               type="button"
@@ -278,8 +314,12 @@ export function AuditLogPage() {
               </tr>
             </thead>
             <tbody className="divide-y divide-surface-muted">
-              {list.data.rows.map((r) => (
-                <tr key={r.id} className="align-top">
+              {orderedRows.map((r) => (
+                <tr
+                  key={r.id}
+                  className={`align-top ${groupByCorrelation ? correlationTint(r.correlationId) : ''}`}
+                  title={r.correlationId ? `correlation: ${r.correlationId}` : undefined}
+                >
                   <td className="whitespace-nowrap px-3 py-2 text-xs text-ink-muted tabular-nums">
                     {new Date(r.at).toLocaleString()}
                   </td>
@@ -312,7 +352,7 @@ export function AuditLogPage() {
                   </td>
                 </tr>
               ))}
-              {list.data.rows.length === 0 ? (
+              {orderedRows.length === 0 ? (
                 <tr>
                   <td colSpan={5} className="px-3 py-8 text-center text-sm text-ink-muted">
                     No audit events match the current filter.

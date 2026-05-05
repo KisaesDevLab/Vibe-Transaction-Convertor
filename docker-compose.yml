@@ -1,6 +1,7 @@
 # Standalone deployment — Phase 28.
-# Brings up Postgres + Redis + GLM-OCR + LLM Gateway alongside the API.
-# Operators run `docker compose --profile standalone up -d`.
+# Brings up Postgres + Redis + GLM-OCR + LLM Gateway + Caddy + a separate
+# worker container alongside the API. Operators run
+#   docker compose --profile standalone up -d
 
 x-api-env: &api-env
   NODE_ENV: production
@@ -12,9 +13,8 @@ x-api-env: &api-env
   LLM_PROVIDER: local
   LLM_MODEL_ID: qwen3-8b
   SESSION_SECRET: ${SESSION_SECRET:?SESSION_SECRET must be set}
-  WEB_BASE_URL: ${WEB_BASE_URL:-http://localhost:4000}
+  WEB_BASE_URL: ${WEB_BASE_URL:-https://localhost}
   DATA_DIR: /var/lib/vibetc
-  WORKER_INLINE: 'true'
 
 services:
   postgres:
@@ -35,9 +35,9 @@ services:
 
   redis:
     image: redis:7
-    ports:
-      - '6379:6379'
     profiles: ['standalone']
+    volumes:
+      - vibetc-redis:/data
     healthcheck:
       test: ['CMD', 'redis-cli', 'ping']
       interval: 2s
@@ -70,9 +70,12 @@ services:
       args:
         BUILD_SHA: ${BUILD_SHA:-unknown}
     profiles: ['standalone']
-    environment: *api-env
-    ports:
-      - '4000:4000'
+    environment:
+      <<: *api-env
+      # Worker runs in its own container; api stays request-only.
+      WORKER_INLINE: 'false'
+    expose:
+      - '4000'
     volumes:
       - vibetc-data:/var/lib/vibetc
     depends_on:
@@ -80,7 +83,61 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -q -O - http://localhost:4000/api/health/ready || exit 1']
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  # Phase 28 #4: separate worker container processes BullMQ extraction
+  # and maintenance jobs out-of-band from the API request path. Same image
+  # as the API, just a different entry point.
+  worker:
+    build:
+      context: .
+      args:
+        BUILD_SHA: ${BUILD_SHA:-unknown}
+    profiles: ['standalone']
+    command: ['node', 'apps/api/dist/jobs/run-worker.js']
+    environment:
+      <<: *api-env
+      WORKER_INLINE: 'false'
+    volumes:
+      - vibetc-data:/var/lib/vibetc
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ['CMD-SHELL', 'pgrep -f run-worker || exit 1']
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+  # Phase 28 #5: Caddy fronts the API with HTTPS. Operators set the
+  # public hostname in VIBETC_DOMAIN; Caddy auto-provisions a Let's
+  # Encrypt cert when the domain is publicly reachable, or use the
+  # tls-internal block in the Caddyfile for LAN deployments.
+  caddy:
+    image: caddy:2
+    profiles: ['standalone']
+    ports:
+      - '80:80'
+      - '443:443'
+    environment:
+      VIBETC_DOMAIN: ${VIBETC_DOMAIN:-:80}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - vibetc-caddy-data:/data
+      - vibetc-caddy-config:/config
+    depends_on:
+      api:
+        condition: service_healthy
 
 volumes:
   vibetc-pgdata:
   vibetc-data:
+  vibetc-redis:
+  vibetc-caddy-data:
+  vibetc-caddy-config:
