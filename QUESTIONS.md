@@ -35,3 +35,25 @@ rejected).
 imports in `apps/api/src/db/schema.ts` are kept for future kit upgrades to
 re-detect them; if a future generator emits duplicates, drop the manual
 migration.
+
+### Q-002 — Authoritative Intuit FIDIR format + source URL (Phase 5, items 1-2) — 2026-05-04
+
+**Question:** BuildPlan.md item 1 says "Document the canonical Intuit FIDIR
+URL". The plan does not commit to one. Public mirrors of `fidir.txt` use at
+least three different formats (flat key=value, INI-style sections,
+JSON-with-headers) and the canonical Intuit URL has moved at least twice.
+Without an authoritative source, the parser format I picked
+(`KEY=value` lines, blank-line-separated records) is a documented choice
+rather than Intuit's choice.
+
+**Assumption made:** Vendored `data/fidir/fidir-us.txt` as a 127-record
+**starter set** of major US banks/credit unions in the parser's expected
+format. Documented this loud and clear in `data/fidir/README.md`. Wired
+the seeder defensive cap (refuse < 100 entries) so a half-imported file
+doesn't ship.
+
+**Where to revisit:** Operator must confirm Intuit's authoritative URL
+and format before production. If Intuit's format diverges from the
+parser-friendly form, write a one-shot converter at
+`apps/api/src/scripts/fidir-convert.ts`. Mirror cadence: quarterly per
+plan.

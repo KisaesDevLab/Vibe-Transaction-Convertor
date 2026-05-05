@@ -1,0 +1,639 @@
+# Vibe Transactions Converter — FIDIR mirror (starter set)
+# This is NOT the full Intuit FIDIR. Replace with the production file
+# before shipping. See data/fidir/README.md for the refresh procedure.
+# Format: KEY=value lines, blank-line-separated records.
+
+INTU.BID=3000
+INTU.ORG=Wells Fargo
+BANK_NAME=Wells Fargo Bank, N.A.
+URL=https://www.wellsfargo.com
+
+INTU.BID=10898
+INTU.ORG=Chase
+BANK_NAME=JPMorgan Chase Bank, N.A.
+URL=https://www.chase.com
+
+INTU.BID=01018
+INTU.ORG=Bank of America
+BANK_NAME=Bank of America, N.A.
+URL=https://www.bankofamerica.com
+
+INTU.BID=00018
+INTU.ORG=Citibank
+BANK_NAME=Citibank, N.A.
+URL=https://www.citibank.com
+
+INTU.BID=07050
+INTU.ORG=US Bank
+BANK_NAME=U.S. Bank National Association
+URL=https://www.usbank.com
+
+INTU.BID=04412
+INTU.ORG=PNC Bank
+BANK_NAME=PNC Bank, N.A.
+URL=https://www.pnc.com
+
+INTU.BID=06840
+INTU.ORG=Truist
+BANK_NAME=Truist Bank
+URL=https://www.truist.com
+
+INTU.BID=06210
+INTU.ORG=TD Bank
+BANK_NAME=TD Bank, N.A.
+URL=https://www.td.com
+
+INTU.BID=03278
+INTU.ORG=Capital One
+BANK_NAME=Capital One, N.A.
+URL=https://www.capitalone.com
+
+INTU.BID=05420
+INTU.ORG=Citizens Bank
+BANK_NAME=Citizens Bank, N.A.
+URL=https://www.citizensbank.com
+
+INTU.BID=02680
+INTU.ORG=Fifth Third Bank
+BANK_NAME=Fifth Third Bank
+URL=https://www.53.com
+
+INTU.BID=02510
+INTU.ORG=KeyBank
+BANK_NAME=KeyBank National Association
+URL=https://www.key.com
+
+INTU.BID=04230
+INTU.ORG=M&T Bank
+BANK_NAME=Manufacturers and Traders Trust Company
+URL=https://www.mtb.com
+
+INTU.BID=04860
+INTU.ORG=Regions Bank
+BANK_NAME=Regions Bank
+URL=https://www.regions.com
+
+INTU.BID=04920
+INTU.ORG=Huntington National Bank
+BANK_NAME=The Huntington National Bank
+URL=https://www.huntington.com
+
+INTU.BID=02125
+INTU.ORG=BMO Harris
+BANK_NAME=BMO Bank N.A.
+URL=https://www.bmoharris.com
+
+INTU.BID=06520
+INTU.ORG=Santander Bank
+BANK_NAME=Santander Bank, N.A.
+URL=https://www.santanderbank.com
+
+INTU.BID=07150
+INTU.ORG=Comerica
+BANK_NAME=Comerica Bank
+URL=https://www.comerica.com
+
+INTU.BID=05100
+INTU.ORG=First Horizon
+BANK_NAME=First Horizon Bank
+URL=https://www.firsthorizon.com
+
+INTU.BID=05950
+INTU.ORG=Discover Bank
+BANK_NAME=Discover Bank
+URL=https://www.discover.com
+
+INTU.BID=06022
+INTU.ORG=Ally Bank
+BANK_NAME=Ally Bank
+URL=https://www.ally.com
+
+INTU.BID=06024
+INTU.ORG=American Express
+BANK_NAME=American Express National Bank
+URL=https://www.americanexpress.com
+
+INTU.BID=06026
+INTU.ORG=Synchrony Bank
+BANK_NAME=Synchrony Bank
+URL=https://www.synchronybank.com
+
+INTU.BID=06028
+INTU.ORG=Marcus by Goldman Sachs
+BANK_NAME=Goldman Sachs Bank USA
+URL=https://www.marcus.com
+
+INTU.BID=06030
+INTU.ORG=Charles Schwab
+BANK_NAME=Charles Schwab Bank, SSB
+URL=https://www.schwab.com
+
+INTU.BID=06032
+INTU.ORG=Fidelity
+BANK_NAME=Fidelity Investments
+URL=https://www.fidelity.com
+
+INTU.BID=06034
+INTU.ORG=E*TRADE
+BANK_NAME=E*TRADE Bank
+URL=https://us.etrade.com
+
+INTU.BID=06036
+INTU.ORG=Vanguard
+BANK_NAME=The Vanguard Group, Inc.
+URL=https://www.vanguard.com
+
+INTU.BID=07520
+INTU.ORG=BNY Mellon
+BANK_NAME=The Bank of New York Mellon
+URL=https://www.bnymellon.com
+
+INTU.BID=07530
+INTU.ORG=State Street
+BANK_NAME=State Street Bank and Trust Company
+URL=https://www.statestreet.com
+
+INTU.BID=07540
+INTU.ORG=Northern Trust
+BANK_NAME=The Northern Trust Company
+URL=https://www.northerntrust.com
+
+INTU.BID=07550
+INTU.ORG=Silicon Valley Bank
+BANK_NAME=Silicon Valley Bank
+URL=https://www.svb.com
+
+INTU.BID=07560
+INTU.ORG=First Republic Bank
+BANK_NAME=First Republic Bank
+URL=https://www.firstrepublic.com
+
+INTU.BID=07570
+INTU.ORG=Signature Bank
+BANK_NAME=Signature Bank
+URL=https://www.signatureny.com
+
+INTU.BID=07580
+INTU.ORG=Western Alliance Bank
+BANK_NAME=Western Alliance Bank
+URL=https://www.westernalliancebank.com
+
+INTU.BID=07590
+INTU.ORG=Pacific Western Bank
+BANK_NAME=Pacific Western Bank
+URL=https://www.pacwest.com
+
+INTU.BID=07600
+INTU.ORG=Zions Bank
+BANK_NAME=Zions Bank
+URL=https://www.zionsbank.com
+
+INTU.BID=07610
+INTU.ORG=Frost Bank
+BANK_NAME=Frost Bank
+URL=https://www.frostbank.com
+
+INTU.BID=07620
+INTU.ORG=BOK Financial
+BANK_NAME=BOK Financial Corporation
+URL=https://www.bokfinancial.com
+
+INTU.BID=07630
+INTU.ORG=Bank of Hawaii
+BANK_NAME=Bank of Hawaii
+URL=https://www.boh.com
+
+INTU.BID=07640
+INTU.ORG=First Hawaiian Bank
+BANK_NAME=First Hawaiian Bank
+URL=https://www.fhb.com
+
+INTU.BID=07650
+INTU.ORG=Webster Bank
+BANK_NAME=Webster Bank, N.A.
+URL=https://www.websterbank.com
+
+INTU.BID=07660
+INTU.ORG=Synovus
+BANK_NAME=Synovus Bank
+URL=https://www.synovus.com
+
+INTU.BID=07670
+INTU.ORG=Cullen/Frost Bankers
+BANK_NAME=Cullen/Frost Bankers, Inc.
+URL=https://www.cullenfrost.com
+
+INTU.BID=07680
+INTU.ORG=Old National Bank
+BANK_NAME=Old National Bank
+URL=https://www.oldnational.com
+
+INTU.BID=07690
+INTU.ORG=East West Bank
+BANK_NAME=East West Bank
+URL=https://www.eastwestbank.com
+
+INTU.BID=07700
+INTU.ORG=Cathay Bank
+BANK_NAME=Cathay Bank
+URL=https://www.cathaybank.com
+
+INTU.BID=07710
+INTU.ORG=Bank of the West
+BANK_NAME=Bank of the West
+URL=https://www.bankofthewest.com
+
+INTU.BID=07720
+INTU.ORG=City National Bank
+BANK_NAME=City National Bank
+URL=https://www.cnb.com
+
+INTU.BID=07730
+INTU.ORG=Mechanics Bank
+BANK_NAME=Mechanics Bank
+URL=https://www.mechanicsbank.com
+
+INTU.BID=07740
+INTU.ORG=People's United Bank
+BANK_NAME=People's United Bank, N.A.
+URL=https://www.peoples.com
+
+INTU.BID=07750
+INTU.ORG=Investors Bank
+BANK_NAME=Investors Bank
+URL=https://www.investorsbank.com
+
+INTU.BID=07760
+INTU.ORG=Sterling National Bank
+BANK_NAME=Sterling National Bank
+URL=https://www.snb.com
+
+INTU.BID=07770
+INTU.ORG=Apple Bank for Savings
+BANK_NAME=Apple Bank for Savings
+URL=https://www.applebank.com
+
+INTU.BID=07780
+INTU.ORG=Emigrant Bank
+BANK_NAME=Emigrant Bank
+URL=https://www.emigrant.com
+
+INTU.BID=07790
+INTU.ORG=Amalgamated Bank
+BANK_NAME=Amalgamated Bank
+URL=https://www.amalgamatedbank.com
+
+INTU.BID=07800
+INTU.ORG=Citizens Financial Group
+BANK_NAME=Citizens Financial Group, Inc.
+URL=https://www.citizensbank.com
+
+INTU.BID=07810
+INTU.ORG=Eastern Bank
+BANK_NAME=Eastern Bank
+URL=https://www.easternbank.com
+
+INTU.BID=07820
+INTU.ORG=Rockland Trust
+BANK_NAME=Rockland Trust Company
+URL=https://www.rocklandtrust.com
+
+INTU.BID=07830
+INTU.ORG=Bangor Savings Bank
+BANK_NAME=Bangor Savings Bank
+URL=https://www.bangor.com
+
+INTU.BID=07840
+INTU.ORG=KeyBank Maine
+BANK_NAME=KeyBank — Maine Region
+URL=https://www.key.com
+
+INTU.BID=07850
+INTU.ORG=Camden National Bank
+BANK_NAME=Camden National Bank
+URL=https://www.camdennational.com
+
+INTU.BID=07860
+INTU.ORG=Berkshire Bank
+BANK_NAME=Berkshire Bank
+URL=https://www.berkshirebank.com
+
+INTU.BID=07870
+INTU.ORG=Independence Bank
+BANK_NAME=Independence Bank of Kentucky
+URL=https://www.1776bank.com
+
+INTU.BID=07880
+INTU.ORG=Pinnacle Bank
+BANK_NAME=Pinnacle Bank
+URL=https://www.pnfp.com
+
+INTU.BID=07890
+INTU.ORG=BancorpSouth
+BANK_NAME=BancorpSouth Bank
+URL=https://www.bxs.com
+
+INTU.BID=07900
+INTU.ORG=Trustmark
+BANK_NAME=Trustmark National Bank
+URL=https://www.trustmark.com
+
+INTU.BID=07910
+INTU.ORG=United Community Bank
+BANK_NAME=United Community Bank
+URL=https://www.ucbi.com
+
+INTU.BID=07920
+INTU.ORG=Renasant Bank
+BANK_NAME=Renasant Bank
+URL=https://www.renasantbank.com
+
+INTU.BID=07930
+INTU.ORG=Hancock Whitney
+BANK_NAME=Hancock Whitney Bank
+URL=https://www.hancockwhitney.com
+
+INTU.BID=07940
+INTU.ORG=Cadence Bank
+BANK_NAME=Cadence Bank
+URL=https://www.cadencebank.com
+
+INTU.BID=07950
+INTU.ORG=Texas Capital Bank
+BANK_NAME=Texas Capital Bank
+URL=https://www.texascapitalbank.com
+
+INTU.BID=07960
+INTU.ORG=Prosperity Bank
+BANK_NAME=Prosperity Bank
+URL=https://www.prosperitybankusa.com
+
+INTU.BID=07970
+INTU.ORG=Plains Capital Bank
+BANK_NAME=PlainsCapital Bank
+URL=https://www.plainscapital.com
+
+INTU.BID=07980
+INTU.ORG=Independent Bank Texas
+BANK_NAME=Independent Bank
+URL=https://www.ibtx.com
+
+INTU.BID=07990
+INTU.ORG=Commerce Bank
+BANK_NAME=Commerce Bank
+URL=https://www.commercebank.com
+
+INTU.BID=08000
+INTU.ORG=Arvest Bank
+BANK_NAME=Arvest Bank
+URL=https://www.arvest.com
+
+INTU.BID=08010
+INTU.ORG=Simmons Bank
+BANK_NAME=Simmons Bank
+URL=https://www.simmonsbank.com
+
+INTU.BID=08020
+INTU.ORG=Bank of Oklahoma
+BANK_NAME=Bank of Oklahoma
+URL=https://www.bankofoklahoma.com
+
+INTU.BID=08030
+INTU.ORG=Mercantile Bank
+BANK_NAME=Mercantile Bank of Michigan
+URL=https://www.mercbank.com
+
+INTU.BID=08040
+INTU.ORG=Independent Bank Michigan
+BANK_NAME=Independent Bank
+URL=https://www.independentbank.com
+
+INTU.BID=08050
+INTU.ORG=Flagstar Bank
+BANK_NAME=Flagstar Bank, N.A.
+URL=https://www.flagstar.com
+
+INTU.BID=08060
+INTU.ORG=Chemical Bank
+BANK_NAME=Chemical Bank
+URL=https://www.chemicalbankmi.com
+
+INTU.BID=08070
+INTU.ORG=Macatawa Bank
+BANK_NAME=Macatawa Bank
+URL=https://www.macatawabank.com
+
+INTU.BID=08080
+INTU.ORG=Lake Michigan Credit Union
+BANK_NAME=Lake Michigan Credit Union
+URL=https://www.lmcu.org
+
+INTU.BID=08090
+INTU.ORG=Navy Federal Credit Union
+BANK_NAME=Navy Federal Credit Union
+URL=https://www.navyfederal.org
+
+INTU.BID=08100
+INTU.ORG=PenFed Credit Union
+BANK_NAME=Pentagon Federal Credit Union
+URL=https://www.penfed.org
+
+INTU.BID=08110
+INTU.ORG=USAA
+BANK_NAME=USAA Federal Savings Bank
+URL=https://www.usaa.com
+
+INTU.BID=08120
+INTU.ORG=Alliant Credit Union
+BANK_NAME=Alliant Credit Union
+URL=https://www.alliantcreditunion.org
+
+INTU.BID=08130
+INTU.ORG=BECU
+BANK_NAME=Boeing Employees' Credit Union
+URL=https://www.becu.org
+
+INTU.BID=08140
+INTU.ORG=SchoolsFirst Federal Credit Union
+BANK_NAME=SchoolsFirst Federal Credit Union
+URL=https://www.schoolsfirstfcu.org
+
+INTU.BID=08150
+INTU.ORG=State Employees Credit Union
+BANK_NAME=State Employees' Credit Union
+URL=https://www.ncsecu.org
+
+INTU.BID=08160
+INTU.ORG=Suncoast Credit Union
+BANK_NAME=Suncoast Credit Union
+URL=https://www.suncoastcreditunion.com
+
+INTU.BID=08170
+INTU.ORG=America First Credit Union
+BANK_NAME=America First Credit Union
+URL=https://www.americafirst.com
+
+INTU.BID=08180
+INTU.ORG=Mountain America Credit Union
+BANK_NAME=Mountain America Credit Union
+URL=https://www.macu.com
+
+INTU.BID=08190
+INTU.ORG=Randolph-Brooks Federal Credit Union
+BANK_NAME=Randolph-Brooks Federal Credit Union
+URL=https://www.rbfcu.org
+
+INTU.BID=08200
+INTU.ORG=Security Service Federal Credit Union
+BANK_NAME=Security Service Federal Credit Union
+URL=https://www.ssfcu.org
+
+INTU.BID=08210
+INTU.ORG=Digital Federal Credit Union
+BANK_NAME=Digital Federal Credit Union
+URL=https://www.dcu.org
+
+INTU.BID=08220
+INTU.ORG=Bethpage Federal Credit Union
+BANK_NAME=Bethpage Federal Credit Union
+URL=https://www.bethpagefcu.com
+
+INTU.BID=08230
+INTU.ORG=ESL Federal Credit Union
+BANK_NAME=ESL Federal Credit Union
+URL=https://www.esl.org
+
+INTU.BID=08240
+INTU.ORG=Star One Credit Union
+BANK_NAME=Star One Credit Union
+URL=https://www.starone.org
+
+INTU.BID=08250
+INTU.ORG=First Tech Federal Credit Union
+BANK_NAME=First Technology Federal Credit Union
+URL=https://www.firsttechfed.com
+
+INTU.BID=08260
+INTU.ORG=GTE Financial
+BANK_NAME=GTE Financial Credit Union
+URL=https://www.gtefinancial.org
+
+INTU.BID=08270
+INTU.ORG=NASA Federal Credit Union
+BANK_NAME=NASA Federal Credit Union
+URL=https://www.nasafcu.com
+
+INTU.BID=08280
+INTU.ORG=Texas Tech Credit Union
+BANK_NAME=Texas Tech Credit Union
+URL=https://www.texastechfcu.org
+
+INTU.BID=08290
+INTU.ORG=Apple Federal Credit Union
+BANK_NAME=Apple Federal Credit Union
+URL=https://www.applefcu.org
+
+INTU.BID=08300
+INTU.ORG=Tower Federal Credit Union
+BANK_NAME=Tower Federal Credit Union
+URL=https://www.towerfcu.org
+
+INTU.BID=08310
+INTU.ORG=Alaska USA Federal Credit Union
+BANK_NAME=Global Credit Union
+URL=https://www.alaskausa.org
+
+INTU.BID=08320
+INTU.ORG=America's Credit Union
+BANK_NAME=America's Credit Union
+URL=https://www.americascu.org
+
+INTU.BID=08330
+INTU.ORG=Andrews Federal Credit Union
+BANK_NAME=Andrews Federal Credit Union
+URL=https://www.andrewsfcu.org
+
+INTU.BID=08340
+INTU.ORG=Connexus Credit Union
+BANK_NAME=Connexus Credit Union
+URL=https://www.connexuscu.org
+
+INTU.BID=08350
+INTU.ORG=Consumers Credit Union
+BANK_NAME=Consumers Credit Union
+URL=https://www.myconsumers.org
+
+INTU.BID=08360
+INTU.ORG=Eastman Credit Union
+BANK_NAME=Eastman Credit Union
+URL=https://www.ecu.org
+
+INTU.BID=08370
+INTU.ORG=Hudson Valley Credit Union
+BANK_NAME=Hudson Valley Credit Union
+URL=https://www.hvcu.org
+
+INTU.BID=08380
+INTU.ORG=Idaho Central Credit Union
+BANK_NAME=Idaho Central Credit Union
+URL=https://www.iccu.com
+
+INTU.BID=08390
+INTU.ORG=KeyPoint Credit Union
+BANK_NAME=KeyPoint Credit Union
+URL=https://www.kpcu.com
+
+INTU.BID=08400
+INTU.ORG=Kinecta Federal Credit Union
+BANK_NAME=Kinecta Federal Credit Union
+URL=https://www.kinecta.org
+
+INTU.BID=08410
+INTU.ORG=Logix Federal Credit Union
+BANK_NAME=Logix Federal Credit Union
+URL=https://www.logixbanking.com
+
+INTU.BID=08420
+INTU.ORG=Mountain America Federal Credit Union
+BANK_NAME=Mountain America Federal Credit Union
+URL=https://www.macu.com
+
+INTU.BID=08430
+INTU.ORG=Pennsylvania State Employees Credit Union
+BANK_NAME=Pennsylvania State Employees Credit Union
+URL=https://www.psecu.com
+
+INTU.BID=08440
+INTU.ORG=Premier America Credit Union
+BANK_NAME=Premier America Credit Union
+URL=https://www.premieramerica.com
+
+INTU.BID=08450
+INTU.ORG=Provident Credit Union
+BANK_NAME=Provident Credit Union
+URL=https://www.providentcu.org
+
+INTU.BID=08460
+INTU.ORG=San Diego County Credit Union
+BANK_NAME=San Diego County Credit Union
+URL=https://www.sdccu.com
+
+INTU.BID=08470
+INTU.ORG=SAFE Credit Union
+BANK_NAME=SAFE Credit Union
+URL=https://www.safecu.org
+
+INTU.BID=08480
+INTU.ORG=Self-Help Credit Union
+BANK_NAME=Self-Help Credit Union
+URL=https://www.self-helpfcu.org
+
+INTU.BID=08490
+INTU.ORG=Service Credit Union
+BANK_NAME=Service Credit Union
+URL=https://www.servicecu.org
+
+INTU.BID=08500
+INTU.ORG=Stanford Federal Credit Union
+BANK_NAME=Stanford Federal Credit Union
+URL=https://www.sfcu.org

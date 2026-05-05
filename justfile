@@ -16,7 +16,7 @@ seed:
     pnpm db:seed
 
 fidir-refresh:
-    @echo "fidir:refresh — implemented in Phase 5"
+    pnpm --filter @vibe-tx-converter/api run db:fidir-seed
 
 up:
     docker compose --profile standalone up -d

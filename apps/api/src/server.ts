@@ -10,6 +10,7 @@ import { errorHandler, notFoundHandler } from './middleware/error-handler.js';
 import { csrf, csrfTokenHandler } from './middleware/csrf.js';
 import { unauthRateLimiter } from './middleware/rate-limit.js';
 import { requestId } from './middleware/request-id.js';
+import { fidirRouter } from './routes/fidir.js';
 import { healthRouter } from './routes/health.js';
 import { versionRouter } from './routes/version.js';
 
@@ -66,6 +67,7 @@ export const createApp = (): Express => {
   app.get('/api/auth/csrf', csrfTokenHandler);
   app.use('/api/health', healthRouter());
   app.use('/api', versionRouter());
+  app.use('/api/fidir', fidirRouter());
 
   app.use(notFoundHandler);
   app.use(errorHandler);
