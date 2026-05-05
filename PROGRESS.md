@@ -34,11 +34,11 @@ build).
 | 25    | Audit Log                                    | ✅     | `d22cccd` | append-only viewer                  |
 | 26    | Admin / Settings                             | ✅     | `d22cccd` | LLM provider + FIDIR refresh        |
 | 27    | Testing — Unit, Integration, E2E             | ⚠      | —         | unit + supertest exist; E2E TBD     |
-| 28    | Standalone Docker Compose                    | ✅     | _next_    | full multi-service compose          |
-| 29    | Vibe Appliance Mode + Manifest               | ✅     | _next_    | appliance.manifest.json + overlay   |
-| 30    | GHCR Publishing & Release Automation         | ✅     | _next_    | signed images + SBOM + Trivy        |
-| 31    | Documentation Pass                           | ✅     | _next_    | operator + user + api + data-flow   |
-| 32    | Final QA & Release Checklist                 | ✅     | _next_    | full pnpm acceptance green          |
+| 28    | Standalone Docker Compose                    | ✅     | `51c7f17` | full multi-service compose          |
+| 29    | Vibe Appliance Mode + Manifest               | ✅     | `51c7f17` | appliance.manifest.json + overlay   |
+| 30    | GHCR Publishing & Release Automation         | ✅     | `51c7f17` | signed images + SBOM + Trivy        |
+| 31    | Documentation Pass                           | ✅     | `51c7f17` | operator + user + api + data-flow   |
+| 32    | Final QA & Release Checklist                 | ✅     | `51c7f17` | full pnpm acceptance green          |
 
 Legend: ✅ done · ⏳ in progress · ⏸ pending · ⚠ partial (deferred)
 
