@@ -227,11 +227,58 @@ export class AnthropicProvider implements LlmProvider {
   }
 
   async health(): Promise<{ ok: boolean; detail?: string }> {
-    // No public health endpoint — treat presence of the API key as the
-    // signal. A real "ping" would consume tokens, which is not worth it.
-    return this.apiKey.length > 0
-      ? { ok: true }
-      : { ok: false, detail: 'ANTHROPIC_API_KEY not set' };
+    if (!this.apiKey) return { ok: false, detail: 'ANTHROPIC_API_KEY not set' };
+    // Hit /v1/models to confirm the key is actually valid. This endpoint
+    // is in the public Anthropic API surface and doesn't burn message
+    // tokens — it returns the list of models the key can use.
+    // 401 → key is wrong; 200 → key works. 5s timeout.
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), 5_000);
+    try {
+      const res = await this.fetcher(`${this.baseUrl}/v1/models`, {
+        headers: {
+          'x-api-key': this.apiKey,
+          'anthropic-version': '2023-06-01',
+        },
+        signal: ctl.signal,
+      });
+      if (res.status === 401) return { ok: false, detail: 'API key is invalid (401)' };
+      if (res.status === 403) return { ok: false, detail: 'API key forbidden (403)' };
+      if (!res.ok) return { ok: false, detail: `Anthropic /v1/models HTTP ${res.status}` };
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, detail: (err as Error).message };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  // Phase 26 #29: list the models this key can access. Used by the
+  // /admin/llm-provider page to populate the model dropdown so it
+  // tracks Anthropic's catalog instead of being hardcoded.
+  async listModels(): Promise<{ ok: boolean; models: string[]; detail?: string }> {
+    if (!this.apiKey) return { ok: false, models: [], detail: 'ANTHROPIC_API_KEY not set' };
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), 5_000);
+    try {
+      const res = await this.fetcher(`${this.baseUrl}/v1/models`, {
+        headers: {
+          'x-api-key': this.apiKey,
+          'anthropic-version': '2023-06-01',
+        },
+        signal: ctl.signal,
+      });
+      if (!res.ok) {
+        return { ok: false, models: [], detail: `Anthropic /v1/models HTTP ${res.status}` };
+      }
+      const body = (await res.json()) as { data?: Array<{ id?: string }> };
+      const models = (body.data ?? []).map((m) => m.id ?? '').filter((id) => id.length > 0);
+      return { ok: true, models };
+    } catch (err) {
+      return { ok: false, models: [], detail: (err as Error).message };
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   async extract(markdown: string, arg?: ExtractOptions | object): Promise<ExtractResult> {

@@ -20,7 +20,7 @@ import {
   type EngineKey,
 } from '../services/engines.js';
 import { buildProvider, invalidateProviderCache } from '../services/llm-provider.js';
-import { probeGlmOcrHealth } from '@vibe-tx-converter/extractor';
+import { AnthropicProvider, probeGlmOcrHealth } from '@vibe-tx-converter/extractor';
 import { extractionQueue } from '../jobs/queues.js';
 import { logger } from '../lib/logger.js';
 
@@ -29,14 +29,18 @@ const ANTHROPIC_KEY = 'llm.anthropic.api_key';
 const ANTHROPIC_MODEL = 'llm.anthropic.model';
 const MONTHLY_CAP_KEY = 'llm.anthropic.monthly_cap_usd';
 
-// Phase 26 #29: only the Claude family is supported on the Anthropic
-// path. Newer models go here; the UI surfaces this list and rejects
-// anything else server-side.
-const ALLOWED_ANTHROPIC_MODELS = [
+// Phase 26 #29: curated Claude family with known pricing in the
+// extractor's price table. Anything matching CLAUDE_PATTERN is also
+// accepted server-side so operators can use newer models that haven't
+// landed in our pricing table yet — cost calculation falls back to
+// "0 micros" for unknown models, so operators see usage but no cost
+// estimate until we update the table.
+const CURATED_ANTHROPIC_MODELS = [
   'claude-opus-4-7',
   'claude-sonnet-4-6',
   'claude-haiku-4-5-20251001',
 ] as const;
+const CLAUDE_PATTERN = /^claude-[a-z0-9-]+$/i;
 
 export const adminRouter = (): Router => {
   const router = Router();
@@ -79,7 +83,7 @@ export const adminRouter = (): Router => {
         anthropicModel: modelRows[0]?.valuePlaintext ?? null,
         anthropicKeyConfigured: lastFour !== null,
         anthropicKeyLastFour: lastFour,
-        allowedModels: ALLOWED_ANTHROPIC_MODELS,
+        allowedModels: CURATED_ANTHROPIC_MODELS,
         monthlyCapUsd: capRows[0]?.valuePlaintext
           ? Number.parseFloat(capRows[0].valuePlaintext)
           : null,
@@ -144,8 +148,10 @@ export const adminRouter = (): Router => {
   router.post('/llm-provider/anthropic-model', async (req, res, next) => {
     try {
       const model = String(req.body?.model ?? '').trim();
-      if (!ALLOWED_ANTHROPIC_MODELS.includes(model as never)) {
-        throw new ValidationError(`model must be one of: ${ALLOWED_ANTHROPIC_MODELS.join(', ')}`);
+      if (!CLAUDE_PATTERN.test(model)) {
+        throw new ValidationError(
+          `model must look like 'claude-...' (got: ${JSON.stringify(model)})`,
+        );
       }
       await db
         .insert(systemSettings)
@@ -230,9 +236,48 @@ export const adminRouter = (): Router => {
   // health() and returns a structured result. Doesn't consume tokens
   // for Anthropic (presence-of-key check); does hit /health for the
   // local gateway.
+  // Phase 26 #29: live model catalog. Hits Anthropic's /v1/models with
+  // the configured key; returns the union of (curated list) + (live
+  // list) so operators see both well-priced models and any new arrivals.
+  // Returns the curated list alone when no key is configured.
+  router.get('/llm-provider/anthropic-models', async (_req, res, next) => {
+    try {
+      const provider = await buildProvider(db).catch(() => null);
+      const live: string[] = [];
+      if (provider && provider.id === 'anthropic') {
+        const result = await (provider as AnthropicProvider).listModels();
+        if (result.ok) live.push(...result.models);
+      }
+      const merged = Array.from(new Set([...CURATED_ANTHROPIC_MODELS, ...live])).sort();
+      res.json({
+        models: merged,
+        curated: CURATED_ANTHROPIC_MODELS,
+        liveCount: live.length,
+        // null when key is unset or the listing failed; operators can
+        // still type any claude-* string into the custom-id input.
+        hasLiveCatalog: live.length > 0,
+      });
+    } catch (err) {
+      next(err);
+    }
+  });
+
   router.post('/llm-provider/test', async (_req, res, next) => {
     try {
-      const provider = await buildProvider(db);
+      // buildProvider throws when provider=anthropic and there's no
+      // API key in DB or env. Catch it so the UI gets a structured
+      // {ok:false} instead of a confusing 500.
+      let provider: Awaited<ReturnType<typeof buildProvider>>;
+      try {
+        provider = await buildProvider(db);
+      } catch (err) {
+        res.json({
+          provider: 'unknown',
+          ok: false,
+          detail: (err as Error).message,
+        });
+        return;
+      }
       const health = await provider.health();
       res.json({
         provider: provider.id,

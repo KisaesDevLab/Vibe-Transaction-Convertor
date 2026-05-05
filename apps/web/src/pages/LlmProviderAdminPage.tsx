@@ -262,23 +262,11 @@ export function LlmProviderAdminPage() {
       ) : null}
 
       {provider.data ? (
-        <section className="rounded-lg border border-surface-muted bg-white p-4">
-          <h2 className="text-base font-medium">Model</h2>
-          <p className="mt-1 text-xs text-ink-subtle">
-            Pricing per ADR-020 + the table at <code>packages/extractor/src/llm-client.ts</code>.
-          </p>
-          <select
-            className="mt-2 w-full rounded-md border border-surface-muted bg-white px-3 py-2 text-sm"
-            value={provider.data.anthropicModel ?? provider.data.allowedModels[0]}
-            onChange={(e) => setModel.mutate(e.target.value)}
-          >
-            {provider.data.allowedModels.map((m) => (
-              <option key={m} value={m}>
-                {m}
-              </option>
-            ))}
-          </select>
-        </section>
+        <ModelSection
+          currentModel={provider.data.anthropicModel}
+          curated={provider.data.allowedModels}
+          onChange={(m) => setModel.mutate(m)}
+        />
       ) : null}
 
       {provider.data ? (
@@ -321,6 +309,123 @@ export function LlmProviderAdminPage() {
           <p className="mt-2 text-sm text-ink-muted">Loading…</p>
         )}
       </section>
+    </section>
+  );
+}
+
+// Phase 26 #29 — model picker that tracks Anthropic's live catalog when
+// a key is configured. Operators can pick from the curated list (with
+// known pricing in our table) or type any `claude-*` id directly to use
+// a model not yet curated. The /v1/models endpoint is hit on demand via
+// useQuery; cost calculation falls back to "0 micros" for unpriced
+// models, so usage is still tracked but USD totals will under-report
+// until we update the price table.
+function ModelSection({
+  currentModel,
+  curated,
+  onChange,
+}: {
+  currentModel: string | null;
+  curated: readonly string[];
+  onChange: (model: string) => void;
+}) {
+  const [advanced, setAdvanced] = useState(false);
+  const [customId, setCustomId] = useState('');
+
+  const live = useQuery({
+    queryKey: ['admin', 'anthropic-models'],
+    queryFn: () =>
+      api.get<{ models: string[]; curated: string[]; liveCount: number; hasLiveCatalog: boolean }>(
+        '/api/admin/llm-provider/anthropic-models',
+      ),
+    staleTime: 5 * 60_000, // /v1/models is stable for minutes; 5min cache is fine
+  });
+
+  const allModels = live.data?.models ?? curated;
+  const inCatalog = currentModel ? allModels.includes(currentModel) : false;
+
+  const onSelect = (m: string): void => {
+    onChange(m);
+    setCustomId('');
+  };
+
+  const onSaveCustom = (): void => {
+    const trimmed = customId.trim();
+    if (trimmed.length > 0) onChange(trimmed);
+  };
+
+  return (
+    <section className="rounded-lg border border-surface-muted bg-white p-4">
+      <header className="flex items-baseline justify-between">
+        <h2 className="text-base font-medium">Model</h2>
+        {live.data ? (
+          <span className="text-xs text-ink-subtle">
+            {live.data.hasLiveCatalog
+              ? `live catalog · ${live.data.liveCount} models from Anthropic`
+              : 'showing curated list (set a key to sync live catalog)'}
+          </span>
+        ) : null}
+      </header>
+      <p className="mt-1 text-xs text-ink-subtle">
+        Pricing per ADR-020. Models in the curated list have known per-token costs; operator-typed
+        models still work but cost rollups read $0 until the price table gets updated.
+      </p>
+
+      <select
+        className="mt-2 w-full rounded-md border border-surface-muted bg-white px-3 py-2 text-sm"
+        value={inCatalog ? (currentModel ?? '') : ''}
+        onChange={(e) => onSelect(e.target.value)}
+      >
+        <option value="" disabled>
+          — pick a model —
+        </option>
+        {allModels.map((m) => (
+          <option key={m} value={m}>
+            {m}
+            {curated.includes(m) ? ' · curated' : ''}
+          </option>
+        ))}
+        {currentModel && !inCatalog ? (
+          <option value={currentModel}>{currentModel} · custom (current)</option>
+        ) : null}
+      </select>
+      {currentModel && !inCatalog ? (
+        <p className="mt-1 text-xs text-amber-700">
+          Current model <code className="rounded bg-surface-subtle px-1">{currentModel}</code>{' '}
+          isn&apos;t in the live catalog or curated list. Worker will still call it; cost rollups
+          will under-report until pricing lands.
+        </p>
+      ) : null}
+
+      <div className="mt-3 border-t border-surface-muted pt-3">
+        <label className="flex items-center gap-2 text-xs">
+          <input
+            type="checkbox"
+            checked={advanced}
+            onChange={(e) => setAdvanced(e.target.checked)}
+          />
+          Advanced: type a custom model id (for newer models not yet in our table)
+        </label>
+        {advanced ? (
+          <div className="mt-2 flex gap-2">
+            <input
+              type="text"
+              placeholder="claude-opus-5-0"
+              value={customId}
+              onChange={(e) => setCustomId(e.target.value)}
+              className="flex-1 rounded-md border border-surface-muted px-3 py-1.5 text-sm font-mono"
+            />
+            <button
+              type="button"
+              onClick={onSaveCustom}
+              disabled={!customId.trim().match(/^claude-/i)}
+              className="rounded-md border border-surface-muted px-3 py-1.5 text-xs disabled:opacity-50"
+            >
+              Use
+            </button>
+          </div>
+        ) : null}
+      </div>
     </section>
   );
 }
