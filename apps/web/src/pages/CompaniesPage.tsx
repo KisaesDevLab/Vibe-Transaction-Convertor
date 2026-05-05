@@ -1,4 +1,5 @@
 import { type FormEvent, useState } from 'react';
+import { Link } from 'react-router-dom';
 
 import {
   useCompanies,
@@ -162,7 +163,9 @@ function CompanyRow({ company }: { company: Company }) {
         ) : (
           <>
             <div>
-              <p className="font-medium">{company.name}</p>
+              <Link to={`/companies/${company.id}`} className="font-medium hover:underline">
+                {company.name}
+              </Link>
               <p className="text-xs text-ink-subtle">
                 {company.accountCount} account{company.accountCount === 1 ? '' : 's'}
                 {' · '}created {new Date(company.createdAt).toLocaleDateString()}

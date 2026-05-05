@@ -13,8 +13,8 @@ typecheck → lint → test → build).
 | 4     | API Scaffolding & Health                     | ✅     | `ae36853` | health/ready/version + 7 supertests |
 | 5     | FIDIR Mirror, Parser, Seeder                 | ✅     | `36c2ac8` | 127-bank starter + parser + routes  |
 | 6     | Auth & Session                               | ✅     | `331c6f2` | argon2 + cookie sessions + admin    |
-| 7     | Companies CRUD (API + UI)                    | ✅     | _next_    | CRUD + 8 supertests + minimal UI    |
-| 8     | Accounts CRUD with Bank Picker               | ⏸      | —         |                                     |
+| 7     | Companies CRUD (API + UI)                    | ✅     | `2e53a6a` | CRUD + 8 supertests + minimal UI    |
+| 8     | Accounts CRUD with Bank Picker               | ✅     | _next_    | masking + ABA + 7 supertests + UI   |
 | 9     | PDF Upload, Storage, Hashing                 | ⏸      | —         |                                     |
 | 10    | PDF Pre-Processing & Routing                 | ⏸      | —         |                                     |
 | 11    | GLM-OCR HTTP Client                          | ⏸      | —         |                                     |

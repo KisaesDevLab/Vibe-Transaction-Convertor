@@ -11,6 +11,7 @@ import { loadSession, requireAuth } from './middleware/auth.js';
 import { csrf, csrfTokenHandler } from './middleware/csrf.js';
 import { unauthRateLimiter } from './middleware/rate-limit.js';
 import { requestId } from './middleware/request-id.js';
+import { accountsByCompanyRouter, accountsRouter } from './routes/accounts.js';
 import { authRouter, usersRouter } from './routes/auth.js';
 import { companiesRouter } from './routes/companies.js';
 import { fidirRouter } from './routes/fidir.js';
@@ -76,6 +77,8 @@ export const createApp = (): Express => {
   app.use('/api/users', requireAuth, usersRouter());
   app.use('/api/fidir', requireAuth, fidirRouter());
   app.use('/api/companies', requireAuth, companiesRouter());
+  app.use('/api/companies/:companyId/accounts', requireAuth, accountsByCompanyRouter());
+  app.use('/api/accounts', requireAuth, accountsRouter());
 
   app.use(notFoundHandler);
   app.use(errorHandler);
