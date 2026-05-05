@@ -74,33 +74,49 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
     sourcePdfPages: analysis.pageCount,
   });
 
+  // Phase 14: when this statement is a per-account slice (page_range
+  // set), filter pages to that range BEFORE handing markdown to the LLM.
+  // The LLM sees one account's slice as if it were the whole PDF.
+  const pageRange = stmtRows[0]?.pageRange ?? null;
+  const inRange = (pageIndex0: number): boolean => {
+    if (!pageRange) return true;
+    const page1 = pageIndex0 + 1;
+    return page1 >= pageRange.start && page1 <= pageRange.end;
+  };
+
   let markdown: string;
 
   if (method === 'text') {
     const pages = await extractTextLayerFromBuffer(await readFile(data.sourcePdfPath));
-    markdown = pages.map((p) => `# Page ${p.index + 1}\n\n${p.text}`).join('\n\n');
-    // Persist detected splits so the UI can offer a confirmation flow.
-    // The user can either acknowledge ('whole PDF is one account, proceed')
-    // or upload pages separately. Phase 14.
-    const splitInfo = detectMultiAccount(pages);
-    if (splitInfo.multiAccount) {
-      await db
-        .update(statements)
-        .set({ detectedSplits: splitInfo, updatedAt: sql`now()` })
-        .where(eq(statements.id, stmtId));
-      logger.warn(
-        { stmtId, splits: splitInfo.splits },
-        'multi-account PDF detected; persisted splits for UI confirmation',
-      );
+    const scoped = pages.filter((p) => inRange(p.index));
+    markdown = scoped.map((p) => `# Page ${p.index + 1}\n\n${p.text}`).join('\n\n');
+    // Persist detected splits so the UI can offer a split-or-acknowledge
+    // flow. Only run detection on un-split (whole-PDF) extractions —
+    // sliced re-extractions are by definition single-account already.
+    if (!pageRange) {
+      const splitInfo = detectMultiAccount(pages);
+      if (splitInfo.multiAccount) {
+        await db
+          .update(statements)
+          .set({ detectedSplits: splitInfo, updatedAt: sql`now()` })
+          .where(eq(statements.id, stmtId));
+        logger.warn(
+          { stmtId, splits: splitInfo.splits },
+          'multi-account PDF detected; persisted splits for UI confirmation',
+        );
+      }
     }
   } else {
     // OCR path. rasterizePdf shells out to pdftoppm (poppler-utils).
     // The standalone Dockerfile installs poppler; on host machines the
     // operator needs `brew install poppler` (or apt/choco equivalent).
     const rasters = await rasterizePdf(data.sourcePdfPath, { dpi: 300 });
-    const images = await Promise.all(rasters.map(async (r) => readFile(r.pngPath)));
+    const scopedRasters = rasters.filter((r) => inRange(r.index));
+    const images = await Promise.all(scopedRasters.map(async (r) => readFile(r.pngPath)));
     const ocr = await ocrPdfPages(images);
-    markdown = ocr.pages.map((p) => `# Page ${p.index + 1}\n\n${p.markdown}`).join('\n\n');
+    markdown = ocr.pages
+      .map((p, i) => `# Page ${(scopedRasters[i]?.index ?? p.index) + 1}\n\n${p.markdown}`)
+      .join('\n\n');
   }
 
   // LLM extraction. Pass the JSON Schema explicitly so the local Vibe

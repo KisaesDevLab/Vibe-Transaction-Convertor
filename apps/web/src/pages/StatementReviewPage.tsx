@@ -12,12 +12,16 @@ import {
   useConfirmDateFormat,
   useDeleteTransaction,
   useReExtract,
+  useSplitStatement,
   useStatement,
   useUpdateTransaction,
   type TransactionRow,
 } from '../hooks/useStatementsList';
+import { useAccount } from '../hooks/useStatements';
+import { useAccounts } from '../hooks/useAccounts';
 import { useMe } from '../hooks/useAuth';
 import { ApiError } from '../lib/api';
+import { SplitStatementModal } from '../components/SplitStatementModal';
 
 const FORMATS: Array<{ value: string; label: string }> = [
   { value: 'csv-qbo3', label: 'CSV (QBO 3-col)' },
@@ -83,10 +87,16 @@ export function StatementReviewPage() {
   const reExtract = useReExtract(statementId);
   const confirmFormat = useConfirmDateFormat(statementId);
   const ackMultiAccount = useAcknowledgeMultiAccount(statementId);
+  const splitStmt = useSplitStatement(statementId);
   const me = useMe();
   const isAdmin = me.data?.role === 'admin';
   const toast = useToast();
   const [selectedTx, setSelectedTx] = useState<TransactionRow | null>(null);
+  const [splitOpen, setSplitOpen] = useState(false);
+  // Pull the parent account → company so the split modal can show only
+  // accounts under the same company in the per-segment dropdowns.
+  const parentAccount = useAccount(stmt.data?.statement.accountId ?? '');
+  const accountsInCompany = useAccounts(parentAccount.data?.companyId ?? '');
 
   const txSumCents = useMemo<bigint>(() => {
     if (!stmt.data) return 0n;
@@ -254,22 +264,52 @@ export function StatementReviewPage() {
               </li>
             ))}
           </ul>
-          <button
-            type="button"
-            onClick={async () => {
-              try {
-                await ackMultiAccount.mutateAsync();
-                toast.success('Multi-account warning dismissed');
-              } catch (err) {
-                toast.error(err instanceof ApiError ? err.message : 'failed');
-              }
-            }}
-            disabled={ackMultiAccount.isPending}
-            className="mt-3 rounded-md border border-blue-700 px-3 py-1.5 text-xs font-medium text-blue-900 disabled:opacity-50"
-          >
-            Acknowledge — proceed as single statement
-          </button>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={async () => {
+                try {
+                  await ackMultiAccount.mutateAsync();
+                  toast.success('Multi-account warning dismissed');
+                } catch (err) {
+                  toast.error(err instanceof ApiError ? err.message : 'failed');
+                }
+              }}
+              disabled={ackMultiAccount.isPending}
+              className="rounded-md border border-blue-700 px-3 py-1.5 text-xs font-medium text-blue-900 disabled:opacity-50"
+            >
+              Acknowledge — proceed as single statement
+            </button>
+            <button
+              type="button"
+              onClick={() => setSplitOpen(true)}
+              className="rounded-md bg-blue-700 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-800"
+            >
+              Split into per-account statements
+            </button>
+          </div>
         </div>
+      ) : null}
+
+      {splitOpen && stmt.data && s.detectedSplits ? (
+        <SplitStatementModal
+          detectedSplits={s.detectedSplits}
+          accounts={accountsInCompany.data ?? []}
+          parentAccountId={s.accountId}
+          isPending={splitStmt.isPending}
+          onClose={() => setSplitOpen(false)}
+          onSubmit={async (input) => {
+            try {
+              const result = await splitStmt.mutateAsync(input);
+              toast.success(
+                `Split into ${result.children.length} statement${result.children.length === 1 ? '' : 's'} — re-extraction enqueued.`,
+              );
+              setSplitOpen(false);
+            } catch (err) {
+              toast.error(err instanceof ApiError ? err.message : 'split failed');
+            }
+          }}
+        />
       ) : null}
 
       {s.status === 'awaiting-locale-confirmation' ? (

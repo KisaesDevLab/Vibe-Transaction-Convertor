@@ -21,7 +21,7 @@ just whether the happy path runs. Acceptance gauntlet: `pnpm acceptance`
 | 11    | GLM-OCR HTTP Client                       | ⚠      | `c76d8cf`   | in-memory cache (spec: Redis); no version probe; no breaker    |
 | 12    | LLM Extractor                             | ⚠      | `c403118`   | 4 of 10 exemplars; token budget; cleanup; flat schema remains  |
 | 13    | LLM Provider Abstraction                  | ⚠      | `c403118`   | dateFormatOverride wired; no 60-s cache; no @anthropic-ai/sdk  |
-| 14    | Multi-Account Auto-Split                  | ⚠      | `9e34173`   | detection only — never splits into multiple statements         |
+| 14    | Multi-Account Auto-Split                  | ⚠      | `<next>`    | real split via /split + page_range; no overlap-conflict tests  |
 | 15    | BullMQ Extraction Pipeline                | ⚠      | `c403118`   | locale-gate now wired; no SSE progress; no cancel              |
 | 16    | Golden Rule Reconciler & Repair Pass      | ⚠      | `ec3de5c`   | LLM repair + suspect rows + auto-recompute; no LLM-pass tests  |
 | 17    | TRNTYPE Inference + FITID Generator       | ⚠      | `702449e`   | rule list + isCreditCard wired; no docs/extraction.md          |
@@ -60,8 +60,11 @@ What's missing is **breadth, polish and several spec invariants**:
 - LLM extraction is wired but thin — 4 of 10 exemplars, flat schema
   (still pending nesting refactor). Token budget + markdown cleanup
   landed in `c403118`. LLM-driven repair pass landed in `ec3de5c`.
-- Multi-account detection works but does not split into multiple
-  statement rows (no `page_range` column, no confirm-split route).
+- ~~Multi-account split into multiple statement rows.~~ Landed
+  2026-05-05: page_range int4range column on statements, partial
+  unique index + GiST overlap-exclusion, POST /:id/split route, UI
+  modal with per-segment account picker, page-range-scoped worker
+  extraction.
 - ~~Exporter byte shapes diverge from spec.~~ Resolved 2026-05-05 in
   commit `702449e`: CSV column sets, OFX 2.x CRLF + FI block, QBO
   always-emit INTU.BID with '3000' fallback, BANKID fallback ladder,
@@ -88,8 +91,6 @@ shell-out.
   fixture-corpus golden masters per exporter, load tests, contract
   tests for both LLM providers, "no API key in logs" regression test,
   "no PDF/page-image bytes in payload" outbound assertion.
-- **Phase 14 real split** — the upload-time split decision and per-
-  account-segment statement insert.
 - ~~Phase 16 LLM-driven repair.~~ Landed 2026-05-05 in `ec3de5c`.
 - **Phase 24 ExportPage** — full preview + per-format checkbox UI.
 - **Phase 26 LlmProviderAdminPage** — typed-confirm phrase, model

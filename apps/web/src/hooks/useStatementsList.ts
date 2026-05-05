@@ -153,6 +153,27 @@ export const useAcknowledgeMultiAccount = (statementId: string) => {
   });
 };
 
+export interface SplitInput {
+  splits: Array<{ accountId: string; pageStart: number; pageEnd: number }>;
+}
+
+export interface SplitResult {
+  ok: boolean;
+  children: Array<{ id: string; accountId: string; pageRange: string }>;
+}
+
+export const useSplitStatement = (statementId: string) => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: SplitInput) =>
+      api.post<SplitResult>(`/api/statements/${statementId}/split`, input),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['statement', statementId] });
+      qc.invalidateQueries({ queryKey: ['statements'] });
+    },
+  });
+};
+
 export const useConfirmDateFormat = (statementId: string) => {
   const qc = useQueryClient();
   return useMutation({

@@ -102,6 +102,39 @@ const bytea = customType<{ data: Buffer; default: false }>({
   dataType: () => 'bytea',
 });
 
+// Phase 14 #6/#7: page_range int4range carries the half-open page slice
+// for a per-account statement when one PDF was split into multiple
+// statements. Stored as Postgres int4range; rendered as '[3,7)' for
+// pages 3-6. NULL means "the whole PDF" (no split was applied).
+export interface PageRange {
+  start: number; // 1-based, inclusive
+  end: number; // 1-based, inclusive
+}
+
+const int4range = customType<{ data: PageRange | null; driverData: string; default: false }>({
+  dataType: () => 'int4range',
+  toDriver: (value) => {
+    if (value === null || value === undefined) return '';
+    // Use the canonical inclusive-lower / exclusive-upper representation
+    // to match how Postgres stores ranges internally.
+    return `[${value.start},${value.end + 1})`;
+  },
+  fromDriver: (raw) => {
+    if (typeof raw !== 'string' || raw.length === 0 || raw === 'empty') return null;
+    // Postgres normalizes ranges to '[lower,upper)'.
+    const m = /^[[(](\d+),(\d+)[\])]$/.exec(raw);
+    if (!m) return null;
+    const lowerInclusive = raw.startsWith('[');
+    const upperInclusive = raw.endsWith(']');
+    const lo = Number.parseInt(m[1]!, 10);
+    const hi = Number.parseInt(m[2]!, 10);
+    return {
+      start: lowerInclusive ? lo : lo + 1,
+      end: upperInclusive ? hi : hi - 1,
+    };
+  },
+});
+
 // ----- tables -----
 
 export const users = vibetc.table('users', {
@@ -202,10 +235,17 @@ export const statements = vibetc.table(
     errorMessage: text('error_message'),
     detectedSplits: jsonb('detected_splits'),
     multiAccountAcknowledged: boolean('multi_account_acknowledged').notNull().default(false),
+    // Phase 14 #6/#7: when a PDF was split per detected account, this
+    // captures the page range for this slice. NULL means "the whole PDF".
+    pageRange: int4range('page_range'),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
   },
   (t) => ({
+    // Drizzle doesn't yet model NULLS NOT DISTINCT or partial-on-NOT-NULL
+    // indexes. The migration 0006 below replaces this naive index with a
+    // partial unique index that includes page_range and treats NULLs as
+    // equal — see migrations/0006_page_range_split.sql.
     uniqueByAccountAndHash: uniqueIndex('statements_account_hash_uq').on(
       t.accountId,
       t.sourcePdfHash,

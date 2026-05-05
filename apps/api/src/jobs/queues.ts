@@ -50,9 +50,12 @@ export const maintenanceQueue = (): Queue => {
   return _maintenanceQueue;
 };
 
-// Idempotent enqueue: jobId derived from (sourcePdfHash, accountId).
+// Idempotent enqueue: job ID derived from the statement ID itself so
+// that re-extractions of the same statement collapse, but each split
+// child of a multi-account PDF gets its own slot. (Statements are
+// created upstream with their own UUIDs.)
 export const enqueueExtraction = async (data: ExtractionJobData): Promise<void> => {
-  const id = `extract:${data.accountId}:${data.sourcePdfHash}`;
+  const id = `extract:${data.statementId}`;
   await extractionQueue().add('extract', data, { jobId: id });
 };
 

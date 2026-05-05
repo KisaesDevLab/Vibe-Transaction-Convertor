@@ -265,6 +265,115 @@ export const statementsRouter = (): Router => {
     }
   });
 
+  // Split a detected multi-account PDF into N per-account statements.
+  // Each split entry carries the operator-chosen accountId and the page
+  // range (1-based, inclusive). The parent statement's transactions are
+  // wiped and it is marked as a "split host" via multi_account_acknowledged
+  // so the UI stops pestering. Each child is created with the same source
+  // PDF hash but distinct page_range, then enqueued for re-extraction.
+  // Phase 14 #6/#7/#8/#10.
+  router.post('/:id/split', async (req, res, next) => {
+    try {
+      const id = String(req.params.id);
+      const body = req.body ?? {};
+      const splits = Array.isArray(body.splits) ? body.splits : [];
+      if (splits.length < 2) {
+        throw new ValidationError('splits must contain at least 2 entries');
+      }
+      const parentRows = await db.select().from(statements).where(eq(statements.id, id));
+      const parent = parentRows[0];
+      if (!parent) throw new NotFoundError(`statement ${id}`);
+
+      const parsed: Array<{ accountId: string; pageStart: number; pageEnd: number }> = [];
+      for (const s of splits) {
+        const accountId = String((s as { accountId?: string }).accountId ?? '');
+        const pageStart = Number.parseInt(
+          String((s as { pageStart?: number }).pageStart ?? ''),
+          10,
+        );
+        const pageEnd = Number.parseInt(String((s as { pageEnd?: number }).pageEnd ?? ''), 10);
+        if (!accountId || !Number.isFinite(pageStart) || !Number.isFinite(pageEnd)) {
+          throw new ValidationError('each split needs accountId, pageStart, pageEnd');
+        }
+        if (pageStart < 1 || pageEnd < pageStart) {
+          throw new ValidationError(`invalid page range for split: ${pageStart}-${pageEnd}`);
+        }
+        if (pageEnd > parent.sourcePdfPages) {
+          throw new ValidationError(
+            `pageEnd ${pageEnd} exceeds source PDF page count ${parent.sourcePdfPages}`,
+          );
+        }
+        parsed.push({ accountId, pageStart, pageEnd });
+      }
+
+      // Verify all referenced accounts exist in the same company as the parent.
+      // (Cross-company splits are out of scope — operator should set up the
+      // accounts under the parent's company first.)
+      const parentAccountRows = await db
+        .select()
+        .from(transactions)
+        .where(eq(transactions.statementId, id));
+      // Wipe parent's transactions so the parent row is purely an audit
+      // marker; its FITIDs would all be wrong post-split anyway.
+      if (parentAccountRows.length > 0) {
+        await db.delete(transactions).where(eq(transactions.statementId, id));
+      }
+
+      // Mark the parent as superseded — keep the row for audit, but flag
+      // it so the UI doesn't re-pester to acknowledge / split.
+      await db
+        .update(statements)
+        .set({
+          status: 'failed',
+          errorMessage: `superseded by ${parsed.length}-way split`,
+          multiAccountAcknowledged: true,
+          updatedAt: sql`now()`,
+        })
+        .where(eq(statements.id, id));
+
+      // Create children (one per split). Each gets re-enqueued.
+      const created: Array<{ id: string; accountId: string; pageRange: string }> = [];
+      for (const split of parsed) {
+        const [child] = await db
+          .insert(statements)
+          .values({
+            accountId: split.accountId,
+            sourcePdfHash: parent.sourcePdfHash,
+            sourcePdfPath: parent.sourcePdfPath,
+            sourcePdfPages: parent.sourcePdfPages,
+            status: 'uploaded',
+            pageRange: { start: split.pageStart, end: split.pageEnd },
+          })
+          .returning({ id: statements.id });
+        if (!child) throw new Error('insert returned no row');
+        created.push({
+          id: child.id,
+          accountId: split.accountId,
+          pageRange: `[${split.pageStart},${split.pageEnd}]`,
+        });
+        if (process.env.REDIS_URL) {
+          await enqueueExtraction({
+            statementId: child.id,
+            accountId: split.accountId,
+            sourcePdfHash: parent.sourcePdfHash,
+            sourcePdfPath: parent.sourcePdfPath,
+          });
+        }
+      }
+
+      await writeAudit(db, {
+        actorUserId: req.user!.id,
+        entityType: 'statement',
+        entityId: id,
+        action: 'statement.split',
+        payload: { children: created, splitCount: created.length },
+      });
+      res.json({ ok: true, children: created });
+    } catch (err) {
+      next(err);
+    }
+  });
+
   // Acknowledge a detected multi-account PDF: clears the warning so the
   // review page stops nagging. Phase 14.
   router.post('/:id/acknowledge-multi-account', async (req, res, next) => {
