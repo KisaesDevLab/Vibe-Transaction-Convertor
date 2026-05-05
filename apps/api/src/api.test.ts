@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { APP_NAME } from './index.js';
+import { createApp } from './server.js';
 
 describe('api app', () => {
-  it('reports its package name', () => {
-    expect(APP_NAME).toBe('@vibe-tx-converter/api');
+  it('createApp returns a configured Express app', () => {
+    const app = createApp();
+    expect(app).toBeDefined();
+    expect(typeof (app as { use: unknown }).use).toBe('function');
   });
 });
