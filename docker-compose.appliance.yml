@@ -22,15 +22,25 @@ x-api-env: &api-env
 
 services:
   api:
-    build:
-      context: .
-      args:
-        BUILD_SHA: ${BUILD_SHA:-unknown}
+    # Pull the published, signed, multi-arch image by default. Operators
+    # who actually want to build locally can override with a sibling
+    # docker-compose.appliance.local-build.yml (or just compose -f).
+    image: ghcr.io/kisaesdevlab/vibe-tx-converter:${VIBETC_IMAGE_TAG:-latest}
+    pull_policy: always
     environment: *api-env
     networks:
       - vibe-appliance
     volumes:
       - vibetc-data:/var/lib/vibetc
+    # Health is also wired into the Dockerfile's HEALTHCHECK; reflect it
+    # here so the appliance orchestrator's compose-level checks pass.
+    healthcheck:
+      test: ['CMD', 'curl', '-fsS', 'http://localhost:4000/api/health/live']
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+    restart: unless-stopped
 
 networks:
   vibe-appliance:

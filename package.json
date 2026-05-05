@@ -15,6 +15,7 @@
     "format": "prettier --write .",
     "typecheck": "tsc -b",
     "acceptance": "pnpm typecheck && pnpm lint && pnpm test && pnpm build",
+    "release:dry-run": "docker buildx build --platform linux/amd64,linux/arm64 --build-arg BUILD_SHA=dryrun -t ghcr.io/kisaesdevlab/vibe-tx-converter:dry-run .",
     "db:migrate": "pnpm --filter @vibe-tx-converter/api run db:migrate",
     "db:seed": "pnpm --filter @vibe-tx-converter/api run db:seed",
     "prepare": "husky"

@@ -52,6 +52,13 @@ COPY --from=builder /app/data ./data
 VOLUME ["/var/lib/vibetc"]
 EXPOSE 4000
 
+# Phase 30 #9 — run as non-root. node:bookworm-slim ships with a uid 1000
+# `node` user already; reuse it. The data volume mount path is owned by
+# this user so the runtime can write to /var/lib/vibetc without sudo.
+RUN mkdir -p /var/lib/vibetc \
+    && chown -R node:node /var/lib/vibetc /app
+USER node
+
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD curl -fsS http://localhost:4000/api/health/live || exit 1
 

@@ -54,7 +54,7 @@ jobs:
       - id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository }}
+          images: ghcr.io/kisaesdevlab/vibe-tx-converter
           tags: |
             type=ref,event=tag
             type=semver,pattern={{version}}
@@ -75,7 +75,7 @@ jobs:
 
       - uses: actions/attest-build-provenance@v1
         with:
-          subject-name: ghcr.io/${{ github.repository }}
+          subject-name: ghcr.io/kisaesdevlab/vibe-tx-converter
           subject-digest: ${{ steps.build.outputs.digest }}
           push-to-registry: true
 
@@ -85,7 +85,7 @@ jobs:
       - uses: sigstore/cosign-installer@v3
       - run: |
           cosign sign --yes \
-            ghcr.io/${{ github.repository }}@${{ steps.build.outputs.digest }}
+            ghcr.io/kisaesdevlab/vibe-tx-converter@${{ steps.build.outputs.digest }}
 
       # Phase 30 #1 — syft SBOM attached as a sigstore attestation. The
       # docker buildx `sbom: true` flag generates a basic provenance
@@ -93,18 +93,18 @@ jobs:
       # supply-chain consumers.
       - uses: anchore/sbom-action@v0
         with:
-          image: ghcr.io/${{ github.repository }}@${{ steps.build.outputs.digest }}
+          image: ghcr.io/kisaesdevlab/vibe-tx-converter@${{ steps.build.outputs.digest }}
           format: spdx-json
           output-file: sbom.spdx.json
       - run: |
           cosign attest --yes \
             --predicate sbom.spdx.json \
             --type spdxjson \
-            ghcr.io/${{ github.repository }}@${{ steps.build.outputs.digest }}
+            ghcr.io/kisaesdevlab/vibe-tx-converter@${{ steps.build.outputs.digest }}
 
       - uses: aquasecurity/trivy-action@0.24.0
         with:
-          image-ref: ghcr.io/${{ github.repository }}@${{ steps.build.outputs.digest }}
+          image-ref: ghcr.io/kisaesdevlab/vibe-tx-converter@${{ steps.build.outputs.digest }}
           format: sarif
           output: trivy.sarif
           severity: CRITICAL,HIGH
@@ -120,7 +120,7 @@ jobs:
       # changelog and a checksum file.
       - name: Sha256 of build outputs
         run: |
-          echo "${{ steps.build.outputs.digest }} ghcr.io/${{ github.repository }}" \
+          echo "${{ steps.build.outputs.digest }} ghcr.io/kisaesdevlab/vibe-tx-converter" \
             > digest.txt
       - uses: softprops/action-gh-release@v2
         with:
