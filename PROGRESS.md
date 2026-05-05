@@ -31,7 +31,7 @@ just whether the happy path runs. Acceptance gauntlet: `pnpm acceptance`
 | 21    | OFX 2.x XML Exporter                      | ⚠      | `702449e`   | CRLF + SONRS FI block; no ofx4js parse roundtrip               |
 | 22    | QBO Exporter                              | ⚠      | `702449e`   | INTU.BID always; BANKID ladder; no transliteration             |
 | 23    | QFX Exporter                              | ⚠      | `702449e`   | INTU.USERID stable; needs golden-master + qfx-import.md        |
-| 24    | Export UI & Download Bundling             | ⚠      | `<next>`    | <ExportPage> + preview + listing + per-job re-download         |
+| 24    | Export UI & Download Bundling             | ⚠      | `11a57ad`   | <ExportPage> + preview + listing + per-job re-download         |
 | 25    | Audit Log                                 | ⚠      | `d22cccd`   | no diffs / no JSON tree / no downloads / no retention          |
 | 26    | Admin / Settings                          | ⚠      | `d22cccd`   | no LlmProviderAdminPage; no real BackupAdminPage; no FidirPage |
 | 27    | Testing — Unit, Integration, Goldens, E2E | ⚠      | —           | 102 unit/supertests; no Playwright; no fixture suite           |
