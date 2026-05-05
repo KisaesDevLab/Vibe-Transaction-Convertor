@@ -12,7 +12,15 @@ import { requireAdmin } from '../middleware/auth.js';
 import { writeAudit } from '../services/audit.js';
 import { backupFilePath, createBackup, deleteBackup, listBackups } from '../services/backup.js';
 import { getFidirStatus, seedFidir } from '../services/fidir-seeder.js';
+import {
+  clearEngineConfig,
+  getAllEngineConfigs,
+  getEngineConfig,
+  setEngineConfig,
+  type EngineKey,
+} from '../services/engines.js';
 import { buildProvider, invalidateProviderCache } from '../services/llm-provider.js';
+import { probeGlmOcrHealth } from '@vibe-tx-converter/extractor';
 import { extractionQueue } from '../jobs/queues.js';
 import { logger } from '../lib/logger.js';
 
@@ -449,6 +457,115 @@ export const adminRouter = (): Router => {
         payload: { filename },
       });
       res.status(204).end();
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // DB-backed engine configuration (GLM-OCR + LLM Gateway). Reads
+  // system_settings → falls back to env. Editable from the
+  // /admin/engines UI without a worker restart.
+  const ENGINE_KEYS: readonly EngineKey[] = ['glm-ocr', 'llm-gateway'];
+  const isEngineKey = (s: string): s is EngineKey => (ENGINE_KEYS as readonly string[]).includes(s);
+
+  router.get('/engines', async (_req, res, next) => {
+    try {
+      const configs = await getAllEngineConfigs(db);
+      res.json({ configs });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.post('/engines/:engine', async (req, res, next) => {
+    try {
+      const engine = String(req.params.engine);
+      if (!isEngineKey(engine)) throw new ValidationError(`unknown engine: ${engine}`);
+      const body = req.body ?? {};
+      const input: { url?: string | null; timeoutMs?: number | null; concurrency?: number | null } =
+        {};
+      if (body.url !== undefined) {
+        input.url = body.url === null || body.url === '' ? null : String(body.url).trim();
+      }
+      if (body.timeoutMs !== undefined) {
+        input.timeoutMs =
+          body.timeoutMs === null ? null : Number.parseInt(String(body.timeoutMs), 10) || null;
+      }
+      if (body.concurrency !== undefined) {
+        input.concurrency =
+          body.concurrency === null ? null : Number.parseInt(String(body.concurrency), 10) || null;
+      }
+      const next = await setEngineConfig(db, engine, input, req.user!.id);
+      await writeAudit(db, {
+        actorUserId: req.user!.id,
+        entityType: 'system_settings',
+        entityId: `engine.${engine}`,
+        action: 'engine.update',
+        payload: { engine, input },
+      });
+      res.json(next);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.delete('/engines/:engine', async (req, res, next) => {
+    try {
+      const engine = String(req.params.engine);
+      if (!isEngineKey(engine)) throw new ValidationError(`unknown engine: ${engine}`);
+      const next = await clearEngineConfig(db, engine, req.user!.id);
+      await writeAudit(db, {
+        actorUserId: req.user!.id,
+        entityType: 'system_settings',
+        entityId: `engine.${engine}`,
+        action: 'engine.clear',
+      });
+      res.json(next);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // Phase 26 #4: live test-connection probe per engine. Uses the
+  // currently-resolved URL (DB or env). Doesn't burn LLM tokens for
+  // llm-gateway — just hits /health like the readiness probe.
+  router.post('/engines/:engine/test', async (req, res, next) => {
+    try {
+      const engine = String(req.params.engine);
+      if (!isEngineKey(engine)) throw new ValidationError(`unknown engine: ${engine}`);
+      const cfg = await getEngineConfig(db, engine);
+      if (!cfg.url) {
+        res.json({ ok: false, source: cfg.source, detail: 'no URL configured' });
+        return;
+      }
+      if (engine === 'glm-ocr') {
+        const result = await probeGlmOcrHealth({ baseUrl: cfg.url });
+        res.json({ ok: result.ok, source: cfg.source, detail: result.detail ?? null });
+        return;
+      }
+      // llm-gateway: hit /health directly with a 1.5s timeout.
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 1500);
+      const start = Date.now();
+      try {
+        const probe = await fetch(`${cfg.url.replace(/\/$/, '')}/health`, {
+          signal: controller.signal,
+        });
+        res.json({
+          ok: probe.ok,
+          source: cfg.source,
+          latencyMs: Date.now() - start,
+          detail: probe.ok ? null : `HTTP ${probe.status}`,
+        });
+      } catch (err) {
+        res.json({
+          ok: false,
+          source: cfg.source,
+          detail: (err as Error).message,
+        });
+      } finally {
+        clearTimeout(timer);
+      }
     } catch (err) {
       next(err);
     }

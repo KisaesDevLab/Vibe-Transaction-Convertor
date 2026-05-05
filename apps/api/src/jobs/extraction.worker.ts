@@ -24,6 +24,7 @@ import { schemas } from '@vibe-tx-converter/shared';
 import { db } from '../db/client.js';
 import { accounts, statements, systemSettings, transactions } from '../db/schema.js';
 import { logger } from '../lib/logger.js';
+import { getEngineConfig } from '../services/engines.js';
 import { buildProvider } from '../services/llm-provider.js';
 import { redisOcrCache } from '../services/ocr-cache.js';
 import { writeAudit } from '../services/audit.js';
@@ -141,7 +142,15 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
     const rasters = await rasterizePdf(data.sourcePdfPath, { dpi: 300 });
     const scopedRasters = rasters.filter((r) => inRange(r.index));
     const images = await Promise.all(scopedRasters.map(async (r) => readFile(r.pngPath)));
-    const ocr = await ocrPdfPages(images, { cache: redisOcrCache });
+    // DB-backed URL falls back to GLM_OCR_URL env. Resolved per call so
+    // an admin tweak via /admin/engines doesn't require a restart.
+    const ocrConfig = await getEngineConfig(db, 'glm-ocr');
+    const ocr = await ocrPdfPages(images, {
+      cache: redisOcrCache,
+      ...(ocrConfig.url ? { baseUrl: ocrConfig.url } : {}),
+      ...(ocrConfig.timeoutMs ? { timeoutMs: ocrConfig.timeoutMs } : {}),
+      ...(ocrConfig.concurrency ? { concurrency: ocrConfig.concurrency } : {}),
+    });
     markdown = ocr.pages
       .map((p, i) => `# Page ${(scopedRasters[i]?.index ?? p.index) + 1}\n\n${p.markdown}`)
       .join('\n\n');

@@ -49,7 +49,13 @@ export const invalidateProviderCache = (): void => {
 
 const constructProvider = async (db: Db): Promise<LlmProvider> => {
   const id = await resolveProviderId(db);
-  if (id === 'local') return new LocalGatewayProvider();
+  if (id === 'local') {
+    // engine.llm_gateway.url is operator-configurable from /admin/engines.
+    // Fall back to LLM_GATEWAY_URL env if the DB has no override.
+    const gatewayRow = await readSetting(db, 'engine.llm_gateway.url');
+    const baseUrl = gatewayRow?.valuePlaintext ?? undefined;
+    return new LocalGatewayProvider(baseUrl ? { baseUrl } : {});
+  }
 
   const keyRow = await readSetting(db, KEY_ANTHROPIC_KEY);
   let apiKey: string | undefined;

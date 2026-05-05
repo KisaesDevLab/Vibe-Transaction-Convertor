@@ -2,7 +2,9 @@ import { Router } from 'express';
 import pg from 'pg';
 import Redis from 'ioredis';
 
+import { db } from '../db/client.js';
 import { logger } from '../lib/logger.js';
+import { getEngineConfig } from '../services/engines.js';
 
 interface DependencyStatus {
   status: 'ok' | 'fail' | 'unconfigured';
@@ -81,11 +83,17 @@ export const healthRouter = (): Router => {
   });
 
   router.get('/ready', async (_req, res) => {
+    // Resolve engine URLs through the DB-backed config so an admin
+    // editing /admin/engines flips the probe target without a restart.
+    const [glmOcrCfg, llmGwCfg] = await Promise.all([
+      getEngineConfig(db, 'glm-ocr').catch(() => null),
+      getEngineConfig(db, 'llm-gateway').catch(() => null),
+    ]);
     const [postgres, redis, glmOcr, llmGateway] = await Promise.all([
       checkPostgres(),
       checkRedis(),
-      checkHttpHealth('glm-ocr', process.env.GLM_OCR_URL),
-      checkHttpHealth('llm-gateway', process.env.LLM_GATEWAY_URL),
+      checkHttpHealth('glm-ocr', glmOcrCfg?.url ?? process.env.GLM_OCR_URL),
+      checkHttpHealth('llm-gateway', llmGwCfg?.url ?? process.env.LLM_GATEWAY_URL),
     ]);
     const dependencies = { postgres, redis, glmOcr, llmGateway };
     const failing = Object.values(dependencies).some((d) => d.status === 'fail');
