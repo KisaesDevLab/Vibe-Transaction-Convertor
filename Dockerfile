@@ -54,6 +54,13 @@ COPY --from=builder /app/apps/api/src/db/migrations ./apps/api/src/db/migrations
 COPY --from=builder /app/apps/web/dist ./apps/web/dist
 COPY --from=builder /app/packages ./packages
 COPY --from=builder /app/data ./data
+# Runtime base-path injection — substitutes /__VIBE_BASE_PATH__/ in
+# the built SPA bundle before the API server starts so the same image
+# can serve either '/' (standalone) or '/<prefix>/' (Vibe-Appliance
+# shared Caddy in LAN / Tailscale modes). VITE_BASE_PATH defaults to
+# '/'. See scripts/web-base-path.sh.
+COPY scripts/web-base-path.sh /usr/local/bin/web-base-path.sh
+RUN chmod +x /usr/local/bin/web-base-path.sh
 
 VOLUME ["/var/lib/vibetc"]
 EXPOSE 4000
@@ -68,4 +75,5 @@ USER node
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD curl -fsS http://localhost:4000/api/health/live || exit 1
 
+ENTRYPOINT ["/usr/local/bin/web-base-path.sh"]
 CMD ["node", "apps/api/dist/index.js"]
