@@ -50,7 +50,15 @@ COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/apps/api/dist ./apps/api/dist
 COPY --from=builder /app/apps/api/node_modules ./apps/api/node_modules
 COPY --from=builder /app/apps/api/package.json ./apps/api/package.json
-COPY --from=builder /app/apps/api/src/db/migrations ./apps/api/src/db/migrations
+# drizzle's migrate() reads `<migrationsFolder>/meta/_journal.json`,
+# and apps/api/src/db/migrate.ts resolves migrationsFolder relative
+# to the file it's running from. In dev (tsx) that's
+# apps/api/src/db/migrations; in this image it's
+# apps/api/dist/db/migrations. Copy the SQL + meta tree into the
+# dist location so the same code path works in both, and so the
+# manifest's update-time `node /app/apps/api/dist/db/migrate.js`
+# CLI invocation can find its own migrations.
+COPY --from=builder /app/apps/api/src/db/migrations ./apps/api/dist/db/migrations
 COPY --from=builder /app/apps/web/dist ./apps/web/dist
 COPY --from=builder /app/packages ./packages
 COPY --from=builder /app/data ./data
