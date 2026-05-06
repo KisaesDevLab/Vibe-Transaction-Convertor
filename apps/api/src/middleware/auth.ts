@@ -2,6 +2,7 @@ import type { NextFunction, Request, RequestHandler, Response } from 'express';
 
 import { db } from '../db/client.js';
 import type { Session, User } from '../db/types.js';
+import { cookieSecure } from '../lib/cookie-flags.js';
 import { AuthError, ForbiddenError } from '../lib/errors.js';
 import { getSession, maybeRollSession } from '../services/auth.js';
 
@@ -38,7 +39,7 @@ export const loadSession: RequestHandler = async (req, res, next) => {
       res.cookie(SESSION_COOKIE, sid, {
         httpOnly: true,
         sameSite: 'lax',
-        secure: process.env.NODE_ENV === 'production',
+        secure: cookieSecure(),
         signed: true,
         expires: session.expiresAt,
       });

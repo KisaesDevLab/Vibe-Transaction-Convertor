@@ -1,6 +1,7 @@
 import type { NextFunction, Request, RequestHandler, Response } from 'express';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 
+import { cookieSecure } from '../lib/cookie-flags.js';
 import { ForbiddenError } from '../lib/errors.js';
 
 const COOKIE = 'vibetc_csrf';
@@ -14,7 +15,7 @@ const setCookie = (res: Response, token: string): void => {
   res.cookie(COOKIE, token, {
     httpOnly: false, // double-submit pattern: client JS must read this
     sameSite: 'lax',
-    secure: process.env.NODE_ENV === 'production',
+    secure: cookieSecure(),
     maxAge: 24 * 60 * 60 * 1000,
   });
 };

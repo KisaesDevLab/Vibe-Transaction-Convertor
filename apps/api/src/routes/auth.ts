@@ -3,6 +3,7 @@ import { eq, sql } from 'drizzle-orm';
 
 import { db } from '../db/client.js';
 import { sessions, users } from '../db/schema.js';
+import { cookieSecure } from '../lib/cookie-flags.js';
 import { AuthError, ValidationError } from '../lib/errors.js';
 import { csrfTokenHandler } from '../middleware/csrf.js';
 import { loginRateLimit } from '../middleware/login-rate-limit.js';
@@ -75,7 +76,7 @@ export const authRouter = (): Router => {
       res.cookie(SESSION_COOKIE, result.sessionId, {
         httpOnly: true,
         sameSite: 'lax',
-        secure: process.env.NODE_ENV === 'production',
+        secure: cookieSecure(),
         signed: true,
         expires: result.expiresAt,
       });
