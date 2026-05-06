@@ -11,7 +11,7 @@ import { useQuery } from '@tanstack/react-query';
 import { Link, useSearchParams } from 'react-router-dom';
 
 import { useToast } from '../components/Toast';
-import { ApiError, api } from '../lib/api';
+import { ApiError, api, withBase } from '../lib/api';
 
 interface AuditRow {
   id: number;
@@ -105,7 +105,7 @@ export function AuditLogPage() {
 
   const onDownload = async (kind: 'json' | 'csv'): Promise<void> => {
     const qs = new URLSearchParams(queryParams).toString();
-    const url = `/api/audit/export.${kind}${qs ? `?${qs}` : ''}`;
+    const url = withBase(`/api/audit/export.${kind}${qs ? `?${qs}` : ''}`);
     try {
       const res = await fetch(url, { credentials: 'include', headers: csrfHeader() });
       if (!res.ok) {

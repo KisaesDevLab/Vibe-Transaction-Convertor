@@ -6,7 +6,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 
 import { useToast } from '../components/Toast';
-import { ApiError, api } from '../lib/api';
+import { ApiError, api, withBase } from '../lib/api';
 
 interface BackupSummary {
   filename: string;
@@ -84,7 +84,7 @@ export function BackupAdminPage() {
 
   const onDownload = async (filename: string): Promise<void> => {
     try {
-      const res = await fetch(`/api/admin/backups/${encodeURIComponent(filename)}/file`, {
+      const res = await fetch(withBase(`/api/admin/backups/${encodeURIComponent(filename)}/file`), {
         credentials: 'include',
         headers: csrfHeader(),
       });

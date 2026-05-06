@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 
-import { api } from '../lib/api';
+import { api, withBase } from '../lib/api';
 
 export type AccountType = 'CHECKING' | 'SAVINGS' | 'MONEYMRKT' | 'CREDITLINE' | 'CREDITCARD';
 export type CsvTemplate = 'qbo3' | 'qbo4' | 'xero' | 'generic';
@@ -109,7 +109,7 @@ export const useUpload = (accountId: string) => {
     mutationFn: async (files: File[]): Promise<UploadResult> => {
       const form = new FormData();
       for (const f of files) form.append('files', f);
-      const res = await fetch(`/api/accounts/${accountId}/uploads`, {
+      const res = await fetch(withBase(`/api/accounts/${accountId}/uploads`), {
         method: 'POST',
         credentials: 'include',
         headers: { 'x-csrf-token': readCsrfFromCookie() },

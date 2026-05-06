@@ -3,6 +3,7 @@ import { Document, Page, pdfjs } from 'react-pdf';
 import 'react-pdf/dist/Page/AnnotationLayer.css';
 import 'react-pdf/dist/Page/TextLayer.css';
 
+import { withBase } from '../lib/api';
 import { pdfBboxToCss } from '../lib/coords';
 
 // Vendor the worker locally (no CDN) — Vite resolves via ?url import.
@@ -58,7 +59,7 @@ export function PdfViewer({ pdfHash, highlight, onPdfClick }: PdfViewerProps) {
     setPdfData(null);
     setNumPages(0);
     if (!pdfHash) return;
-    fetch(`/api/uploads/${pdfHash}/raw`, { credentials: 'include' })
+    fetch(withBase(`/api/uploads/${pdfHash}/raw`), { credentials: 'include' })
       .then(async (res) => {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const buffer = await res.arrayBuffer();
