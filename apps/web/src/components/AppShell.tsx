@@ -2,6 +2,7 @@ import { type ReactNode } from 'react';
 import { Link, NavLink } from 'react-router-dom';
 
 import { useLogout, useMe } from '../hooks/useAuth';
+import { withBase } from '../lib/api';
 import { cn } from '../lib/cn';
 import { ErrorBoundary } from './ErrorBoundary';
 import { ShortcutOverlay } from './ShortcutOverlay';
@@ -77,7 +78,7 @@ export function AppShell({ children }: { children: ReactNode }) {
               type="button"
               className="rounded-md border border-surface-muted px-3 py-1 text-sm hover:bg-surface-subtle"
               onClick={() =>
-                logout.mutate(undefined, { onSuccess: () => window.location.assign('/login') })
+                logout.mutate(undefined, { onSuccess: () => window.location.assign(withBase('/login')) })
               }
             >
               Sign out

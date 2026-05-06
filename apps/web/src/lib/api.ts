@@ -2,6 +2,18 @@
 // the CSRF token from the cookie set by GET /api/auth/csrf and adds it to
 // mutating requests.
 
+// Path prefix prepended to every API request and login redirect so the
+// fetch stays inside whatever path-prefix the SPA is being served
+// under. Resolves to "" (empty) for standalone deploys
+// (import.meta.env.BASE_URL = "/") and to "/<slug>" behind the
+// Vibe-Appliance shared Caddy in LAN / Tailscale modes (the build-time
+// sentinel /__VIBE_BASE_PATH__/ is sed-replaced at container start to
+// /<slug>/, see scripts/web-base-path.sh). Without this, fetches to
+// /api/auth/csrf and the 401-redirect to /login escape the prefix and
+// either 404 against the shared ingress or hit a wrong upstream.
+export const APP_BASE = import.meta.env.BASE_URL.replace(/\/$/, '');
+export const withBase = (p: string): string => APP_BASE + p;
+
 const CSRF_COOKIE = 'vibetc_csrf';
 
 const readCookie = (name: string): string | undefined => {
@@ -16,7 +28,7 @@ const readCookie = (name: string): string | undefined => {
 const ensureCsrf = async (): Promise<string> => {
   let token = readCookie(CSRF_COOKIE);
   if (!token) {
-    const res = await fetch('/api/auth/csrf', { credentials: 'include' });
+    const res = await fetch(withBase('/api/auth/csrf'), { credentials: 'include' });
     if (!res.ok) throw new Error('failed to fetch CSRF token');
     const body = (await res.json()) as { token: string };
     token = body.token;
@@ -45,13 +57,18 @@ export interface FetchOptions {
 }
 
 const buildUrl = (path: string, query?: FetchOptions['query']): string => {
-  if (!query) return path;
+  // The CSRF + path.startsWith / path !== checks below compare against
+  // the unprefixed path on purpose, so we apply the base prefix only at
+  // the outgoing-URL boundary here. Callers continue to pass paths like
+  // "/api/auth/login" verbatim.
+  const full = withBase(path);
+  if (!query) return full;
   const params = new URLSearchParams();
   for (const [k, v] of Object.entries(query)) {
     if (v !== undefined) params.set(k, String(v));
   }
   const qs = params.toString();
-  return qs ? `${path}?${qs}` : path;
+  return qs ? `${full}?${qs}` : full;
 };
 
 export const fetchJson = async <T = unknown>(
@@ -80,7 +97,7 @@ export const fetchJson = async <T = unknown>(
 
   if (!res.ok) {
     if (res.status === 401 && !path.startsWith('/api/auth/')) {
-      window.location.assign('/login');
+      window.location.assign(withBase('/login'));
     }
     throw new ApiError(res.status, isJson ? body : { message: String(body) });
   }
