@@ -5,8 +5,8 @@ import { rm, readdir, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { db } from '../db/client.js';
-import { statements, sessions, systemSettings } from '../db/schema.js';
-import { NotFoundError, ValidationError } from '../lib/errors.js';
+import { businessCategories, statements, sessions, systemSettings } from '../db/schema.js';
+import { ConflictError, NotFoundError, ValidationError } from '../lib/errors.js';
 import { unwrapSecret, wrapSecret } from '../lib/secrets.js';
 import { requireAdmin } from '../middleware/auth.js';
 import { writeAudit } from '../services/audit.js';
@@ -20,6 +20,7 @@ import {
   type EngineKey,
 } from '../services/engines.js';
 import { buildProvider, invalidateProviderCache } from '../services/llm-provider.js';
+import { enrichmentToggleStatus, setEnrichmentToggle } from '../services/enrichment.js';
 import { clearPricing, listPricings, setPricing } from '../services/pricing.js';
 import { AnthropicProvider, probeGlmOcrHealth } from '@vibe-tx-converter/extractor';
 import { extractionQueue } from '../jobs/queues.js';
@@ -738,6 +739,178 @@ export const adminRouter = (): Router => {
         },
         uptime: { seconds: Math.round(process.uptime()) },
       });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // ----- Phase 33: enrichment toggles -----
+
+  router.get('/enrichment', async (_req, res, next) => {
+    try {
+      const status = await enrichmentToggleStatus(db);
+      res.json(status);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.post('/enrichment', async (req, res, next) => {
+    try {
+      const which = req.body?.which;
+      const enabled = req.body?.enabled;
+      if (which !== 'cleanse' && which !== 'category') {
+        throw new ValidationError("which must be 'cleanse' or 'category'");
+      }
+      if (typeof enabled !== 'boolean') {
+        throw new ValidationError('enabled must be a boolean');
+      }
+      await setEnrichmentToggle(db, which, enabled, req.user!.id);
+      const status = await enrichmentToggleStatus(db);
+      res.json(status);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // ----- Phase 33: business-categories CRUD -----
+
+  router.get('/categories', async (req, res, next) => {
+    try {
+      const includeArchived = req.query.includeArchived === 'true';
+      const rows = await db
+        .select()
+        .from(businessCategories)
+        .orderBy(businessCategories.sortOrder, businessCategories.name);
+      res.json(includeArchived ? rows : rows.filter((r) => !r.archived));
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.post('/categories', async (req, res, next) => {
+    try {
+      const body = req.body ?? {};
+      const name = String(body.name ?? '').trim();
+      if (name.length === 0) throw new ValidationError('name is required');
+      if (name.length > 80) throw new ValidationError('name must be at most 80 characters');
+      const description =
+        typeof body.description === 'string' && body.description.trim().length > 0
+          ? body.description.trim().slice(0, 500)
+          : null;
+      const sortOrder =
+        Number.isFinite(body.sort_order) && body.sort_order >= 0
+          ? Math.floor(body.sort_order)
+          : 100;
+      // Case-insensitive duplicate check before INSERT to give a clean
+      // 409 instead of letting the unique-index constraint surface as
+      // a 500.
+      const existing = await db
+        .select()
+        .from(businessCategories)
+        .where(sql`lower(${businessCategories.name}) = lower(${name})`);
+      if (existing.length > 0) {
+        throw new ConflictError(`category already exists: ${existing[0]!.name}`);
+      }
+      const [created] = await db
+        .insert(businessCategories)
+        .values({ name, description, sortOrder })
+        .returning();
+      await writeAudit(db, {
+        actorUserId: req.user!.id,
+        entityType: 'business_category',
+        entityId: created!.id,
+        action: 'business_category.create',
+        payload: { name, description, sortOrder },
+      });
+      res.status(201).json(created);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.patch('/categories/:id', async (req, res, next) => {
+    try {
+      const id = String(req.params.id);
+      const rows = await db.select().from(businessCategories).where(eq(businessCategories.id, id));
+      const cat = rows[0];
+      if (!cat) throw new NotFoundError(`category ${id}`);
+      const body = req.body ?? {};
+      const next: Record<string, unknown> = { updatedAt: sql`now()` };
+      if (typeof body.name === 'string') {
+        const name = body.name.trim();
+        if (name.length === 0) throw new ValidationError('name must be non-empty');
+        if (name.length > 80) throw new ValidationError('name must be at most 80 characters');
+        if (name.toLowerCase() !== cat.name.toLowerCase()) {
+          const dup = await db
+            .select()
+            .from(businessCategories)
+            .where(sql`lower(${businessCategories.name}) = lower(${name})`);
+          if (dup.length > 0 && dup[0]!.id !== id) {
+            throw new ConflictError(`category already exists: ${dup[0]!.name}`);
+          }
+        }
+        if (name !== cat.name) next.name = name;
+      }
+      if ('description' in body) {
+        const raw = body.description;
+        if (raw === null || (typeof raw === 'string' && raw.trim().length === 0)) {
+          if (cat.description !== null) next.description = null;
+        } else if (typeof raw === 'string') {
+          const desc = raw.trim().slice(0, 500);
+          if (desc !== cat.description) next.description = desc;
+        }
+      }
+      if (Number.isFinite(body.sort_order) && body.sort_order >= 0) {
+        const so = Math.floor(body.sort_order);
+        if (so !== cat.sortOrder) next.sortOrder = so;
+      }
+      if (typeof body.archived === 'boolean' && body.archived !== cat.archived) {
+        next.archived = body.archived;
+      }
+      // updatedAt only → caller asked for an idempotent change.
+      if (Object.keys(next).length === 1) {
+        res.json(cat);
+        return;
+      }
+      const [updated] = await db
+        .update(businessCategories)
+        .set(next)
+        .where(eq(businessCategories.id, id))
+        .returning();
+      await writeAudit(db, {
+        actorUserId: req.user!.id,
+        entityType: 'business_category',
+        entityId: id,
+        action: 'business_category.update',
+        payload: next,
+      });
+      res.json(updated);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.delete('/categories/:id', async (req, res, next) => {
+    try {
+      const id = String(req.params.id);
+      const rows = await db.select().from(businessCategories).where(eq(businessCategories.id, id));
+      const cat = rows[0];
+      if (!cat) throw new NotFoundError(`category ${id}`);
+      // Soft-delete: archive instead of hard-delete so transactions
+      // already assigned to this category keep their FK valid.
+      await db
+        .update(businessCategories)
+        .set({ archived: true, updatedAt: sql`now()` })
+        .where(eq(businessCategories.id, id));
+      await writeAudit(db, {
+        actorUserId: req.user!.id,
+        entityType: 'business_category',
+        entityId: id,
+        action: 'business_category.archive',
+        payload: { name: cat.name },
+      });
+      res.status(204).end();
     } catch (err) {
       next(err);
     }

@@ -107,9 +107,9 @@ const EXPECTED_CSV_XERO =
   '03/12/2026,-74.21,GROCERY,GROCERY,\r\n';
 
 const EXPECTED_CSV_GENERIC =
-  'Date,Description,Amount,RunningBalance,CheckNumber,TRNTYPE,FITID\r\n' +
-  '03/08/2026,PAYROLL,3200.00,4125.79,,DIRECTDEP,VTC-abc1234567890def\r\n' +
-  '03/12/2026,GROCERY,-74.21,4051.58,,POS,VTC-zzz1234567890def\r\n';
+  'Date,Description,Amount,RunningBalance,CheckNumber,TRNTYPE,FITID,CleansedDescription,Category\r\n' +
+  '03/08/2026,PAYROLL,3200.00,4125.79,,DIRECTDEP,VTC-abc1234567890def,,\r\n' +
+  '03/12/2026,GROCERY,-74.21,4051.58,,POS,VTC-zzz1234567890def,,\r\n';
 
 const EXPECTED_OFX_XML =
   '<?xml version="1.0" encoding="UTF-8"?>\r\n' +

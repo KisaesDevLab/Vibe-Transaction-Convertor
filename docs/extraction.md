@@ -211,3 +211,34 @@ Ten exemplars in `packages/extractor/src/exemplars.ts`:
 
 Each is sanitized (no real PII / account numbers) and round-tripped
 through the Zod extraction schema in tests.
+
+## Optional post-extraction enrichment (Phase 33)
+
+Two operator-triggered, opt-in transforms run on top of an already-
+extracted statement. Both go through the same `LlmProvider`
+abstraction as extraction, via the new
+`provider.complete({ systemPrompt, userPrompt, schema })` call:
+
+1. **Cleanse description.** A button on the review page runs a single
+   batched call that turns `POS DBT 0123 SQ *AMTHAUS` into
+   `Square — Amthaus`. Result lands in
+   `transactions.cleansed_description`. At export time the cleansed
+   form is promoted to OFX/QFX/QBO `<NAME>` and the raw bank string is
+   preserved in `<MEMO>`.
+2. **Assign business category.** Picks exactly one entry from the
+   operator-editable `business_categories` table (admin manages it at
+   `/admin/categories`). Result lands in
+   `transactions.business_category_id`. Surfaced in the Generic CSV
+   export as a `Category` column. QBO/Xero CSV variants are unchanged.
+
+A row whose `enrichment_user_edited` flag is `true` (any
+cleansed-description or category override via the review grid) is
+skipped on subsequent batch enrichment so manual edits aren't
+clobbered.
+
+Cache: Redis-backed, keyed by
+`(raw_description, account_type, request_kind)`, 30-day TTL. Same
+merchant on the next statement is a cache hit. Anthropic monthly cap
+(existing `llm.anthropic.monthly_cap_usd` setting) applies unchanged.
+
+See ADR-021 for full design.

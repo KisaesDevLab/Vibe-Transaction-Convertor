@@ -14,6 +14,7 @@ import {
   useAddTransaction,
   useConfirmDateFormat,
   useDeleteTransaction,
+  useEnrichStatement,
   useReExtract,
   useRecomputeReconciliation,
   useSplitStatement,
@@ -22,6 +23,7 @@ import {
   useUpdateTransaction,
   type TransactionRow,
 } from '../hooks/useStatementsList';
+import { useCategories, useEnrichmentToggles } from '../hooks/useCategories';
 import { useAccount } from '../hooks/useStatements';
 import { useAccounts } from '../hooks/useAccounts';
 import { useCompany } from '../hooks/useCompanies';
@@ -96,6 +98,9 @@ export function StatementReviewPage() {
   const confirmFormat = useConfirmDateFormat(statementId);
   const ackMultiAccount = useAcknowledgeMultiAccount(statementId);
   const splitStmt = useSplitStatement(statementId);
+  const enrich = useEnrichStatement(statementId);
+  const enrichmentToggles = useEnrichmentToggles();
+  const categoriesQuery = useCategories();
   const me = useMe();
   const isAdmin = me.data?.role === 'admin';
   const toast = useToast();
@@ -361,12 +366,76 @@ export function StatementReviewPage() {
 
       <div className="grid gap-4 lg:grid-cols-[1fr_18rem]">
         <div className="space-y-4">
+          {/* Phase 33 — operator-triggered LLM enrichment. Two buttons,
+              one per transform; each is hidden when its admin toggle is
+              off and disabled while a call is in flight. The mutation
+              invalidates the statement query so the new cleansed /
+              category cells appear without a manual refresh. */}
+          {(enrichmentToggles.data?.cleanseEnabled || enrichmentToggles.data?.categoryEnabled) && (
+            <div className="flex flex-wrap items-center gap-2 rounded-lg border border-surface-muted bg-white p-3 text-sm">
+              <span className="text-ink-muted">AI enrichment:</span>
+              {enrichmentToggles.data?.cleanseEnabled ? (
+                <button
+                  type="button"
+                  disabled={enrich.isPending}
+                  onClick={async () => {
+                    try {
+                      const r = await enrich.mutateAsync({
+                        cleanse: true,
+                        categorize: false,
+                      });
+                      toast.success(
+                        `Cleansed ${r.enrichedCount} of ${r.txCount} rows` +
+                          (r.skippedUserEditedCount > 0
+                            ? ` (${r.skippedUserEditedCount} user-edited skipped)`
+                            : '') +
+                          (r.cacheHits > 0 ? ` · ${r.cacheHits} cache hits` : ''),
+                      );
+                    } catch (err) {
+                      toast.error(err instanceof ApiError ? err.message : 'enrichment failed');
+                    }
+                  }}
+                  className="rounded-md border border-surface-muted px-3 py-1.5 text-xs hover:bg-surface-subtle disabled:opacity-50"
+                >
+                  Cleanse descriptions
+                </button>
+              ) : null}
+              {enrichmentToggles.data?.categoryEnabled ? (
+                <button
+                  type="button"
+                  disabled={enrich.isPending}
+                  onClick={async () => {
+                    try {
+                      const r = await enrich.mutateAsync({
+                        cleanse: false,
+                        categorize: true,
+                      });
+                      toast.success(
+                        `Categorized ${r.enrichedCount} of ${r.txCount} rows` +
+                          (r.skippedUserEditedCount > 0
+                            ? ` (${r.skippedUserEditedCount} user-edited skipped)`
+                            : '') +
+                          (r.cacheHits > 0 ? ` · ${r.cacheHits} cache hits` : ''),
+                      );
+                    } catch (err) {
+                      toast.error(err instanceof ApiError ? err.message : 'enrichment failed');
+                    }
+                  }}
+                  className="rounded-md border border-surface-muted px-3 py-1.5 text-xs hover:bg-surface-subtle disabled:opacity-50"
+                >
+                  Assign categories
+                </button>
+              ) : null}
+              {enrich.isPending ? <span className="text-xs text-ink-subtle">running…</span> : null}
+            </div>
+          )}
           <TransactionGrid
             txs={txs}
             periodStart={s.periodStart}
             periodEnd={s.periodEnd}
             selectedId={selectedTx?.id ?? null}
             isAdmin={isAdmin}
+            categories={categoriesQuery.data}
             onSelect={(t) => setSelectedTx(t)}
             onSave={async (id, patch) => {
               try {

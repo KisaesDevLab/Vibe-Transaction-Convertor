@@ -17,6 +17,12 @@ export interface CsvRow {
   trntype?: string | undefined;
   fitid?: string | undefined;
   memo?: string | undefined;
+  // Phase 33 — generic-only enrichment columns. Empty strings render as
+  // a blank cell so the column always appears in the header (the
+  // generic CSV is the documented power-user export and operators who
+  // don't run enrichment still want stable column ordering).
+  cleansedDescription?: string | null | undefined;
+  category?: string | null | undefined;
 }
 
 const escapeCell = (s: string): string => {
@@ -79,11 +85,22 @@ const renderXero = (rows: CsvRow[]): string => {
 };
 
 // Generic: full denormalized row — Date, Description, Amount,
-// RunningBalance, CheckNumber, TRNTYPE, FITID. Used for spreadsheet
-// review and as the audit-friendly fallback. Phase 20 item 2.
+// RunningBalance, CheckNumber, TRNTYPE, FITID, CleansedDescription,
+// Category. Used for spreadsheet review and as the audit-friendly
+// fallback. Phase 20 item 2; Phase 33 enrichment columns.
 const renderGeneric = (rows: CsvRow[]): string => {
   const out: string[][] = [
-    ['Date', 'Description', 'Amount', 'RunningBalance', 'CheckNumber', 'TRNTYPE', 'FITID'],
+    [
+      'Date',
+      'Description',
+      'Amount',
+      'RunningBalance',
+      'CheckNumber',
+      'TRNTYPE',
+      'FITID',
+      'CleansedDescription',
+      'Category',
+    ],
   ];
   for (const r of rows) {
     out.push([
@@ -94,6 +111,8 @@ const renderGeneric = (rows: CsvRow[]): string => {
       r.checkNumber ?? '',
       r.trntype ?? '',
       r.fitid ?? '',
+      r.cleansedDescription ?? '',
+      r.category ?? '',
     ]);
   }
   return toCsv(out);

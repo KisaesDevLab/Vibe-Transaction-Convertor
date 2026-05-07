@@ -253,6 +253,29 @@ export const statements = vibetc.table(
   }),
 );
 
+export const businessCategories = vibetc.table(
+  'business_categories',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    name: text('name').notNull(),
+    description: text('description'),
+    sortOrder: integer('sort_order').notNull().default(100),
+    archived: boolean('archived').notNull().default(false),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => ({
+    // Case-insensitive uniqueness on name. Created in migration 0007;
+    // we keep it declared on the Drizzle side so generated diffs match.
+    nameLowerUq: uniqueIndex('business_categories_name_lower_uq').on(sql`lower(${t.name})`),
+    archivedSortIdx: index('business_categories_archived_sort_idx').on(
+      t.archived,
+      t.sortOrder,
+      t.name,
+    ),
+  }),
+);
+
 export const transactions = vibetc.table(
   'transactions',
   {
@@ -273,6 +296,15 @@ export const transactions = vibetc.table(
     sourceBboxJson: jsonb('source_bbox_json'),
     confidence: real('confidence').notNull().default(1),
     userEdited: boolean('user_edited').notNull().default(false),
+    // Phase 33 — LLM enrichment. cleansedDescription is the normalized
+    // human-readable form that ships in <NAME> at OFX/QFX/QBO export
+    // time; raw `description` is preserved in <MEMO>.
+    cleansedDescription: text('cleansed_description'),
+    businessCategoryId: uuid('business_category_id').references(() => businessCategories.id, {
+      onDelete: 'set null',
+    }),
+    enrichmentUserEdited: boolean('enrichment_user_edited').notNull().default(false),
+    enrichmentRunAt: timestamp('enrichment_run_at', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
   },
@@ -289,6 +321,7 @@ export const transactions = vibetc.table(
       t.seqInDay,
     ),
     amountNonZero: check('transactions_amount_nonzero', sql`${t.amountCents} <> 0`),
+    businessCategoryIdx: index('transactions_business_category_idx').on(t.businessCategoryId),
   }),
 );
 

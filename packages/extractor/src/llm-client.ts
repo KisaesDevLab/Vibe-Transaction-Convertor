@@ -56,9 +56,34 @@ export interface ExtractOptions extends UserPromptOptions {
   schema?: object;
 }
 
+// Generic structured-output call for non-extraction LLM use (description
+// cleansing, business-category assignment, future enrichments). The
+// caller supplies its own system + user prompts and JSON Schema; the
+// provider returns the parsed-but-not-validated payload plus the same
+// telemetry shape `extract()` produces. The caller is responsible for
+// validating the payload against its own Zod schema.
+export interface CompleteOptions {
+  systemPrompt: string;
+  userPrompt: string;
+  schema: object;
+  // Identifier the local gateway uses inside `response_format.json_schema.name`
+  // and the Anthropic provider uses as the tool name. Defaults to
+  // 'structured_output' but operators benefit from a descriptive value
+  // in audit/logs.
+  schemaName?: string | undefined;
+  maxOutputTokens?: number | undefined;
+}
+
+export interface CompleteResult {
+  data: unknown;
+  rawJson: string;
+  telemetry: ExtractCallTelemetry;
+}
+
 export interface LlmProvider {
   readonly id: 'local' | 'anthropic';
   extract(markdown: string, opts?: ExtractOptions | object): Promise<ExtractResult>;
+  complete(opts: CompleteOptions): Promise<CompleteResult>;
   health(): Promise<{ ok: boolean; detail?: string }>;
 }
 
@@ -161,6 +186,53 @@ export class LocalGatewayProvider implements LlmProvider {
           ms: Date.now() - start,
           model: this.modelId,
           costMicros: 0n, // local gateway is free
+        },
+      };
+    } finally {
+      clearTimeout(t);
+    }
+  }
+
+  async complete(opts: CompleteOptions): Promise<CompleteResult> {
+    if (!this.baseUrl) throw new Error('LLM_GATEWAY_URL not set');
+    const messages = [
+      { role: 'system', content: opts.systemPrompt },
+      { role: 'user', content: opts.userPrompt },
+    ];
+    const ctl = new AbortController();
+    const t = setTimeout(() => ctl.abort(), this.timeoutMs);
+    const start = Date.now();
+    try {
+      const res = await this.fetcher(`${this.baseUrl}/v1/chat/completions`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          model: this.modelId,
+          messages,
+          response_format: {
+            type: 'json_schema',
+            json_schema: { name: opts.schemaName ?? 'structured_output', schema: opts.schema },
+          },
+          temperature: 0,
+          max_tokens: opts.maxOutputTokens ?? Number(process.env.LLM_MAX_COMPLETION_TOKENS ?? 6000),
+        }),
+        signal: ctl.signal,
+      });
+      if (!res.ok) throw new Error(`local gateway HTTP ${res.status}`);
+      const body = (await res.json()) as {
+        choices?: Array<{ message?: { content?: string } }>;
+        usage?: { prompt_tokens?: number; completion_tokens?: number };
+      };
+      const content = body.choices?.[0]?.message?.content ?? '';
+      return {
+        data: JSON.parse(content),
+        rawJson: content,
+        telemetry: {
+          inputTokens: body.usage?.prompt_tokens ?? 0,
+          outputTokens: body.usage?.completion_tokens ?? 0,
+          ms: Date.now() - start,
+          model: this.modelId,
+          costMicros: 0n,
         },
       };
     } finally {
@@ -345,6 +417,68 @@ export class AnthropicProvider implements LlmProvider {
       const outputTokens = body.usage?.output_tokens ?? 0;
       return {
         data,
+        rawJson: JSON.stringify(toolUse.input),
+        telemetry: {
+          inputTokens,
+          outputTokens,
+          ms: Date.now() - start,
+          model: this.model,
+          costMicros: computeAnthropicCostMicros(
+            this.model,
+            inputTokens,
+            outputTokens,
+            this.priceTable,
+          ),
+        },
+      };
+    } finally {
+      clearTimeout(t);
+    }
+  }
+
+  async complete(opts: CompleteOptions): Promise<CompleteResult> {
+    const toolName = opts.schemaName ?? 'structured_output';
+    const tool = {
+      name: toolName,
+      description: 'Emit the requested structured output.',
+      input_schema: opts.schema,
+    };
+    const ctl = new AbortController();
+    const t = setTimeout(() => ctl.abort(), this.timeoutMs);
+    const start = Date.now();
+    try {
+      const res = await this.fetcher(`${this.baseUrl}/v1/messages`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-api-key': this.apiKey,
+          'anthropic-version': '2023-06-01',
+        },
+        body: JSON.stringify({
+          model: this.model,
+          system: opts.systemPrompt,
+          max_tokens: opts.maxOutputTokens ?? Number(process.env.LLM_MAX_COMPLETION_TOKENS ?? 6000),
+          tools: [tool],
+          tool_choice: { type: 'tool', name: toolName },
+          messages: [{ role: 'user', content: opts.userPrompt }],
+        }),
+        signal: ctl.signal,
+      });
+      if (!res.ok) throw new Error(`anthropic HTTP ${res.status}`);
+      const body = (await res.json()) as {
+        content?: Array<
+          { type: 'tool_use'; name: string; input: unknown } | { type: 'text'; text: string }
+        >;
+        usage?: { input_tokens?: number; output_tokens?: number };
+      };
+      const toolUse = body.content?.find(
+        (c): c is { type: 'tool_use'; name: string; input: unknown } => c.type === 'tool_use',
+      );
+      if (!toolUse) throw new Error('anthropic response missing tool_use block');
+      const inputTokens = body.usage?.input_tokens ?? 0;
+      const outputTokens = body.usage?.output_tokens ?? 0;
+      return {
+        data: toolUse.input,
         rawJson: JSON.stringify(toolUse.input),
         telemetry: {
           inputTokens,

@@ -1,15 +1,24 @@
 import { Router } from 'express';
-import { eq, sql } from 'drizzle-orm';
+import { eq, inArray, sql } from 'drizzle-orm';
 
 import { db } from '../db/client.js';
 import { statements, transactions } from '../db/schema.js';
 import { ForbiddenError, NotFoundError, ValidationError } from '../lib/errors.js';
 import { requireAdmin } from '../middleware/auth.js';
 import { writeAudit } from '../services/audit.js';
+import {
+  CategoriesEmptyError,
+  EnrichmentDisabledError,
+  MonthlyCapReachedError,
+  enrichStatement,
+} from '../services/enrichment.js';
 import { overrideReconciliation } from '../services/exports.js';
 import { recomputeReconciliation } from '../services/reconciliation.js';
 import { computeFitid, inferTrntype, normalizeDescription } from '@vibe-tx-converter/exporters';
 import { findSuspectRows } from '@vibe-tx-converter/reconciler';
+import { businessCategories } from '../db/schema.js';
+import { schemas } from '@vibe-tx-converter/shared';
+const { ENRICHMENT_CLEANSED_MAX_LENGTH } = schemas.enrichment;
 import { enqueueExtraction, extractionQueue } from '../jobs/queues.js';
 
 const serializeBigint = <T extends Record<string, unknown>>(row: T): T => {
@@ -66,10 +75,31 @@ export const statementsRouter = (): Router => {
         }
       }
 
+      // Phase 33 — resolve business_category_id → name in a single
+      // batch fetch so the review grid can render the cell without a
+      // second round-trip per row. Archived categories still resolve so
+      // historical assignments stay visible.
+      const categoryIds = [
+        ...new Set(
+          txs.map((t) => t.businessCategoryId).filter((v): v is string => typeof v === 'string'),
+        ),
+      ];
+      const categoryRows =
+        categoryIds.length > 0
+          ? await db
+              .select({ id: businessCategories.id, name: businessCategories.name })
+              .from(businessCategories)
+              .where(inArray(businessCategories.id, categoryIds))
+          : [];
+      const categoryNameById = new Map(categoryRows.map((r) => [r.id, r.name]));
+
       res.json({
         statement: serializeBigint(stmt),
         transactions: txs.map((t) => ({
           ...serializeBigint(t),
+          businessCategoryName: t.businessCategoryId
+            ? (categoryNameById.get(t.businessCategoryId) ?? null)
+            : null,
           // null when the row reconciles cleanly; otherwise the cents
           // delta against the running balance the LLM wrote.
           runningBalanceDeltaCents: suspectByTxId[t.id] ?? null,
@@ -99,6 +129,12 @@ export const statementsRouter = (): Router => {
         amountCents?: bigint;
         trntype?: string;
         postedDate?: string;
+        // Phase 33 — operator overrides for the LLM enrichment fields.
+        // Either set to a non-null value flips enrichmentUserEdited so a
+        // subsequent batch enrich() doesn't clobber the manual choice.
+        cleansedDescription?: string | null;
+        businessCategoryId?: string | null;
+        enrichmentUserEdited?: boolean;
       } = {};
       if (typeof body.description === 'string') {
         const d = body.description.trim();
@@ -120,6 +156,49 @@ export const statementsRouter = (): Router => {
           throw new ValidationError('posted_date must be YYYY-MM-DD');
         }
         if (body.posted_date !== tx.postedDate) next.postedDate = body.posted_date;
+      }
+      // cleansed_description: string | null. Empty string ('') is treated
+      // as "clear it"; any other string trims and truncates to the schema
+      // max so an over-eager UI can't paste a 4KB blurb in.
+      if ('cleansed_description' in body) {
+        const raw = body.cleansed_description;
+        if (raw === null) {
+          if (tx.cleansedDescription !== null) next.cleansedDescription = null;
+        } else if (typeof raw === 'string') {
+          const trimmed = raw.trim().slice(0, ENRICHMENT_CLEANSED_MAX_LENGTH);
+          const newVal = trimmed.length === 0 ? null : trimmed;
+          if (newVal !== tx.cleansedDescription) next.cleansedDescription = newVal;
+        } else {
+          throw new ValidationError('cleansed_description must be a string or null');
+        }
+      }
+      if ('business_category_id' in body) {
+        const raw = body.business_category_id;
+        if (raw === null) {
+          if (tx.businessCategoryId !== null) next.businessCategoryId = null;
+        } else if (typeof raw === 'string') {
+          // Validate the FK before letting the DB throw a constraint
+          // error — clearer message + we can confirm the category isn't
+          // archived (the picker hides those, but a stale tab might
+          // submit one anyway).
+          const catRows = await db
+            .select()
+            .from(businessCategories)
+            .where(eq(businessCategories.id, raw));
+          const cat = catRows[0];
+          if (!cat) throw new ValidationError(`business_category_id not found: ${raw}`);
+          if (cat.archived) {
+            throw new ValidationError(`business_category_id is archived: ${cat.name}`);
+          }
+          if (raw !== tx.businessCategoryId) next.businessCategoryId = raw;
+        } else {
+          throw new ValidationError('business_category_id must be a uuid string or null');
+        }
+      }
+      // Either enrichment-field change marks the row as user-edited so
+      // a later "Cleanse"/"Assign categories" click skips it.
+      if (next.cleansedDescription !== undefined || next.businessCategoryId !== undefined) {
+        next.enrichmentUserEdited = true;
       }
       const hasChange = Object.keys(next).length > 0;
       if (!hasChange) {
@@ -574,6 +653,49 @@ export const statementsRouter = (): Router => {
         payload: { format },
       });
       res.json({ ok: true, format });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // Phase 33 — operator-triggered LLM enrichment. Runs the cleansing
+  // and/or business-category-assignment steps over every transaction in
+  // the statement. Both transforms can be requested in the same call;
+  // each requires its own admin toggle to be on. User-edited rows are
+  // skipped so a click never overwrites manual review work.
+  router.post('/:id/enrich', async (req, res, next) => {
+    try {
+      const id = String(req.params.id);
+      const body = req.body ?? {};
+      const cleanse = body.cleanse === true;
+      const categorize = body.categorize === true;
+      if (!cleanse && !categorize) {
+        throw new ValidationError('at least one of cleanse / categorize must be true');
+      }
+      const stmtRows = await db.select().from(statements).where(eq(statements.id, id));
+      if (!stmtRows[0]) throw new NotFoundError(`statement ${id}`);
+      try {
+        const result = await enrichStatement(db, id, {
+          cleanse,
+          categorize,
+          actorUserId: req.user!.id,
+        });
+        res.json({
+          ...result,
+          costMicros: result.costMicros.toString(),
+        });
+      } catch (err) {
+        if (err instanceof EnrichmentDisabledError) {
+          throw new ForbiddenError(err.message);
+        }
+        if (err instanceof CategoriesEmptyError) {
+          throw new ValidationError(err.message);
+        }
+        if (err instanceof MonthlyCapReachedError) {
+          throw new ForbiddenError(err.message);
+        }
+        throw err;
+      }
     } catch (err) {
       next(err);
     }

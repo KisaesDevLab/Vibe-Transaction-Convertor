@@ -136,6 +136,9 @@ export function AdminHomePage() {
           <Link to="/admin/backup" className="text-accent hover:underline">
             Backup →
           </Link>
+          <Link to="/admin/categories" className="text-accent hover:underline">
+            Categories →
+          </Link>
         </nav>
       </header>
 

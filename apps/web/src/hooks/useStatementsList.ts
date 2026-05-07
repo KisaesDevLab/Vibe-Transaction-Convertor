@@ -48,6 +48,20 @@ export interface TransactionRow {
   sourceBboxJson: [number, number, number, number] | null;
   userEdited: boolean;
   confidence: number;
+  // Phase 33 — LLM enrichment fields. Null until the operator clicks
+  // "Cleanse descriptions" / "Assign categories" on the review page.
+  // enrichmentUserEdited flips true when the user overrides either
+  // field manually so a later batch enrich() skips the row.
+  cleansedDescription: string | null;
+  businessCategoryId: string | null;
+  // Server resolves the FK to the category name in one batched fetch
+  // so the grid can render the cell without a second round-trip per
+  // row. Null when the row has no category assigned, or when the
+  // assigned category was hard-deleted (very rare — soft-archive is
+  // the default).
+  businessCategoryName: string | null;
+  enrichmentUserEdited: boolean;
+  enrichmentRunAt: string | null;
   // Server-computed: cents the printed running_balance is off vs.
   // (prior_running + this row's amount). Null when the row reconciles
   // cleanly or no running balance was extracted. Phase 18 #25.
@@ -103,6 +117,11 @@ export interface TransactionPatch {
   amount_cents?: number | string;
   trntype?: string;
   posted_date?: string;
+  // Phase 33 — operator overrides for LLM enrichment fields. Either
+  // field set to a non-null value flips enrichment_user_edited so the
+  // row is skipped on a subsequent batch enrichment click.
+  cleansed_description?: string | null;
+  business_category_id?: string | null;
 }
 
 export const useUpdateTransaction = (statementId: string) => {
@@ -143,6 +162,31 @@ export interface AddTransactionInput {
   check_number?: string;
   source_page?: number;
 }
+
+// Phase 33 — operator-triggered LLM enrichment. The button on the review
+// page calls this with `{cleanse: true}` or `{categorize: true}` (or both).
+// Server skips rows where enrichmentUserEdited is true and reports back
+// counts so the UI can toast "12 enriched, 3 manual edits skipped, 8 from
+// cache".
+export interface EnrichStatementResult {
+  txCount: number;
+  enrichedCount: number;
+  skippedUserEditedCount: number;
+  cacheHits: number;
+  llmCalls: number;
+  costMicros: string;
+  model: string | null;
+  provider: 'local' | 'anthropic' | null;
+}
+
+export const useEnrichStatement = (statementId: string) => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (opts: { cleanse: boolean; categorize: boolean }) =>
+      api.post<EnrichStatementResult>(`/api/statements/${statementId}/enrich`, opts),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['statement', statementId] }),
+  });
+};
 
 export const useAddTransaction = (statementId: string) => {
   const qc = useQueryClient();

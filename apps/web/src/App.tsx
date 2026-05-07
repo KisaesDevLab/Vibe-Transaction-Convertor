@@ -12,6 +12,7 @@ import { RegisterFirstAdminPage } from './pages/RegisterFirstAdminPage';
 import { AdminHomePage } from './pages/AdminHomePage';
 import { AuditLogPage } from './pages/AuditLogPage';
 import { BackupAdminPage } from './pages/BackupAdminPage';
+import { CategoryAdminPage } from './pages/CategoryAdminPage';
 import { DiagnosticsPage } from './pages/DiagnosticsPage';
 import { EnginesAdminPage } from './pages/EnginesAdminPage';
 import { ExportPage } from './pages/ExportPage';
@@ -106,6 +107,14 @@ export function App() {
                   element={
                     <AdminGate>
                       <BackupAdminPage />
+                    </AdminGate>
+                  }
+                />
+                <Route
+                  path="/admin/categories"
+                  element={
+                    <AdminGate>
+                      <CategoryAdminPage />
                     </AdminGate>
                   }
                 />

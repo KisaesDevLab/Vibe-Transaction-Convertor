@@ -4,6 +4,7 @@ import { decimalString, formatUsd, parseDecimalToCents } from '@vibe-tx-converte
 
 import { DeleteConfirmDialog } from './DeleteConfirmDialog';
 import { type TransactionPatch, type TransactionRow } from '../hooks/useStatementsList';
+import { type BusinessCategory } from '../hooks/useCategories';
 import { cn } from '../lib/cn';
 
 const TRNTYPE_OPTIONS: string[] = [
@@ -63,6 +64,7 @@ export function TransactionGrid({
   isAdmin,
   onSelect,
   selectedId,
+  categories,
 }: {
   txs: TransactionRow[];
   periodStart: string | null;
@@ -82,6 +84,10 @@ export function TransactionGrid({
   isAdmin?: boolean | undefined;
   onSelect?: ((tx: TransactionRow) => void) | undefined;
   selectedId?: string | null | undefined;
+  // Phase 33 — non-archived business categories for the row dropdown.
+  // Empty / undefined hides the column; the parent fetches via
+  // useCategories() and passes through.
+  categories?: BusinessCategory[] | undefined;
 }) {
   const [filters, setFilters] = useState<GridFilters>({
     search: '',
@@ -422,6 +428,12 @@ export function TransactionGrid({
                 order={sortOrder}
                 onClick={() => toggleSort('trntype')}
               />
+              {categories ? (
+                <>
+                  <th className="px-3 py-2 font-medium">Cleansed</th>
+                  <th className="px-3 py-2 font-medium">Category</th>
+                </>
+              ) : null}
               <th className="px-3 py-2 font-medium">Check #</th>
               <SortHeader
                 label="Amount"
@@ -461,12 +473,13 @@ export function TransactionGrid({
                   setEditingId(null);
                 }}
                 onDelete={onDelete ? () => setPendingDelete({ kind: 'one', tx }) : undefined}
+                categories={categories}
               />
             ))}
             {rows.length === 0 ? (
               <tr>
                 <td
-                  colSpan={isAdmin ? 10 : 8}
+                  colSpan={(isAdmin ? 10 : 8) + (categories ? 2 : 0)}
                   className="px-3 py-8 text-center text-sm text-ink-muted"
                 >
                   No matching transactions.
@@ -698,6 +711,7 @@ function Row({
   onCancelEdit,
   onSave,
   onDelete,
+  categories,
 }: {
   tx: TransactionRow;
   periodStart: string | null;
@@ -714,6 +728,7 @@ function Row({
   onCancelEdit: () => void;
   onSave: (patch: TransactionPatch) => Promise<unknown>;
   onDelete?: (() => void) | undefined;
+  categories?: BusinessCategory[] | undefined;
 }) {
   const [desc, setDesc] = useState(tx.description);
   const [amount, setAmount] = useState(decimalString(BigInt(tx.amountCents)));
@@ -838,6 +853,32 @@ function Row({
           <span className="rounded bg-surface-subtle px-1.5 py-0.5 text-xs">{tx.trntype}</span>
         )}
       </td>
+      {categories ? (
+        <>
+          {/* Phase 33 — cleansed description. Editable inline; saving
+              flips enrichment_user_edited so a later batch enrich
+              skips the row. Truncated display when not editing. */}
+          <td className="px-3 py-2" onClick={(e) => e.stopPropagation()}>
+            <CleansedCell
+              tx={tx}
+              onSaveCleansed={async (val) => {
+                await onSave({ cleansed_description: val });
+              }}
+            />
+          </td>
+          {/* Phase 33 — category dropdown. Empty option clears the
+              field; non-empty maps name back to id via lookup. */}
+          <td className="px-3 py-2" onClick={(e) => e.stopPropagation()}>
+            <CategoryCell
+              tx={tx}
+              categories={categories}
+              onSaveCategory={async (id) => {
+                await onSave({ business_category_id: id });
+              }}
+            />
+          </td>
+        </>
+      ) : null}
       <td className="px-3 py-2 text-xs text-ink-subtle">{tx.checkNumber ?? ''}</td>
       <td className="px-3 py-2 text-right tabular-nums">
         {editing ? (
@@ -929,5 +970,139 @@ function Row({
         </td>
       ) : null}
     </tr>
+  );
+}
+
+// Phase 33 — cleansed-description cell. Click to edit; commits on
+// blur if the value actually changed (so simply opening the input
+// doesn't write a userEdited row). Truncates display to keep rows
+// from ballooning vertically — full text is in the input on edit and
+// in the title attribute as a tooltip.
+function CleansedCell({
+  tx,
+  onSaveCleansed,
+}: {
+  tx: TransactionRow;
+  onSaveCleansed: (val: string | null) => Promise<unknown>;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [value, setValue] = useState(tx.cleansedDescription ?? '');
+  const [saving, setSaving] = useState(false);
+
+  // Re-sync local state when the row's underlying value changes (e.g.
+  // after a batch "Cleanse descriptions" run completes).
+  useEffect(() => {
+    if (!editing) setValue(tx.cleansedDescription ?? '');
+  }, [tx.cleansedDescription, editing]);
+
+  const commit = async (): Promise<void> => {
+    const trimmed = value.trim();
+    const next = trimmed.length === 0 ? null : trimmed;
+    if (next === (tx.cleansedDescription ?? null)) {
+      setEditing(false);
+      return;
+    }
+    setSaving(true);
+    try {
+      await onSaveCleansed(next);
+    } finally {
+      setSaving(false);
+      setEditing(false);
+    }
+  };
+
+  if (editing) {
+    return (
+      <input
+        autoFocus
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+        onBlur={() => void commit()}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            void commit();
+          }
+          if (e.key === 'Escape') {
+            setValue(tx.cleansedDescription ?? '');
+            setEditing(false);
+          }
+        }}
+        disabled={saving}
+        maxLength={80}
+        className="w-full rounded-md border border-surface-muted px-2 py-1 text-xs"
+        placeholder="Cleansed name…"
+      />
+    );
+  }
+
+  const display = tx.cleansedDescription ?? '';
+  return (
+    <button
+      type="button"
+      onClick={() => setEditing(true)}
+      className="text-left text-xs hover:underline"
+      title={display || 'Click to add a cleansed description'}
+    >
+      {display.length > 32 ? `${display.slice(0, 32)}…` : display || '—'}
+      {tx.enrichmentUserEdited ? (
+        <span className="ml-1 text-[10px] text-ink-subtle">(edited)</span>
+      ) : null}
+    </button>
+  );
+}
+
+// Phase 33 — category dropdown. Empty option clears the assignment;
+// non-empty maps the displayed name back to the category id. Archived
+// categories aren't in `categories` so the user can't pick them, but
+// existing assignments to a now-archived category still display via
+// `tx.businessCategoryName` (resolved server-side regardless of
+// archive state).
+function CategoryCell({
+  tx,
+  categories,
+  onSaveCategory,
+}: {
+  tx: TransactionRow;
+  categories: BusinessCategory[];
+  onSaveCategory: (id: string | null) => Promise<unknown>;
+}) {
+  const [saving, setSaving] = useState(false);
+  const value = tx.businessCategoryId ?? '';
+  const archivedAssignedName =
+    !categories.some((c) => c.id === tx.businessCategoryId) && tx.businessCategoryName
+      ? tx.businessCategoryName
+      : null;
+
+  const onChange = async (e: React.ChangeEvent<HTMLSelectElement>): Promise<void> => {
+    const next = e.target.value === '' ? null : e.target.value;
+    if (next === (tx.businessCategoryId ?? null)) return;
+    setSaving(true);
+    try {
+      await onSaveCategory(next);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <select
+      value={value}
+      onChange={onChange}
+      disabled={saving}
+      className="rounded-md border border-surface-muted bg-white px-1.5 py-1 text-xs"
+    >
+      <option value="">—</option>
+      {archivedAssignedName ? (
+        <option value={tx.businessCategoryId!} disabled>
+          {archivedAssignedName} (archived)
+        </option>
+      ) : null}
+      {categories.map((c) => (
+        <option key={c.id} value={c.id}>
+          {c.name}
+        </option>
+      ))}
+    </select>
   );
 }
