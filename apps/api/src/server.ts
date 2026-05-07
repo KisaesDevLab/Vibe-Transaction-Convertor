@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { logger } from './lib/logger.js';
 import { errorHandler, notFoundHandler } from './middleware/error-handler.js';
 import { loadSession, requireAuth } from './middleware/auth.js';
+import { stripBasePath } from './middleware/base-path.js';
 import { csrf, csrfTokenHandler } from './middleware/csrf.js';
 import { requireInternalNetwork } from './middleware/internal-network.js';
 import { unauthRateLimiter } from './middleware/rate-limit.js';
@@ -34,6 +35,11 @@ export const createApp = (): Express => {
   app.set('trust proxy', 1);
 
   app.use(requestId);
+
+  // Vibe-Appliance forwards `/vibe-tx-converter/...` requests with the
+  // prefix intact; strip it before any routing so the api, static, and
+  // SPA-fallback all see normalized paths. No-op in standalone mode.
+  app.use(stripBasePath());
 
   app.use(
     helmet({
