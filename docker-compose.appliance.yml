@@ -14,7 +14,12 @@ x-api-env: &api-env
   LLM_PROVIDER: local
   LLM_MODEL_ID: qwen3-8b
   SESSION_SECRET: ${SESSION_SECRET:?SESSION_SECRET must be set}
-  WEB_BASE_URL: ${WEB_BASE_URL:-https://vibetc.local}
+  # The appliance installer derives this from `routes[0].host` in
+  # vibe-app.yaml (e.g. https://tx.<appliance-domain>) and threads it in
+  # so the API CORS allowlist matches the SPA's actual origin. Bare
+  # overlay deploys without the installer must set it explicitly — fail
+  # loudly here rather than silently 403 every CORS request.
+  WEB_BASE_URL: ${WEB_BASE_URL:?WEB_BASE_URL must be set (e.g. https://tx.<appliance-domain>)}
   DATA_DIR: /var/lib/vibetc
   WORKER_INLINE: 'true'
   APPLIANCE_MODE: 'true'
@@ -27,7 +32,14 @@ services:
     # docker-compose.appliance.local-build.yml (or just compose -f).
     image: ghcr.io/kisaesdevlab/vibe-tx-converter:${VIBETC_IMAGE_TAG:-latest}
     pull_policy: always
-    environment: *api-env
+    environment:
+      <<: *api-env
+      # The full vibe-installer flow runs migrations as a separate step
+      # (see vibe-app.yaml `migrations.command`). Bare-overlay deploys
+      # have no such step, so the api auto-migrates on boot — drizzle
+      # migrations are idempotent, so installer + auto-migrate is safe
+      # together.
+      MIGRATIONS_AUTO: 'true'
     networks:
       - vibe-appliance
     volumes:

@@ -13,7 +13,14 @@ x-api-env: &api-env
   LLM_PROVIDER: local
   LLM_MODEL_ID: qwen3-8b
   SESSION_SECRET: ${SESSION_SECRET:?SESSION_SECRET must be set}
-  WEB_BASE_URL: ${WEB_BASE_URL:-https://localhost}
+  # Default LAN install: Caddy serves plain HTTP on :80 (the Caddyfile's
+  # `tls internal` block is commented out by default), so cookies must
+  # not be marked Secure or browsers drop them and login becomes a 401
+  # loop. CORS allowlist must agree with the actual served origin.
+  # Operators flipping to TLS set both: SESSION_SECURE=true and
+  # WEB_BASE_URL=https://<their-domain>.
+  WEB_BASE_URL: ${WEB_BASE_URL:-http://localhost}
+  SESSION_SECURE: ${SESSION_SECURE:-false}
   DATA_DIR: /var/lib/vibetc
 
 services:
@@ -74,6 +81,12 @@ services:
       <<: *api-env
       # Worker runs in its own container; api stays request-only.
       WORKER_INLINE: 'false'
+      # Auto-apply pending Drizzle migrations on api boot. Without this
+      # a fresh `docker compose up` would land the api against an empty
+      # postgres schema and fail /api/health/ready forever. The flag
+      # lives on the api service (not the shared anchor) on purpose so
+      # the worker doesn't race the api running migrations on startup.
+      MIGRATIONS_AUTO: 'true'
     expose:
       - '4000'
     volumes:
@@ -83,8 +96,13 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    # Liveness probe (matches Dockerfile HEALTHCHECK and the appliance
+    # overlay) — readiness depends on Postgres/Redis/etc, which can flap
+    # under restart cascades and would push the api into restart-loop
+    # territory before migrations finish. Caddy still waits for this
+    # service to be `healthy` via depends_on, just on liveness now.
     healthcheck:
-      test: ['CMD-SHELL', 'wget -q -O - http://localhost:4000/api/health/ready || exit 1']
+      test: ['CMD-SHELL', 'wget -q -O - http://localhost:4000/api/health/live || exit 1']
       interval: 5s
       timeout: 5s
       retries: 30

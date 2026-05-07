@@ -12,8 +12,26 @@ cp .env.example .env       # set SESSION_SECRET (>= 32 bytes)
 docker compose --profile standalone up -d
 ```
 
+Run the command from the repo root — `docker-compose.yml` mounts
+`./Caddyfile` with a relative path, and Caddy will refuse to start if
+launched from elsewhere.
+
 This brings up Postgres 16, Redis 7, GLM-OCR, the local LLM gateway,
-and the API at `http://localhost:4000`.
+Caddy, and the API. Caddy serves plain HTTP on `:80` by default so the
+out-of-the-box experience works on a LAN with no DNS or cert setup.
+For that mode the compose ships `SESSION_SECURE=false` and
+`WEB_BASE_URL=http://localhost` — the Secure-cookie flag is dropped
+silently by browsers on HTTP, so leaving it on would 401-loop login.
+
+To run the standalone deploy under HTTPS (recommended for anything but
+a LAN evaluation):
+
+1. Edit `Caddyfile` and uncomment the `tls internal` block (self-signed
+   certs for LAN-only deploys) or set `VIBETC_DOMAIN=<your domain>` so
+   Caddy provisions a Let's Encrypt cert.
+2. Set `SESSION_SECURE=true` and `WEB_BASE_URL=https://<your domain>`
+   in `.env`.
+3. `docker compose --profile standalone up -d`.
 
 ### Vibe Appliance install
 
