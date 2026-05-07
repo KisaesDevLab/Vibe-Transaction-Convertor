@@ -59,11 +59,17 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/kisaesdevlab/vibe-tx-converter
+          # workflow_dispatch is the "interim pull-this-now image" path:
+          # it tags `:latest` and `:sha-<short>` so the appliance can pull
+          # a fix that hasn't earned a version tag yet, without losing the
+          # immutable identifier. Tag pushes still drive the full
+          # semver/major.minor/latest set.
           tags: |
             type=ref,event=tag
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch' }}
+            type=sha,prefix=sha-,enable=${{ github.event_name == 'workflow_dispatch' }}
 
       - id: build
         uses: docker/build-push-action@v6
@@ -125,12 +131,16 @@ jobs:
           sarif_file: trivy.sarif
 
       # Phase 30 #5 — publish a GitHub Release with the generated
-      # changelog and a checksum file.
+      # changelog and a checksum file. Skipped for workflow_dispatch —
+      # there's no version tag to hang the release off of, and the
+      # interim image is identified by `:sha-<short>` instead.
       - name: Sha256 of build outputs
+        if: startsWith(github.ref, 'refs/tags/v')
         run: |
           echo "${{ steps.build.outputs.digest }} ghcr.io/kisaesdevlab/vibe-tx-converter" \
             > digest.txt
-      - uses: softprops/action-gh-release@v2
+      - if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: false
           body: ${{ needs.changelog.outputs.changelog }}
