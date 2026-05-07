@@ -14,6 +14,7 @@ RUN corepack enable && corepack prepare pnpm@9.15.9 --activate
 
 COPY pnpm-workspace.yaml package.json pnpm-lock.yaml* ./
 COPY tsconfig.base.json tsconfig.json eslint.config.mjs ./
+COPY vibe-app.yaml ./vibe-app.yaml
 COPY apps ./apps
 COPY packages ./packages
 COPY data ./data
@@ -62,6 +63,9 @@ COPY --from=builder /app/apps/api/src/db/migrations ./apps/api/dist/db/migration
 COPY --from=builder /app/apps/web/dist ./apps/web/dist
 COPY --from=builder /app/packages ./packages
 COPY --from=builder /app/data ./data
+# BuildPlan §29.12 — manifest must be present at runtime so the boot
+# handshake can verify the bundled version against APPLIANCE_VERSION.
+COPY --from=builder /app/vibe-app.yaml ./vibe-app.yaml
 # Runtime base-path injection — substitutes /__VIBE_BASE_PATH__/ in
 # the built SPA bundle before the API server starts so the same image
 # can serve either '/' (standalone) or '/<prefix>/' (Vibe-Appliance

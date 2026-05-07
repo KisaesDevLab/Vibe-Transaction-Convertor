@@ -9,6 +9,7 @@ interface Diagnostics {
     platform: string;
     buildSha: string;
     appliance: boolean;
+    applianceVersion: string | null;
     workerInline: boolean;
   };
   rss: { rssMb: number };
@@ -112,6 +113,12 @@ export function DiagnosticsPage() {
               <dt className="text-ink-muted">Mode</dt>
               <dd>
                 {diag.data.env.appliance ? 'appliance' : 'standalone'}
+                {diag.data.env.appliance && diag.data.env.applianceVersion ? (
+                  <span className="text-ink-muted">
+                    {' · '}
+                    manifest v{diag.data.env.applianceVersion}
+                  </span>
+                ) : null}
                 {' · '}
                 worker {diag.data.env.workerInline ? 'inline' : 'separate'}
               </dd>

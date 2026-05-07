@@ -1,7 +1,7 @@
 import type { NextFunction, Request, RequestHandler, Response } from 'express';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 
-import { cookieSecure } from '../lib/cookie-flags.js';
+import { cookieDomain, cookiePath, cookieSecure } from '../lib/cookie-flags.js';
 import { ForbiddenError } from '../lib/errors.js';
 
 const COOKIE = 'vibetc_csrf';
@@ -17,6 +17,8 @@ const setCookie = (res: Response, token: string): void => {
     sameSite: 'lax',
     secure: cookieSecure(),
     maxAge: 24 * 60 * 60 * 1000,
+    domain: cookieDomain(),
+    path: cookiePath(),
   });
 };
 

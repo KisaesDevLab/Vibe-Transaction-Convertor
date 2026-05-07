@@ -15,6 +15,7 @@ import { sql } from 'drizzle-orm';
 import { db } from '../db/client.js';
 import { extractionQueue } from '../jobs/queues.js';
 import { logger } from '../lib/logger.js';
+import { performHandshake, type HandshakeResult } from '../lib/manifest.js';
 import { requireAdmin } from '../middleware/auth.js';
 
 const safeQueueCounts = async (): Promise<{
@@ -55,6 +56,9 @@ interface ApplianceHealth {
   buildSha: string;
   applianceMode: boolean;
   applianceVersion: string | null;
+  // BuildPlan §29.12 — orchestrator can use this to detect a stale image
+  // running against a newer installer or vice versa.
+  handshake: HandshakeResult;
   dbSchema: string;
   // High-level health rollup; "ok" iff every dependency present is ok.
   // "degraded" iff any dependency is failing — the orchestrator should
@@ -90,6 +94,7 @@ const buildHealth = async (appName: string, appVersion: string): Promise<Applian
     buildSha: process.env.BUILD_SHA ?? 'unknown',
     applianceMode: process.env.APPLIANCE_MODE === 'true',
     applianceVersion: process.env.APPLIANCE_VERSION ?? null,
+    handshake: performHandshake(),
     dbSchema: 'vibetc',
     status,
     deps,

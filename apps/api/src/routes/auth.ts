@@ -3,7 +3,7 @@ import { eq, sql } from 'drizzle-orm';
 
 import { db } from '../db/client.js';
 import { sessions, users } from '../db/schema.js';
-import { cookieSecure } from '../lib/cookie-flags.js';
+import { cookieDomain, cookiePath, cookieSecure } from '../lib/cookie-flags.js';
 import { AuthError, ValidationError } from '../lib/errors.js';
 import { csrfTokenHandler } from '../middleware/csrf.js';
 import { loginRateLimit } from '../middleware/login-rate-limit.js';
@@ -79,6 +79,8 @@ export const authRouter = (): Router => {
         secure: cookieSecure(),
         signed: true,
         expires: result.expiresAt,
+        domain: cookieDomain(),
+        path: cookiePath(),
       });
       res.json({ user: safeUser(result.user) });
     } catch (err) {
@@ -92,7 +94,10 @@ export const authRouter = (): Router => {
       if (sid) {
         await logout(db, sid);
       }
-      res.clearCookie(SESSION_COOKIE);
+      // clearCookie must echo the same domain/path used at set-time, or
+      // the browser keeps the original cookie around (cookies are
+      // identified by the (name, domain, path) triple).
+      res.clearCookie(SESSION_COOKIE, { domain: cookieDomain(), path: cookiePath() });
       res.json({ ok: true });
     } catch (err) {
       next(err);

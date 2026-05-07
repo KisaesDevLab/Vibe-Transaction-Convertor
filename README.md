@@ -22,7 +22,7 @@ the first admin and you're in.
 
 - **Standalone** (`docker-compose.yml`) ships its own Postgres, Redis,
   GLM-OCR, and LLM gateway.
-- **Vibe Appliance** (`docker-compose.appliance.yml` + `appliance.manifest.json`)
+- **Vibe Appliance** (`docker-compose.appliance.yml` + `vibe-app.yaml`)
   joins the shared Postgres/Redis/GLM-OCR/LLM gateway.
 
 ## Documentation

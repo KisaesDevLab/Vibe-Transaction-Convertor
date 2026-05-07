@@ -713,6 +713,10 @@ export const adminRouter = (): Router => {
           platform: process.platform,
           buildSha: process.env.BUILD_SHA ?? 'unknown',
           appliance: process.env.APPLIANCE_MODE === 'true',
+          // BuildPlan §29.21 — surface the appliance manifest version the
+          // installer injected so operators can verify the running app
+          // matches what the orchestrator expected.
+          applianceVersion: process.env.APPLIANCE_VERSION ?? null,
           workerInline: process.env.WORKER_INLINE !== 'false',
         },
         rss: { rssMb: Math.round(memory.rss / (1024 * 1024)) },

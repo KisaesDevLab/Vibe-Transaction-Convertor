@@ -19,6 +19,8 @@ import { stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import pg from 'pg';
 
+import { performHandshake } from '../lib/manifest.js';
+
 interface CheckResult {
   ok: boolean;
   detail?: string;
@@ -163,6 +165,8 @@ const main = async (): Promise<void> => {
       mode: process.env.APPLIANCE_MODE === 'true',
       version: process.env.APPLIANCE_VERSION ?? null,
       availableVersion: process.env.VIBE_APPLIANCE_AVAILABLE_VERSION ?? null,
+      // BuildPlan §29.12 — manifest-version handshake result.
+      handshake: performHandshake(),
     },
     env: {
       sessionSecretSet: Boolean(process.env.SESSION_SECRET),

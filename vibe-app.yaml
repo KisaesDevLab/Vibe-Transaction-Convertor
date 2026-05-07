@@ -11,7 +11,7 @@
 name: vibe-tx-converter
 display_name: 'Vibe Transactions Converter'
 description: 'Convert bank/credit-card PDFs to CSV/OFX/QFX/QBO files for re-import into QuickBooks, Quicken, and Xero.'
-version: 0.1.0
+version: 0.1.1
 
 # Pull from GHCR by default. The release workflow publishes
 # linux/amd64 + linux/arm64 images signed with cosign keyless OIDC and

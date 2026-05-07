@@ -15,17 +15,32 @@ docker compose --profile standalone up -d
 This brings up Postgres 16, Redis 7, GLM-OCR, the local LLM gateway,
 and the API at `http://localhost:4000`.
 
-### Vibe Appliance overlay
+### Vibe Appliance install
 
-If your firm already runs the Vibe appliance, use the overlay file —
-it joins the shared Postgres / Redis / GLM-OCR / LLM gateway:
+If your firm already runs the Vibe appliance, the recommended path is
+the appliance installer, which reads `vibe-app.yaml` at the repo root
+and wires in the shared Postgres / Redis / GLM-OCR / LLM gateway and
+Caddy:
+
+```bash
+vibe install vibe-tx-converter
+```
+
+The installer applies migrations, seeds the FIDIR mirror, and routes
+`tx.<appliance-domain>` to this service. It also injects `APPLIANCE_MODE=true`
+and `APPLIANCE_VERSION=<n>`; the running app surfaces the latter on the
+Diagnostics page and on `/api/internal/appliance/health`.
+
+If you prefer to drive Compose directly (for example, on a homelab
+without the full installer), the same image is wired by the overlay
+file:
 
 ```bash
 docker compose -f docker-compose.appliance.yml up -d
 ```
 
-The appliance manifest at `appliance.manifest.json` declares the
-expected env vars and port.
+`vibe-app.yaml` is the canonical contract — see
+[`docs/appliance-manifest.md`](./appliance-manifest.md) for the schema.
 
 ## First-run
 

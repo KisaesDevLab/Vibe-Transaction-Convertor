@@ -21,3 +21,22 @@ export const cookieSecure = (): boolean => {
   }
   return process.env.NODE_ENV === 'production';
 };
+
+// BuildPlan §29.16 — session/CSRF cookies must be scoped to the per-app
+// subdomain when running alongside other Vibe apps on a shared appliance.
+// Returning `undefined` leaves the `Domain` attribute off, which makes
+// the cookie host-only — i.e. the browser only sends it back to the
+// exact host that issued it (`tx.<appliance-domain>`), never to a
+// sibling app on the same parent domain. This is the strictest scoping
+// available and the right default; SESSION_COOKIE_DOMAIN is the escape
+// hatch for the rare deploy that needs an explicit shared domain.
+export const cookieDomain = (): string | undefined => {
+  const explicit = process.env.SESSION_COOKIE_DOMAIN;
+  if (explicit && explicit.trim().length > 0) return explicit.trim();
+  return undefined;
+};
+
+// Path is always `/` so cookies cover both the SPA and `/api/*`. Express
+// defaults to `/` when omitted, but stating it explicitly documents the
+// intent and survives any future `res.cookie` default change.
+export const cookiePath = (): string => '/';

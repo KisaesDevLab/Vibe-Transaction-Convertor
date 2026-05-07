@@ -3,6 +3,7 @@
 // instead of a confusing runtime crash later.
 
 import { logger } from './logger.js';
+import { performHandshake } from './manifest.js';
 
 export class BootCheckError extends Error {
   constructor(message: string) {
@@ -37,9 +38,42 @@ const enforceLlmConfig = (): void => {
   }
 };
 
+// BuildPlan §29.12 — appliance handshake. Confirm that the manifest
+// version baked into the image matches APPLIANCE_VERSION as injected by
+// the installer. Mismatch is logged as a warning, not a fatal — the
+// orchestrator owns the policy decision (some appliance versions are
+// deliberately permissive across image patches).
+const performApplianceHandshake = (): void => {
+  const result = performHandshake();
+  if (result.status === 'standalone') return;
+  if (result.status === 'ok') {
+    logger.info(
+      { manifestVersion: result.manifestVersion, applianceVersion: result.expectedVersion },
+      'appliance handshake ok',
+    );
+    return;
+  }
+  if (result.status === 'mismatch') {
+    logger.warn(
+      {
+        manifestVersion: result.manifestVersion,
+        applianceVersion: result.expectedVersion,
+        manifestPath: result.manifestPath,
+      },
+      `appliance handshake mismatch: ${result.detail}`,
+    );
+    return;
+  }
+  logger.warn(
+    { manifestPath: result.manifestPath },
+    `appliance handshake unknown: ${result.detail ?? 'no detail'}`,
+  );
+};
+
 export const runBootChecks = (): void => {
   enforceSessionSecret();
   enforceDatabaseUrl();
   enforceLlmConfig();
+  performApplianceHandshake();
   logger.info('boot checks passed');
 };
