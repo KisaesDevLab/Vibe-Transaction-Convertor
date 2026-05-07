@@ -41,17 +41,32 @@ export const createApp = (): Express => {
   // SPA-fallback all see normalized paths. No-op in standalone mode.
   app.use(stripBasePath());
 
+  // Helmet's default CSP includes `upgrade-insecure-requests`, which is
+  // the right behavior on a real HTTPS deploy (any accidental http://
+  // link gets upgraded). On the Vibe-Appliance LAN profile the page is
+  // served over plain HTTP, so the browser would silently rewrite every
+  // asset URL to https:// and fail with ERR_SSL_PROTOCOL_ERROR before
+  // any JS runs — the screen renders blank. Detect HTTP deploys via
+  // WEB_BASE_URL and remove the directive there. Setting a CSP
+  // directive to null is helmet's documented way to drop a default.
+  const isHttpsDeploy = (process.env.WEB_BASE_URL ?? '').toLowerCase().startsWith('https://');
+  const cspDirectives: Record<string, string[] | null> = {
+    'default-src': ["'self'"],
+    'connect-src': ["'self'"],
+    'img-src': ["'self'", 'data:', 'blob:'],
+    'script-src': ["'self'"],
+    'style-src': ["'self'", "'unsafe-inline'"],
+  };
+  if (!isHttpsDeploy) {
+    cspDirectives['upgrade-insecure-requests'] = null;
+  }
   app.use(
     helmet({
       contentSecurityPolicy: {
         useDefaults: true,
-        directives: {
-          'default-src': ["'self'"],
-          'connect-src': ["'self'"],
-          'img-src': ["'self'", 'data:', 'blob:'],
-          'script-src': ["'self'"],
-          'style-src': ["'self'", "'unsafe-inline'"],
-        },
+        // Cast: helmet's types accept `null` for removal but the
+        // declared union types are awkward to model in plain TS.
+        directives: cspDirectives as never,
       },
       crossOriginEmbedderPolicy: false,
     }),

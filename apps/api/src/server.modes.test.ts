@@ -89,6 +89,17 @@ describe('createApp() — standalone mode env', () => {
       .set('Access-Control-Request-Method', 'GET');
     expect(preflight.headers['access-control-allow-origin']).toBe('http://localhost');
   });
+
+  it('omits upgrade-insecure-requests from CSP when WEB_BASE_URL is HTTP', async () => {
+    const app = createApp();
+    const res = await request(app).get('/api/health/live');
+    const csp = res.headers['content-security-policy'] ?? '';
+    // The directive would force the browser to silently rewrite every
+    // asset request to https://, which on a LAN HTTP-only appliance
+    // means every <script>/<link> fails with ERR_SSL_PROTOCOL_ERROR
+    // before any JS runs.
+    expect(csp).not.toMatch(/upgrade-insecure-requests/);
+  });
 });
 
 describe('createApp() — appliance mode env', () => {
@@ -146,5 +157,12 @@ describe('createApp() — appliance mode env', () => {
     const result = performHandshake();
     expect(result.status).toBe('ok');
     expect(result.applianceVersion).toBe('2');
+  });
+
+  it('keeps upgrade-insecure-requests in CSP when WEB_BASE_URL is HTTPS', async () => {
+    const app = createApp();
+    const res = await request(app).get('/api/health/live');
+    const csp = res.headers['content-security-policy'] ?? '';
+    expect(csp).toMatch(/upgrade-insecure-requests/);
   });
 });
