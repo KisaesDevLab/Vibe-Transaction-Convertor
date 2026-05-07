@@ -1,5 +1,5 @@
 import { Worker } from 'bullmq';
-import { lt } from 'drizzle-orm';
+import { lt, sql } from 'drizzle-orm';
 import { rm, readdir, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 
@@ -28,12 +28,15 @@ const pruneAudit = async (): Promise<{ deleted: number; skipped?: true }> => {
   const days = Number.parseInt(process.env.AUDIT_RETENTION_DAYS ?? '', 10);
   if (!Number.isFinite(days) || days <= 0) return { deleted: 0, skipped: true };
   // Delete audit_log rows older than `days`. Drizzle blocks DELETE without
-  // WHERE; the cutoff WHERE is satisfied here.
+  // WHERE; the cutoff WHERE is satisfied here. The audit_log triggers
+  // (ADR-013) reject DELETE unless the caller opts in for the current
+  // transaction via the GUC below — SET LOCAL never escapes the
+  // transaction so the opt-in is scoped to this prune.
   const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
-  const result = await db
-    .delete(auditLog)
-    .where(lt(auditLog.at, cutoff))
-    .returning({ id: auditLog.id });
+  const result = await db.transaction(async (tx) => {
+    await tx.execute(sql`SET LOCAL "vibetc.audit_log_allow_prune" = 'on'`);
+    return tx.delete(auditLog).where(lt(auditLog.at, cutoff)).returning({ id: auditLog.id });
+  });
   return { deleted: result.length };
 };
 
