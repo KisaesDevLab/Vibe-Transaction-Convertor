@@ -38,29 +38,17 @@ const enforceLlmConfig = (): void => {
   }
 };
 
-// BuildPlan §29.12 — appliance handshake. Confirm that the manifest
-// version baked into the image matches APPLIANCE_VERSION as injected by
-// the installer. Mismatch is logged as a warning, not a fatal — the
-// orchestrator owns the policy decision (some appliance versions are
-// deliberately permissive across image patches).
+// BuildPlan §29.12 — appliance handshake. Records both the appliance
+// platform version (APPLIANCE_VERSION env) and the bundled app
+// manifest version so the orchestrator can correlate them. The two
+// values are intentionally NOT compared — they're orthogonal concepts.
 const performApplianceHandshake = (): void => {
   const result = performHandshake();
   if (result.status === 'standalone') return;
   if (result.status === 'ok') {
     logger.info(
-      { manifestVersion: result.manifestVersion, applianceVersion: result.expectedVersion },
+      { manifestVersion: result.manifestVersion, applianceVersion: result.applianceVersion },
       'appliance handshake ok',
-    );
-    return;
-  }
-  if (result.status === 'mismatch') {
-    logger.warn(
-      {
-        manifestVersion: result.manifestVersion,
-        applianceVersion: result.expectedVersion,
-        manifestPath: result.manifestPath,
-      },
-      `appliance handshake mismatch: ${result.detail}`,
     );
     return;
   }

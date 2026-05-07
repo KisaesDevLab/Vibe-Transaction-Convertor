@@ -107,12 +107,12 @@ describe('createApp() — appliance mode env', () => {
 
   afterEach(() => restore(saved));
 
-  it('manifest handshake matches APPLIANCE_VERSION injected by installer', () => {
+  it('manifest handshake reports both the appliance platform version and the app manifest version', () => {
     const result = performHandshake();
     expect(result.applianceMode).toBe(true);
     expect(result.status).toBe('ok');
-    expect(result.expectedVersion).toBe(process.env.APPLIANCE_VERSION);
-    expect(result.manifestVersion).toBe(process.env.APPLIANCE_VERSION);
+    expect(result.applianceVersion).toBe(process.env.APPLIANCE_VERSION);
+    expect(result.manifestVersion).toBeTruthy();
   });
 
   it('boots and the internal handshake endpoint serves over loopback', async () => {
@@ -139,10 +139,12 @@ describe('createApp() — appliance mode env', () => {
     expect(preflight.headers['access-control-allow-origin']).toBe('https://tx.appliance.local');
   });
 
-  it('rejects appliance-version mismatch as handshake mismatch (non-fatal)', () => {
-    process.env.APPLIANCE_VERSION = '99.99.99';
+  it('does not flag a mismatch when APPLIANCE_VERSION (platform) differs from the manifest (app) version', () => {
+    // Two separate concepts — the appliance is on platform v2 while the
+    // app image is at 0.1.x. No comparison is meaningful.
+    process.env.APPLIANCE_VERSION = '2';
     const result = performHandshake();
-    expect(result.status).toBe('mismatch');
-    expect(result.detail).toContain('99.99.99');
+    expect(result.status).toBe('ok');
+    expect(result.applianceVersion).toBe('2');
   });
 });

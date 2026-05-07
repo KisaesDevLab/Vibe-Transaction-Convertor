@@ -51,32 +51,25 @@ describe('manifest', () => {
       expect(result.status).toBe('standalone');
     });
 
-    it('returns "ok" when the installer-injected version matches the manifest', () => {
+    it('returns "ok" in appliance mode regardless of APPLIANCE_VERSION value', () => {
+      // APPLIANCE_VERSION is the appliance platform version (1, 2, …),
+      // not the app's manifest version — they are NOT comparable.
       const manifest = readManifest();
       expect(manifest.version).toBeTruthy();
       process.env.APPLIANCE_MODE = 'true';
-      process.env.APPLIANCE_VERSION = manifest.version!;
+      process.env.APPLIANCE_VERSION = '1';
       const result = performHandshake();
       expect(result.applianceMode).toBe(true);
       expect(result.status).toBe('ok');
-      expect(result.expectedVersion).toBe(manifest.version);
+      expect(result.applianceVersion).toBe('1');
       expect(result.manifestVersion).toBe(manifest.version);
     });
 
-    it('returns "mismatch" when installer version disagrees with the manifest', () => {
-      process.env.APPLIANCE_MODE = 'true';
-      process.env.APPLIANCE_VERSION = '99.99.99';
-      const result = performHandshake();
-      expect(result.status).toBe('mismatch');
-      expect(result.expectedVersion).toBe('99.99.99');
-      expect(result.detail).toMatch(/installer expected 99\.99\.99/);
-    });
-
-    it('returns "unknown" when APPLIANCE_VERSION is missing in appliance mode', () => {
+    it('still returns "ok" when APPLIANCE_VERSION is unset in appliance mode', () => {
       process.env.APPLIANCE_MODE = 'true';
       const result = performHandshake();
-      expect(result.status).toBe('unknown');
-      expect(result.detail).toMatch(/APPLIANCE_VERSION/);
+      expect(result.status).toBe('ok');
+      expect(result.applianceVersion).toBeNull();
     });
   });
 });

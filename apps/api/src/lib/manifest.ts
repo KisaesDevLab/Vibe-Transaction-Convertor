@@ -60,26 +60,31 @@ export const readManifest = (): ManifestRead => {
 };
 
 export interface HandshakeResult {
-  // Whether the appliance installer told us which manifest version it
-  // expected. False in standalone mode where APPLIANCE_VERSION is unset.
   applianceMode: boolean;
-  expectedVersion: string | null;
+  // The appliance platform version (Vibe-Appliance v1, v2, …) injected
+  // by the installer via the APPLIANCE_VERSION env. This is the
+  // appliance's own platform version, not the vibe-tx-converter app
+  // version — they're separate concepts and must not be compared.
+  applianceVersion: string | null;
+  // The vibe-tx-converter app version baked into the image's manifest
+  // (vibe-app.yaml `version`). Surfaced for the orchestrator to record
+  // alongside the running build SHA.
   manifestVersion: string | null;
   manifestPath: string | null;
-  // ok = matched, or appliance not in play. mismatch = installer set a
-  // version that disagrees with the bundled manifest. unknown = manifest
-  // unreadable for some reason; surfaces but is not fatal.
-  status: 'ok' | 'mismatch' | 'unknown' | 'standalone';
+  // ok       = appliance mode + manifest readable
+  // unknown  = appliance mode but manifest can't be read (image bug)
+  // standalone = appliance mode is off
+  status: 'ok' | 'unknown' | 'standalone';
   detail?: string;
 }
 
 export const performHandshake = (): HandshakeResult => {
   const applianceMode = process.env.APPLIANCE_MODE === 'true';
-  const expectedVersion = process.env.APPLIANCE_VERSION ?? null;
+  const applianceVersion = process.env.APPLIANCE_VERSION ?? null;
   const manifest = readManifest();
   const base = {
     applianceMode,
-    expectedVersion,
+    applianceVersion,
     manifestVersion: manifest.version,
     manifestPath: manifest.path,
   };
@@ -89,22 +94,6 @@ export const performHandshake = (): HandshakeResult => {
   }
   if (manifest.error || !manifest.version) {
     return { ...base, status: 'unknown', detail: manifest.error ?? 'manifest unreadable' };
-  }
-  if (!expectedVersion) {
-    // The installer should always inject APPLIANCE_VERSION in appliance
-    // mode; absence is a soft warning, not a mismatch.
-    return {
-      ...base,
-      status: 'unknown',
-      detail: 'APPLIANCE_VERSION env not set by installer',
-    };
-  }
-  if (expectedVersion !== manifest.version) {
-    return {
-      ...base,
-      status: 'mismatch',
-      detail: `installer expected ${expectedVersion}, image carries ${manifest.version}`,
-    };
   }
   return { ...base, status: 'ok' };
 };
