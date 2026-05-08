@@ -19,7 +19,7 @@ import { findSuspectRows } from '@vibe-tx-converter/reconciler';
 import { businessCategories } from '../db/schema.js';
 import { schemas } from '@vibe-tx-converter/shared';
 const { ENRICHMENT_CLEANSED_MAX_LENGTH } = schemas.enrichment;
-import { enqueueExtraction, extractionQueue } from '../jobs/queues.js';
+import { enqueueExtraction, removeExtractionJob } from '../jobs/queues.js';
 
 const serializeBigint = <T extends Record<string, unknown>>(row: T): T => {
   const out: Record<string, unknown> = {};
@@ -720,6 +720,9 @@ export const statementsRouter = (): Router => {
         .update(statements)
         .set({ status: 'uploaded', errorMessage: null, updatedAt: sql`now()` })
         .where(eq(statements.id, id));
+      // BullMQ's add() is idempotent on jobId; the prior completed job
+      // would silently swallow this enqueue. Remove first.
+      await removeExtractionJob(id);
       await enqueueExtraction({
         statementId: id,
         accountId: stmt.accountId,
@@ -813,11 +816,7 @@ export const statementsRouter = (): Router => {
       let removedFromQueue = false;
       if (process.env.REDIS_URL) {
         try {
-          const job = await extractionQueue().getJob(`extract:${id}`);
-          if (job) {
-            await job.remove();
-            removedFromQueue = true;
-          }
+          removedFromQueue = await removeExtractionJob(id);
         } catch {
           // job already finished or not present; falling through to
           // the DB-state mutation is still the right call.
