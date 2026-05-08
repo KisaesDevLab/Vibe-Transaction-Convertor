@@ -3,6 +3,7 @@ import { eq, sql } from 'drizzle-orm';
 import { readFile } from 'node:fs/promises';
 
 import {
+  ExtractionResponseError,
   analyzePdfFromBuffer,
   detectMultiAccount,
   extractTextLayerFromBuffer,
@@ -528,12 +529,58 @@ export const startExtractionWorker = (): Worker<ExtractionJobData> => {
           logger.info({ jobId: job.id }, 'extraction cancelled cooperatively');
           return;
         }
-        logger.error({ err, jobId: job.id }, 'extraction job failed');
+
+        // Forensic capture: write a `statement.extraction-failed` row to
+        // audit_log carrying the error class, message, and (when the
+        // failure was a malformed LLM response) the raw payload so the
+        // operator can read it back via /api/audit?entityId=<stmtId>.
+        // Truncated to 8KB so a runaway model doesn't blow up the row.
+        const e = err as Error;
+        const diagnostic: Record<string, unknown> = {
+          errorClass: e?.constructor?.name ?? 'Error',
+          message: e?.message ?? String(err),
+        };
+        if (err instanceof ExtractionResponseError) {
+          diagnostic.summary = err.summary;
+          if (err.issues !== undefined) diagnostic.issues = err.issues;
+          const RAW_LIMIT = 8000;
+          diagnostic.rawResponseSnippet = err.rawResponse.slice(0, RAW_LIMIT);
+          if (err.rawResponse.length > RAW_LIMIT) {
+            diagnostic.rawResponseTruncated = true;
+            diagnostic.rawResponseLength = err.rawResponse.length;
+          }
+        }
+        try {
+          await writeAudit(db, {
+            entityType: 'statement',
+            entityId: job.data.statementId,
+            action: 'statement.extraction-failed',
+            payload: diagnostic,
+          });
+        } catch (auditErr) {
+          // Don't let an audit write failure mask the real error.
+          logger.warn({ auditErr }, 'failed to write extraction-failed audit row');
+        }
+
+        // Don't ship the raw payload through the structured logger — it
+        // may carry PII from the source PDF. The audit_log row is the
+        // forensic store. Keep summary + issues for the on-disk log.
+        const { rawResponseSnippet: _rs, ...logDiagnostic } = diagnostic;
+        logger.error({ err, jobId: job.id, ...logDiagnostic }, 'extraction job failed');
+
+        // User-facing message: ExtractionResponseError carries a clean
+        // summary + issue list with no raw payload. Other errors fall
+        // through to the message text.
+        const userMessage =
+          err instanceof ExtractionResponseError
+            ? `${err.message} — full LLM response captured in audit_log`
+            : (e?.message ?? 'extraction failed');
+
         await db
           .update(statements)
           .set({
             status: 'failed',
-            errorMessage: (err as Error).message,
+            errorMessage: userMessage,
             updatedAt: sql`now()`,
           })
           .where(eq(statements.id, job.data.statementId));

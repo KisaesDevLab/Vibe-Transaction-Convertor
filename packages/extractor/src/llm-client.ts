@@ -38,6 +38,68 @@ export const prepareMarkdown = (
 const { ExtractionResult } = schemas.extraction;
 type ExtractionResult = schemas.extraction.ExtractionResult;
 
+// Thrown by both providers when the LLM returns JSON that doesn't match
+// ExtractionResult. The worker catches this specifically so it can log
+// the raw response to audit_log and surface a friendlier error to the
+// UI than the bare ZodError stringification (which used to leak as e.g.
+// `[ { "code": "invalid_type", "expected": "array", "path": [...] } ]`).
+//
+// `.message` carries the human-readable summary (no raw payload) so it
+// is safe to display in toasts and persist to statements.error_message.
+// `.rawResponse` carries the full payload for diagnostic capture and
+// must not be surfaced directly in user-facing UI.
+export class ExtractionResponseError extends Error {
+  readonly rawResponse: string;
+  readonly summary: string;
+  readonly issues?: string;
+  constructor(opts: { summary: string; rawResponse: string; issues?: string }) {
+    super(opts.issues ? `${opts.summary} (${opts.issues})` : opts.summary);
+    this.name = 'ExtractionResponseError';
+    this.rawResponse = opts.rawResponse;
+    this.summary = opts.summary;
+    if (opts.issues !== undefined) this.issues = opts.issues;
+  }
+}
+
+// Wraps JSON.parse + Zod validation in ExtractionResponseError so the
+// worker has a single error type to special-case for diagnostic
+// capture. Pass `alreadyParsed` for providers that hand us an already-
+// parsed object (Anthropic tool_use); we still need rawResponse for
+// the audit log, so callers stringify it for us.
+const parseExtractionResponse = (
+  rawResponse: string,
+  alreadyParsed?: unknown,
+): ExtractionResult => {
+  let parsed = alreadyParsed;
+  if (parsed === undefined) {
+    try {
+      parsed = JSON.parse(rawResponse);
+    } catch (err) {
+      throw new ExtractionResponseError({
+        summary: 'LLM response was not valid JSON',
+        rawResponse,
+        issues: (err as Error).message,
+      });
+    }
+  }
+  const result = ExtractionResult.safeParse(parsed);
+  if (!result.success) {
+    const issues = result.error.issues
+      .slice(0, 5)
+      .map((i) => {
+        const path = i.path.length > 0 ? i.path.join('.') : '<root>';
+        return `${path}: ${i.message}`;
+      })
+      .join('; ');
+    throw new ExtractionResponseError({
+      summary: 'LLM response did not match extraction schema',
+      rawResponse,
+      issues,
+    });
+  }
+  return result.data;
+};
+
 export interface ExtractCallTelemetry {
   inputTokens: number;
   outputTokens: number;
@@ -176,7 +238,7 @@ export class LocalGatewayProvider implements LlmProvider {
         usage?: { prompt_tokens?: number; completion_tokens?: number };
       };
       const content = body.choices?.[0]?.message?.content ?? '';
-      const data = ExtractionResult.parse(JSON.parse(content));
+      const data = parseExtractionResponse(content);
       return {
         data,
         rawJson: content,
@@ -412,12 +474,13 @@ export class AnthropicProvider implements LlmProvider {
         (c): c is { type: 'tool_use'; name: string; input: unknown } => c.type === 'tool_use',
       );
       if (!toolUse) throw new Error('anthropic response missing tool_use block');
-      const data = ExtractionResult.parse(toolUse.input);
+      const rawJson = JSON.stringify(toolUse.input);
+      const data = parseExtractionResponse(rawJson, toolUse.input);
       const inputTokens = body.usage?.input_tokens ?? 0;
       const outputTokens = body.usage?.output_tokens ?? 0;
       return {
         data,
-        rawJson: JSON.stringify(toolUse.input),
+        rawJson,
         telemetry: {
           inputTokens,
           outputTokens,

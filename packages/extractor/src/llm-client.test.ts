@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   AnthropicProvider,
+  ExtractionResponseError,
   LocalGatewayProvider,
   computeAnthropicCostMicros,
 } from './llm-client.js';
@@ -47,12 +48,38 @@ describe('LocalGatewayProvider', () => {
     expect(provider.id).toBe('local');
   });
 
-  it('rejects when the response is not schema-valid', async () => {
+  it('rejects schema-mismatch payloads with ExtractionResponseError carrying the raw response', async () => {
+    // The exact shape the operator hit on the appliance: gateway returned
+    // valid JSON but the `transactions` field was missing entirely. The
+    // wrapper preserves the raw payload so the worker can audit-log it.
+    const partial = JSON.stringify({
+      period: { start: '2026-03-01', end: '2026-03-31' },
+      balances: { opening_cents: 100, closing_cents: 0 },
+      source_date_format: { format: 'MDY', confidence: 0.9 },
+    });
     const provider = new LocalGatewayProvider({
       baseUrl: 'http://gw.test',
-      fetcher: async () => okJsonResponse({ choices: [{ message: { content: '{"oops":1}' } }] }),
+      fetcher: async () => okJsonResponse({ choices: [{ message: { content: partial } }] }),
     });
-    await expect(provider.extract('md')).rejects.toThrow();
+    await expect(provider.extract('md')).rejects.toMatchObject({
+      name: 'ExtractionResponseError',
+      summary: 'LLM response did not match extraction schema',
+      issues: expect.stringContaining('transactions'),
+      rawResponse: partial,
+    });
+  });
+
+  it('rejects unparseable JSON with ExtractionResponseError', async () => {
+    const broken = '{"period": {"start": "2026';
+    const provider = new LocalGatewayProvider({
+      baseUrl: 'http://gw.test',
+      fetcher: async () => okJsonResponse({ choices: [{ message: { content: broken } }] }),
+    });
+    await expect(provider.extract('md')).rejects.toBeInstanceOf(ExtractionResponseError);
+    await expect(provider.extract('md')).rejects.toMatchObject({
+      summary: 'LLM response was not valid JSON',
+      rawResponse: broken,
+    });
   });
 });
 
