@@ -18,6 +18,7 @@ import { EnginesAdminPage } from './pages/EnginesAdminPage';
 import { ExportPage } from './pages/ExportPage';
 import { GlobalStatementsPage } from './pages/GlobalStatementsPage';
 import { HelpPage } from './pages/HelpPage';
+import { EnrichmentPromptAdminPage } from './pages/EnrichmentPromptAdminPage';
 import { LlmProviderAdminPage } from './pages/LlmProviderAdminPage';
 import { MaintenanceAdminPage } from './pages/MaintenanceAdminPage';
 import { StatementReviewPage } from './pages/StatementReviewPage';
@@ -115,6 +116,14 @@ export function App() {
                   element={
                     <AdminGate>
                       <CategoryAdminPage />
+                    </AdminGate>
+                  }
+                />
+                <Route
+                  path="/admin/enrichment-prompt"
+                  element={
+                    <AdminGate>
+                      <EnrichmentPromptAdminPage />
                     </AdminGate>
                   }
                 />

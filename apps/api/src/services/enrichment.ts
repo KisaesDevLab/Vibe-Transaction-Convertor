@@ -10,7 +10,14 @@
 // schema-validated JSON without caller-side branching.
 
 import { schemas } from '@vibe-tx-converter/shared';
-import { enrichmentSystemPromptFor, enrichmentUserPromptFor } from '@vibe-tx-converter/extractor';
+import {
+  DEFAULT_CATEGORIZE_RULES,
+  DEFAULT_CLEANSE_RULES,
+  DEFAULT_FULL_SYSTEM_PROMPT,
+  type EnrichmentPromptMode,
+  enrichmentSystemPromptFor,
+  enrichmentUserPromptFor,
+} from '@vibe-tx-converter/extractor';
 import { eq, inArray, sql } from 'drizzle-orm';
 
 import type { Db } from '../db/client.js';
@@ -23,6 +30,8 @@ import {
   transactions,
 } from '../db/schema.js';
 import { logger } from '../lib/logger.js';
+import { createHash } from 'node:crypto';
+
 import {
   ENRICHMENT_PROMPT_VERSION,
   enrichmentCache,
@@ -81,6 +90,62 @@ const isToggleEnabled = async (db: Db, key: string): Promise<boolean> => {
   const v = rows[0]?.valuePlaintext;
   if (v === undefined || v === null) return true;
   return v.toLowerCase() !== 'false' && v !== '0';
+};
+
+// Operator-tunable system-prompt customization for enrichment. Stored
+// in system_settings under enrichment.prompt.* keys. The prompt
+// builder is the only consumer; cache invalidation on edits is handled
+// by ENRICHMENT_PROMPT_VERSION which the operator-write path bumps.
+const PROMPT_KEY_MODE = 'enrichment.prompt.mode';
+const PROMPT_KEY_CLEANSE_RULES = 'enrichment.prompt.cleanse_rules';
+const PROMPT_KEY_CATEGORIZE_RULES = 'enrichment.prompt.categorize_rules';
+const PROMPT_KEY_FULL = 'enrichment.prompt.full_system_prompt';
+
+interface EnrichmentPromptOverrides {
+  mode: EnrichmentPromptMode;
+  cleanseRules: string | null;
+  categorizeRules: string | null;
+  fullSystemPrompt: string | null;
+}
+
+const readSettingPlain = async (db: Db, key: string): Promise<string | null> => {
+  const rows = await db.select().from(systemSettings).where(eq(systemSettings.key, key));
+  return rows[0]?.valuePlaintext ?? null;
+};
+
+const readPromptOverrides = async (db: Db): Promise<EnrichmentPromptOverrides> => {
+  const [modeRaw, cleanseRules, categorizeRules, fullSystemPrompt] = await Promise.all([
+    readSettingPlain(db, PROMPT_KEY_MODE),
+    readSettingPlain(db, PROMPT_KEY_CLEANSE_RULES),
+    readSettingPlain(db, PROMPT_KEY_CATEGORIZE_RULES),
+    readSettingPlain(db, PROMPT_KEY_FULL),
+  ]);
+  const mode: EnrichmentPromptMode = modeRaw === 'full' ? 'full' : 'rules';
+  return { mode, cleanseRules, categorizeRules, fullSystemPrompt };
+};
+
+// Folds the operator's prompt customizations into the cache version
+// string so saving an edit invalidates every prior cached entry — same
+// merchant on the next statement re-runs through the LLM with the new
+// rules instead of replaying the stale answer.
+const promptVersionFor = (o: EnrichmentPromptOverrides): string => {
+  if (
+    o.mode === 'rules' &&
+    o.cleanseRules === null &&
+    o.categorizeRules === null &&
+    o.fullSystemPrompt === null
+  ) {
+    return ENRICHMENT_PROMPT_VERSION;
+  }
+  const h = createHash('sha256');
+  h.update(o.mode);
+  h.update('|');
+  h.update(o.cleanseRules ?? '');
+  h.update('|');
+  h.update(o.categorizeRules ?? '');
+  h.update('|');
+  h.update(o.fullSystemPrompt ?? '');
+  return `${ENRICHMENT_PROMPT_VERSION}-${h.digest('hex').slice(0, 12)}`;
 };
 
 // Mirrors extraction.worker.ts cap-check (lines 166-193). When the
@@ -167,13 +232,19 @@ export const enrichStatement = async (
     };
   }
 
+  // Read operator prompt overrides up front so the cache key reflects
+  // them — saving an edit invalidates every cached entry below without
+  // a manual flush. Same overrides are passed to the LLM call later.
+  const promptOverrides = await readPromptOverrides(db);
+  const promptVersion = promptVersionFor(promptOverrides);
+
   // Cache pass — pull whatever's already cached and only send the misses
   // to the LLM. The cache key bakes in the prompt version so prompt
   // changes invalidate every entry without a manual flush.
   const cacheKeyFor = (rawDescription: string): EnrichmentCacheKey => ({
     rawDescription,
     accountType,
-    promptVersion: ENRICHMENT_PROMPT_VERSION,
+    promptVersion,
     cleanse: opts.cleanse,
     categorize: opts.categorize,
   });
@@ -217,6 +288,10 @@ export const enrichStatement = async (
         name: c.name,
         description: c.description ?? null,
       })),
+      mode: promptOverrides.mode,
+      cleanseRulesOverride: promptOverrides.cleanseRules,
+      categorizeRulesOverride: promptOverrides.categorizeRules,
+      fullSystemPromptOverride: promptOverrides.fullSystemPrompt,
     });
     const userPrompt = enrichmentUserPromptFor({
       transactions: missing.map((t, i) => ({
@@ -344,6 +419,117 @@ export const enrichmentToggleStatus = async (
   cleanseEnabled: await isToggleEnabled(db, 'enrichment.cleanse_enabled'),
   categoryEnabled: await isToggleEnabled(db, 'enrichment.category_enabled'),
 });
+
+export interface EnrichmentPromptStatus {
+  mode: EnrichmentPromptMode;
+  cleanseRules: { current: string; isOverride: boolean; defaultValue: string };
+  categorizeRules: { current: string; isOverride: boolean; defaultValue: string };
+  fullSystemPrompt: { current: string; isOverride: boolean; defaultValue: string };
+  promptVersion: string;
+}
+
+// Snapshot of the live enrichment-prompt configuration for the admin
+// "edit prompt" page. `current` is what the LLM will see on the next
+// run; `defaultValue` lets the SPA show a "reset to default" button
+// without duplicating the strings on the SPA side.
+export const enrichmentPromptStatus = async (db: Db): Promise<EnrichmentPromptStatus> => {
+  const o = await readPromptOverrides(db);
+  return {
+    mode: o.mode,
+    cleanseRules: {
+      current: o.cleanseRules ?? DEFAULT_CLEANSE_RULES,
+      isOverride: o.cleanseRules !== null,
+      defaultValue: DEFAULT_CLEANSE_RULES,
+    },
+    categorizeRules: {
+      current: o.categorizeRules ?? DEFAULT_CATEGORIZE_RULES,
+      isOverride: o.categorizeRules !== null,
+      defaultValue: DEFAULT_CATEGORIZE_RULES,
+    },
+    fullSystemPrompt: {
+      current: o.fullSystemPrompt ?? DEFAULT_FULL_SYSTEM_PROMPT,
+      isOverride: o.fullSystemPrompt !== null,
+      defaultValue: DEFAULT_FULL_SYSTEM_PROMPT,
+    },
+    promptVersion: promptVersionFor(o),
+  };
+};
+
+export interface EnrichmentPromptUpdate {
+  mode?: EnrichmentPromptMode | undefined;
+  // Pass an empty string or null to clear the override and fall back
+  // to the built-in default. Pass undefined to leave the field
+  // untouched.
+  cleanseRules?: string | null | undefined;
+  categorizeRules?: string | null | undefined;
+  fullSystemPrompt?: string | null | undefined;
+}
+
+const upsertPromptSetting = async (
+  db: Db,
+  key: string,
+  value: string | null,
+  actorUserId: string,
+): Promise<void> => {
+  if (value === null) {
+    await db.delete(systemSettings).where(eq(systemSettings.key, key));
+    return;
+  }
+  await db
+    .insert(systemSettings)
+    .values({ key, valuePlaintext: value, isSecret: false })
+    .onConflictDoUpdate({
+      target: systemSettings.key,
+      set: { valuePlaintext: value, updatedAt: sql`now()`, updatedByUserId: actorUserId },
+    });
+};
+
+export const setEnrichmentPrompt = async (
+  db: Db,
+  update: EnrichmentPromptUpdate,
+  actorUserId: string,
+): Promise<EnrichmentPromptStatus> => {
+  // Empty-string is treated as "clear the override" — operators
+  // expect "delete the contents and save" to revert to the default,
+  // not save an empty prompt that would break the LLM.
+  const normalize = (v: string | null | undefined): string | null | undefined => {
+    if (v === undefined) return undefined;
+    if (v === null) return null;
+    const trimmed = v.trim();
+    return trimmed.length === 0 ? null : v;
+  };
+  const cleanseRules = normalize(update.cleanseRules);
+  const categorizeRules = normalize(update.categorizeRules);
+  const fullSystemPrompt = normalize(update.fullSystemPrompt);
+
+  if (update.mode !== undefined) {
+    await upsertPromptSetting(db, PROMPT_KEY_MODE, update.mode, actorUserId);
+  }
+  if (cleanseRules !== undefined) {
+    await upsertPromptSetting(db, PROMPT_KEY_CLEANSE_RULES, cleanseRules, actorUserId);
+  }
+  if (categorizeRules !== undefined) {
+    await upsertPromptSetting(db, PROMPT_KEY_CATEGORIZE_RULES, categorizeRules, actorUserId);
+  }
+  if (fullSystemPrompt !== undefined) {
+    await upsertPromptSetting(db, PROMPT_KEY_FULL, fullSystemPrompt, actorUserId);
+  }
+
+  await db.insert(auditLog).values({
+    actorUserId,
+    entityType: 'system_settings',
+    entityId: 'enrichment.prompt',
+    action: 'enrichment.prompt-update',
+    payload: {
+      modeSet: update.mode ?? null,
+      cleanseRulesChanged: cleanseRules !== undefined,
+      categorizeRulesChanged: categorizeRules !== undefined,
+      fullSystemPromptChanged: fullSystemPrompt !== undefined,
+    },
+  });
+
+  return enrichmentPromptStatus(db);
+};
 
 export const setEnrichmentToggle = async (
   db: Db,

@@ -139,6 +139,9 @@ export function AdminHomePage() {
           <Link to="/admin/categories" className="text-accent hover:underline">
             Categories →
           </Link>
+          <Link to="/admin/enrichment-prompt" className="text-accent hover:underline">
+            Enrichment prompt →
+          </Link>
         </nav>
       </header>
 

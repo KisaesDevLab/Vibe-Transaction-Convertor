@@ -20,7 +20,12 @@ import {
   type EngineKey,
 } from '../services/engines.js';
 import { buildProvider, invalidateProviderCache } from '../services/llm-provider.js';
-import { enrichmentToggleStatus, setEnrichmentToggle } from '../services/enrichment.js';
+import {
+  enrichmentPromptStatus,
+  enrichmentToggleStatus,
+  setEnrichmentPrompt,
+  setEnrichmentToggle,
+} from '../services/enrichment.js';
 import { clearPricing, listPricings, setPricing } from '../services/pricing.js';
 import { AnthropicProvider, probeGlmOcrHealth } from '@vibe-tx-converter/extractor';
 import { extractionQueue } from '../jobs/queues.js';
@@ -767,6 +772,67 @@ export const adminRouter = (): Router => {
       }
       await setEnrichmentToggle(db, which, enabled, req.user!.id);
       const status = await enrichmentToggleStatus(db);
+      res.json(status);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // Operator-tunable enrichment system prompt. GET returns the live
+  // configuration alongside the built-in defaults so the SPA can show
+  // "current" vs. "default" without duplicating the strings. PUT
+  // accepts a partial update — fields left undefined are unchanged;
+  // empty-string or null clears that override and reverts to default.
+  router.get('/enrichment-prompt', async (_req, res, next) => {
+    try {
+      res.json(await enrichmentPromptStatus(db));
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.put('/enrichment-prompt', async (req, res, next) => {
+    try {
+      const body = (req.body ?? {}) as {
+        mode?: unknown;
+        cleanseRules?: unknown;
+        categorizeRules?: unknown;
+        fullSystemPrompt?: unknown;
+      };
+
+      const validateText = (v: unknown, label: string): string | null | undefined => {
+        if (v === undefined) return undefined;
+        if (v === null) return null;
+        if (typeof v !== 'string') {
+          throw new ValidationError(`${label} must be a string, null, or omitted`);
+        }
+        return v;
+      };
+
+      let mode: 'rules' | 'full' | undefined;
+      if (body.mode !== undefined) {
+        if (body.mode !== 'rules' && body.mode !== 'full') {
+          throw new ValidationError("mode must be 'rules' or 'full'");
+        }
+        mode = body.mode;
+      }
+
+      const status = await setEnrichmentPrompt(
+        db,
+        {
+          ...(mode !== undefined ? { mode } : {}),
+          ...(body.cleanseRules !== undefined
+            ? { cleanseRules: validateText(body.cleanseRules, 'cleanseRules') }
+            : {}),
+          ...(body.categorizeRules !== undefined
+            ? { categorizeRules: validateText(body.categorizeRules, 'categorizeRules') }
+            : {}),
+          ...(body.fullSystemPrompt !== undefined
+            ? { fullSystemPrompt: validateText(body.fullSystemPrompt, 'fullSystemPrompt') }
+            : {}),
+        },
+        req.user!.id,
+      );
       res.json(status);
     } catch (err) {
       next(err);

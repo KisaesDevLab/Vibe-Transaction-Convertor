@@ -30,10 +30,12 @@ export interface EnrichmentCachePayload {
 export interface EnrichmentCacheKey {
   rawDescription: string;
   accountType?: string | null | undefined;
-  // Bumped whenever the prompt or output schema changes — invalidates
-  // every cached entry without a manual flush. Match the value in
-  // packages/extractor/src/prompts/enrich.ts when prompts evolve.
-  promptVersion: number;
+  // Identifies the prompt+schema variant that produced the cached
+  // value. The base constant ENRICHMENT_PROMPT_VERSION reflects the
+  // built-in defaults; the service folds in a hash of any operator
+  // prompt overrides so saved customizations transparently
+  // invalidate prior cache entries without a manual flush.
+  promptVersion: string;
   // Differentiates "cleansed only" vs "category only" vs "both" so a
   // partial enrichment doesn't satisfy a later request for the missing
   // half.
@@ -41,7 +43,7 @@ export interface EnrichmentCacheKey {
   categorize: boolean;
 }
 
-export const ENRICHMENT_PROMPT_VERSION = 1;
+export const ENRICHMENT_PROMPT_VERSION = '1';
 
 const hashKey = (k: EnrichmentCacheKey): string => {
   const h = createHash('sha256');
@@ -49,7 +51,7 @@ const hashKey = (k: EnrichmentCacheKey): string => {
   h.update('|');
   h.update(k.accountType ?? '');
   h.update('|');
-  h.update(String(k.promptVersion));
+  h.update(k.promptVersion);
   h.update('|');
   h.update(k.cleanse ? '1' : '0');
   h.update(k.categorize ? '1' : '0');
