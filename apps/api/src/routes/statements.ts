@@ -1,9 +1,11 @@
 import { Router } from 'express';
-import { eq, inArray, sql } from 'drizzle-orm';
+import { and, eq, inArray, ne, sql } from 'drizzle-orm';
+import { unlink } from 'node:fs/promises';
 
 import { db } from '../db/client.js';
-import { statements, transactions } from '../db/schema.js';
+import { exportJobs, statements, transactions } from '../db/schema.js';
 import { ForbiddenError, NotFoundError, ValidationError } from '../lib/errors.js';
+import { logger } from '../lib/logger.js';
 import { requireAdmin } from '../middleware/auth.js';
 import { writeAudit } from '../services/audit.js';
 import {
@@ -844,6 +846,109 @@ export const statementsRouter = (): Router => {
         payload: { removedFromQueue },
       });
       res.json({ ok: true, removedFromQueue });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // Admin: delete a stuck statement so the operator can re-upload the
+  // same PDF cleanly. Only allowed for terminal-but-unusable states
+  // (`failed`, `awaiting-locale-confirmation`) — successful statements
+  // (`review`, `exported`) and in-flight ones must not be deletable
+  // through this path. For in-flight extractions, /cancel first to
+  // flip to `failed`, then delete.
+  //
+  // Cascade: transactions and export_jobs FK with ON DELETE CASCADE
+  // (schema.ts), so the statements row delete drops both. audit_log
+  // has no FK (entity_id is plain text per ADR-013) so the trail
+  // survives — including the delete row this route writes.
+  //
+  // Disk: rendered export files are unlinked best-effort before the row
+  // delete (the FK cascade only drops DB rows, not files). The source
+  // PDF is unlinked only if no other statement still references the
+  // same content hash (hash is shared across re-uploads to multiple
+  // accounts and across split children).
+  router.delete('/:id', requireAdmin, async (req, res, next) => {
+    try {
+      const id = String(req.params.id);
+      const rows = await db.select().from(statements).where(eq(statements.id, id));
+      const stmt = rows[0];
+      if (!stmt) throw new NotFoundError(`statement ${id}`);
+      const DELETABLE = new Set<typeof stmt.status>(['failed', 'awaiting-locale-confirmation']);
+      if (!DELETABLE.has(stmt.status)) {
+        throw new ValidationError(
+          `cannot delete a ${stmt.status} statement — cancel first if it is still in flight`,
+        );
+      }
+
+      const txCountRows = await db
+        .select({ c: sql<number>`count(*)::int` })
+        .from(transactions)
+        .where(eq(transactions.statementId, id));
+      const txCount = txCountRows[0]?.c ?? 0;
+
+      const jobs = await db
+        .select({ id: exportJobs.id, filePath: exportJobs.filePath })
+        .from(exportJobs)
+        .where(eq(exportJobs.statementId, id));
+      let exportFilesRemoved = 0;
+      for (const j of jobs) {
+        if (j.filePath === '<pending>' || j.filePath === '<expired>') continue;
+        try {
+          await unlink(j.filePath);
+          exportFilesRemoved += 1;
+        } catch {
+          // Already gone — fine. The DB row is dropped by cascade.
+        }
+      }
+
+      // Also remove any stale BullMQ job key for this statement so a
+      // future statement that happens to be assigned the same UUID
+      // (extraordinarily unlikely, but) doesn't collide on the
+      // jobId-idempotency check.
+      try {
+        await removeExtractionJob(id);
+      } catch (err) {
+        logger.warn({ err, stmtId: id }, 'failed to remove queued extraction job during delete');
+      }
+
+      await db.delete(statements).where(eq(statements.id, id));
+
+      // Source-PDF retention check. Different statements (e.g. a
+      // re-upload to a different account, or a multi-account split
+      // child) can share the same source_pdf_hash. Only unlink when
+      // no row remains.
+      let sourcePdfRemoved = false;
+      const otherRefs = await db
+        .select({ id: statements.id })
+        .from(statements)
+        .where(and(eq(statements.sourcePdfHash, stmt.sourcePdfHash), ne(statements.id, id)))
+        .limit(1);
+      if (otherRefs.length === 0) {
+        try {
+          await unlink(stmt.sourcePdfPath);
+          sourcePdfRemoved = true;
+        } catch {
+          // Already gone or missing — non-fatal.
+        }
+      }
+
+      await writeAudit(db, {
+        actorUserId: req.user!.id,
+        entityType: 'statement',
+        entityId: id,
+        action: 'statement.delete',
+        payload: {
+          accountId: stmt.accountId,
+          previousStatus: stmt.status,
+          sourcePdfHash: stmt.sourcePdfHash,
+          txCount,
+          exportFilesRemoved,
+          sourcePdfRemoved,
+        },
+      });
+
+      res.json({ ok: true, txCount, exportFilesRemoved, sourcePdfRemoved });
     } catch (err) {
       next(err);
     }

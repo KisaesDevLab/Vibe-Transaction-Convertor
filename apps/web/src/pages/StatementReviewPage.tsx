@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams } from 'react-router-dom';
 
 import { DeleteConfirmDialog } from '../components/DeleteConfirmDialog';
 import { EntityAuditLog } from '../components/EntityAuditLog';
@@ -13,6 +13,7 @@ import {
   useAcknowledgeMultiAccount,
   useAddTransaction,
   useConfirmDateFormat,
+  useDeleteStatement,
   useDeleteTransaction,
   useEnrichStatement,
   useReExtract,
@@ -88,12 +89,14 @@ const downloadBundle = (statementId: string, override: boolean): Promise<void> =
 
 export function StatementReviewPage() {
   const { statementId = '' } = useParams();
+  const navigate = useNavigate();
   const stmt = useStatement(statementId);
   const update = useUpdateTransaction(statementId);
   const bulkUpdate = useBulkUpdateTransactions(statementId);
   const addTx = useAddTransaction(statementId);
   const deleteTx = useDeleteTransaction(statementId);
   const reExtract = useReExtract(statementId);
+  const deleteStmt = useDeleteStatement(statementId);
   const recompute = useRecomputeReconciliation(statementId);
   const confirmFormat = useConfirmDateFormat(statementId);
   const ackMultiAccount = useAcknowledgeMultiAccount(statementId);
@@ -107,6 +110,7 @@ export function StatementReviewPage() {
   const [selectedTx, setSelectedTx] = useState<TransactionRow | null>(null);
   const [splitOpen, setSplitOpen] = useState(false);
   const [reExtractOpen, setReExtractOpen] = useState(false);
+  const [deleteOpen, setDeleteOpen] = useState(false);
   // Pull the parent account → company so the split modal can show only
   // accounts under the same company in the per-segment dropdowns.
   const parentAccount = useAccount(stmt.data?.statement.accountId ?? '');
@@ -280,8 +284,28 @@ export function StatementReviewPage() {
       </header>
 
       {s.errorMessage ? (
-        <div className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-900">
-          <strong>Extraction failed.</strong> {s.errorMessage}
+        <div className="space-y-2 rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-900">
+          <p>
+            <strong>Extraction failed.</strong> {s.errorMessage}
+          </p>
+          {isAdmin && (s.status === 'failed' || s.status === 'awaiting-locale-confirmation') ? (
+            <p className="text-xs text-red-800">
+              If this statement is unrecoverable, delete it to free the source PDF for re-upload.
+              Re-extract instead if you only want to retry without re-uploading.
+            </p>
+          ) : null}
+          {isAdmin && (s.status === 'failed' || s.status === 'awaiting-locale-confirmation') ? (
+            <div className="flex flex-wrap gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => setDeleteOpen(true)}
+                disabled={deleteStmt.isPending}
+                className="rounded-md border border-red-300 bg-white px-3 py-1.5 text-xs font-medium text-red-900 hover:bg-red-100 disabled:opacity-50"
+              >
+                {deleteStmt.isPending ? 'Deleting…' : 'Delete statement'}
+              </button>
+            </div>
+          ) : null}
         </div>
       ) : null}
 
@@ -572,6 +596,27 @@ export function StatementReviewPage() {
             setReExtractOpen(false);
           } catch (err) {
             toast.error(err instanceof ApiError ? err.message : 're-extract failed');
+          }
+        }}
+      />
+
+      <DeleteConfirmDialog
+        open={deleteOpen}
+        title="Delete this statement?"
+        description="The statement row, all extracted transactions, and any rendered export files will be removed. The source PDF is unlinked unless another statement still references it. The audit log entry survives. Re-upload the same PDF to start over."
+        confirmText="DELETE"
+        confirmButtonLabel="Delete"
+        busyLabel="Deleting…"
+        busy={deleteStmt.isPending}
+        onClose={() => setDeleteOpen(false)}
+        onConfirm={async () => {
+          try {
+            const r = await deleteStmt.mutateAsync();
+            toast.success(`Statement deleted${r.sourcePdfRemoved ? ' (source PDF removed)' : ''}.`);
+            setDeleteOpen(false);
+            navigate(`/accounts/${s.accountId}/statements`);
+          } catch (err) {
+            toast.error(err instanceof ApiError ? err.message : 'delete failed');
           }
         }}
       />

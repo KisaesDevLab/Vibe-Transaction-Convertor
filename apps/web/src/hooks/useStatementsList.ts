@@ -213,6 +213,29 @@ export const useReExtract = (statementId: string) => {
   });
 };
 
+export interface DeleteStatementResult {
+  ok: boolean;
+  txCount: number;
+  exportFilesRemoved: number;
+  sourcePdfRemoved: boolean;
+}
+
+// Admin-only hard delete of a `failed` or `awaiting-locale-confirmation`
+// statement. Cascades transactions + export_jobs at the DB level and
+// (when no other statement references the same content hash) unlinks
+// the source PDF — so re-uploading the same file is then a fresh ingest
+// rather than a dedupe hit on the broken row.
+export const useDeleteStatement = (statementId: string) => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => api.delete<DeleteStatementResult>(`/api/statements/${statementId}`),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['statement', statementId] });
+      qc.invalidateQueries({ queryKey: ['statements'] });
+    },
+  });
+};
+
 export const useRecomputeReconciliation = (statementId: string) => {
   const qc = useQueryClient();
   return useMutation({
