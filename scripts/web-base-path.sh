@@ -48,5 +48,29 @@ find /app/apps/web/dist -type f \
 # Drop a marker so the active value is observable inside the container.
 echo "$base" > /app/apps/web/dist/.base-path
 
+# Fix data-volume ownership before dropping privileges. The image
+# pre-chowns /var/lib/vibetc to uid 1000 (node) so a *fresh* named
+# volume inherits that on first attach, but pre-created volumes
+# (e.g., the Vibe-Appliance installer provisioning the mount before
+# the first container start) come up root-owned and the API would
+# EACCES on the first upload. Only chown when ownership has drifted
+# so warm restarts stay instant.
+if [ "$(id -u)" = '0' ]; then
+  data_dir="${DATA_DIR:-/var/lib/vibetc}"
+  if [ -d "$data_dir" ]; then
+    owner_uid="$(stat -c '%u' "$data_dir" 2>/dev/null || echo unknown)"
+    if [ "$owner_uid" != '1000' ]; then
+      echo "[entrypoint] $data_dir owned by uid=$owner_uid — chowning to 1000:1000"
+      chown -R 1000:1000 "$data_dir"
+    fi
+  fi
+fi
+
 # Hand off to whatever was passed as CMD (node apps/api/dist/index.js).
-exec "$@"
+# Drop to the node user via runuser (util-linux, in bookworm-slim) so
+# the long-running API process is not root.
+if [ "$(id -u)" = '0' ]; then
+  exec runuser -u node -- "$@"
+else
+  exec "$@"
+fi

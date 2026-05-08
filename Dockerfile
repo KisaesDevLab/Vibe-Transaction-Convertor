@@ -77,12 +77,20 @@ RUN chmod +x /usr/local/bin/web-base-path.sh
 VOLUME ["/var/lib/vibetc"]
 EXPOSE 4000
 
-# Phase 30 #9 — run as non-root. node:bookworm-slim ships with a uid 1000
-# `node` user already; reuse it. The data volume mount path is owned by
-# this user so the runtime can write to /var/lib/vibetc without sudo.
+# Phase 30 #9 — run as non-root (uid 1000 `node`, baked into
+# node:bookworm-slim). We pre-create + chown the data dir at build
+# time so a *fresh* named volume inherits node ownership when Docker
+# copies the image's path into it on first attach.
+#
+# But operators who pre-create the vibetc-data volume (e.g., the
+# Vibe-Appliance installer provisioning the mount before the first
+# container start) end up with a root-owned mount, and Docker won't
+# re-copy ownership from the image. The entrypoint
+# (web-base-path.sh) compensates: it starts as root, fixes
+# ownership only when it has drifted, then drops to the node user
+# via runuser before exec'ing CMD. Hence no `USER node` here.
 RUN mkdir -p /var/lib/vibetc \
     && chown -R node:node /var/lib/vibetc /app
-USER node
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD curl -fsS http://localhost:4000/api/health/live || exit 1
