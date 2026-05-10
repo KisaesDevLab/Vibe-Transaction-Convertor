@@ -8,7 +8,7 @@
 //             at runtime. Account-context is auto-appended in both
 //             modes.
 
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 
@@ -39,37 +39,10 @@ interface PromptUpdate {
 }
 
 export function EnrichmentPromptAdminPage() {
-  const qc = useQueryClient();
-  const toast = useToast();
   const status = useQuery({
     queryKey: ['admin', 'enrichment-prompt'],
     queryFn: () => api.get<PromptStatus>('/api/admin/enrichment-prompt'),
   });
-  const save = useMutation({
-    mutationFn: (update: PromptUpdate) =>
-      api.put<PromptStatus>('/api/admin/enrichment-prompt', update),
-    onSuccess: (data) => qc.setQueryData(['admin', 'enrichment-prompt'], data),
-  });
-
-  // Local edits are kept separate from the server state so the textareas
-  // don't snap back to "current" on every keystroke + refetch. We seed
-  // from the query's first success, then track dirtiness against the
-  // authoritative `current` value.
-  const [mode, setMode] = useState<PromptMode>('rules');
-  const [cleanse, setCleanse] = useState<string>('');
-  const [categorize, setCategorize] = useState<string>('');
-  const [full, setFull] = useState<string>('');
-  const [seeded, setSeeded] = useState(false);
-
-  useEffect(() => {
-    if (status.data && !seeded) {
-      setMode(status.data.mode);
-      setCleanse(status.data.cleanseRules.current);
-      setCategorize(status.data.categorizeRules.current);
-      setFull(status.data.fullSystemPrompt.current);
-      setSeeded(true);
-    }
-  }, [status.data, seeded]);
 
   if (status.isPending) {
     return (
@@ -82,23 +55,43 @@ export function EnrichmentPromptAdminPage() {
   if (!status.data) {
     return <p className="text-danger">Failed to load enrichment prompt.</p>;
   }
+  return <Editor initial={status.data} />;
+}
 
-  const s = status.data;
+// Editor lives behind a load gate so its useState seeds are run exactly
+// once with concrete server values — no `seeded` flag, no useEffect to
+// sync server-state-into-form-state. Re-mounting on save (via
+// queryClient.setQueryData → status changing → identity check below) is
+// avoided by re-using the same query data; subsequent saves update
+// `initial` only on remount, which won't happen unless the user
+// navigates away.
+function Editor({ initial }: { initial: PromptStatus }) {
+  const qc = useQueryClient();
+  const toast = useToast();
+  const save = useMutation({
+    mutationFn: (update: PromptUpdate) =>
+      api.put<PromptStatus>('/api/admin/enrichment-prompt', update),
+    onSuccess: (data) => qc.setQueryData(['admin', 'enrichment-prompt'], data),
+  });
+
+  const [mode, setMode] = useState<PromptMode>(initial.mode);
+  const [cleanse, setCleanse] = useState<string>(initial.cleanseRules.current);
+  const [categorize, setCategorize] = useState<string>(initial.categorizeRules.current);
+  const [full, setFull] = useState<string>(initial.fullSystemPrompt.current);
+
   const dirty =
-    mode !== s.mode ||
-    cleanse !== s.cleanseRules.current ||
-    categorize !== s.categorizeRules.current ||
-    full !== s.fullSystemPrompt.current;
+    mode !== initial.mode ||
+    cleanse !== initial.cleanseRules.current ||
+    categorize !== initial.categorizeRules.current ||
+    full !== initial.fullSystemPrompt.current;
 
   const onSave = async (): Promise<void> => {
     try {
-      // Only send fields whose value differs from the server's current.
-      // Empty-string maps to "clear the override" on the backend.
       const update: PromptUpdate = {};
-      if (mode !== s.mode) update.mode = mode;
-      if (cleanse !== s.cleanseRules.current) update.cleanseRules = cleanse;
-      if (categorize !== s.categorizeRules.current) update.categorizeRules = categorize;
-      if (full !== s.fullSystemPrompt.current) update.fullSystemPrompt = full;
+      if (mode !== initial.mode) update.mode = mode;
+      if (cleanse !== initial.cleanseRules.current) update.cleanseRules = cleanse;
+      if (categorize !== initial.categorizeRules.current) update.categorizeRules = categorize;
+      if (full !== initial.fullSystemPrompt.current) update.fullSystemPrompt = full;
       await save.mutateAsync(update);
       toast.success('Enrichment prompt saved.');
     } catch (err) {
@@ -106,15 +99,11 @@ export function EnrichmentPromptAdminPage() {
     }
   };
 
-  const onResetCleanse = (): void => setCleanse(s.cleanseRules.defaultValue);
-  const onResetCategorize = (): void => setCategorize(s.categorizeRules.defaultValue);
-  const onResetFull = (): void => setFull(s.fullSystemPrompt.defaultValue);
-
   const onDiscard = (): void => {
-    setMode(s.mode);
-    setCleanse(s.cleanseRules.current);
-    setCategorize(s.categorizeRules.current);
-    setFull(s.fullSystemPrompt.current);
+    setMode(initial.mode);
+    setCleanse(initial.cleanseRules.current);
+    setCategorize(initial.categorizeRules.current);
+    setFull(initial.fullSystemPrompt.current);
   };
 
   return (
@@ -131,50 +120,38 @@ export function EnrichmentPromptAdminPage() {
         </p>
         <p className="text-xs text-ink-subtle">
           Active prompt version:{' '}
-          <code className="rounded bg-surface-subtle px-1 font-mono">{s.promptVersion}</code>
+          <code className="rounded bg-surface-subtle px-1 font-mono">{initial.promptVersion}</code>
         </p>
       </header>
 
       <fieldset className="rounded-lg border border-surface-muted bg-white p-4">
         <legend className="px-1 text-sm font-medium">Mode</legend>
         <div className="space-y-2 text-sm">
-          <label className="flex items-start gap-2">
-            <input
-              type="radio"
-              name="mode"
-              checked={mode === 'rules'}
-              onChange={() => setMode('rules')}
-              className="mt-1"
-            />
-            <span>
-              <span className="font-medium">Edit rule blocks</span>
-              <br />
-              <span className="text-xs text-ink-muted">
+          <ModeOption
+            checked={mode === 'rules'}
+            onSelect={() => setMode('rules')}
+            title="Edit rule blocks"
+            description={
+              <>
                 Replace just the cleansing and categorization rule sections. Persona, JSON-output
                 framing, and the auto-generated &quot;Available categories:&quot; list stay intact.
                 Safest option.
-              </span>
-            </span>
-          </label>
-          <label className="flex items-start gap-2">
-            <input
-              type="radio"
-              name="mode"
-              checked={mode === 'full'}
-              onChange={() => setMode('full')}
-              className="mt-1"
-            />
-            <span>
-              <span className="font-medium">Full system prompt (advanced)</span>
-              <br />
-              <span className="text-xs text-ink-muted">
+              </>
+            }
+          />
+          <ModeOption
+            checked={mode === 'full'}
+            onSelect={() => setMode('full')}
+            title="Full system prompt (advanced)"
+            description={
+              <>
                 Take over the entire system prompt verbatim. Use{' '}
                 <code className="rounded bg-surface-subtle px-1 font-mono">{'{{categories}}'}</code>{' '}
                 anywhere you want the live category list interpolated. Removing it means the LLM
                 can&apos;t pick a valid category and the schema-constrained response will fail.
-              </span>
-            </span>
-          </label>
+              </>
+            }
+          />
         </div>
       </fieldset>
 
@@ -185,9 +162,8 @@ export function EnrichmentPromptAdminPage() {
             description="Sent only when the operator triggers a cleanse. The LLM sees these verbatim under the JSON-output framing."
             value={cleanse}
             onChange={setCleanse}
-            isOverride={s.cleanseRules.isOverride}
-            defaultValue={s.cleanseRules.defaultValue}
-            onReset={onResetCleanse}
+            isOverride={initial.cleanseRules.isOverride}
+            defaultValue={initial.cleanseRules.defaultValue}
           />
           <PromptBlock
             title="Categorize rules"
@@ -202,9 +178,8 @@ export function EnrichmentPromptAdminPage() {
             }
             value={categorize}
             onChange={setCategorize}
-            isOverride={s.categorizeRules.isOverride}
-            defaultValue={s.categorizeRules.defaultValue}
-            onReset={onResetCategorize}
+            isOverride={initial.categorizeRules.isOverride}
+            defaultValue={initial.categorizeRules.defaultValue}
           />
         </>
       ) : (
@@ -220,9 +195,8 @@ export function EnrichmentPromptAdminPage() {
           }
           value={full}
           onChange={setFull}
-          isOverride={s.fullSystemPrompt.isOverride}
-          defaultValue={s.fullSystemPrompt.defaultValue}
-          onReset={onResetFull}
+          isOverride={initial.fullSystemPrompt.isOverride}
+          defaultValue={initial.fullSystemPrompt.defaultValue}
           rows={20}
         />
       )}
@@ -249,6 +223,28 @@ export function EnrichmentPromptAdminPage() {
   );
 }
 
+function ModeOption({
+  checked,
+  onSelect,
+  title,
+  description,
+}: {
+  checked: boolean;
+  onSelect: () => void;
+  title: string;
+  description: React.ReactNode;
+}) {
+  return (
+    <label className="flex items-start gap-2">
+      <input type="radio" name="mode" checked={checked} onChange={onSelect} className="mt-1" />
+      <div className="flex flex-col">
+        <span className="font-medium">{title}</span>
+        <span className="text-xs text-ink-muted">{description}</span>
+      </div>
+    </label>
+  );
+}
+
 function PromptBlock({
   title,
   description,
@@ -256,7 +252,6 @@ function PromptBlock({
   onChange,
   isOverride,
   defaultValue,
-  onReset,
   rows = 14,
 }: {
   title: string;
@@ -265,7 +260,6 @@ function PromptBlock({
   onChange: (v: string) => void;
   isOverride: boolean;
   defaultValue: string;
-  onReset: () => void;
   rows?: number;
 }) {
   const isDefault = value === defaultValue;
@@ -285,7 +279,7 @@ function PromptBlock({
         </span>
         <button
           type="button"
-          onClick={onReset}
+          onClick={() => onChange(defaultValue)}
           disabled={isDefault}
           className="rounded-md border border-surface-muted px-2 py-1 text-xs hover:bg-surface-subtle disabled:opacity-50"
         >

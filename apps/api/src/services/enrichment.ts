@@ -32,12 +32,14 @@ import {
 import { logger } from '../lib/logger.js';
 import { createHash } from 'node:crypto';
 
+import { writeAudit } from './audit.js';
 import {
   ENRICHMENT_PROMPT_VERSION,
   enrichmentCache,
   type EnrichmentCacheKey,
 } from './enrichment-cache.js';
 import { buildProvider } from './llm-provider.js';
+import { readSettingPlain, upsertSetting } from './system-settings.js';
 
 export interface EnrichOptions {
   cleanse: boolean;
@@ -81,21 +83,15 @@ export class MonthlyCapReachedError extends Error {
   }
 }
 
-// Reads enrichment.cleanse_enabled / enrichment.category_enabled from
-// system_settings. Defaults to true when the row is missing — the
-// migration seeds them but a partial install (or a wiped DB) shouldn't
-// silently disable the feature.
+// Defaults to true when the row is missing — the migration seeds the
+// flags but a partial install (or a wiped DB) shouldn't silently
+// disable the feature.
 const isToggleEnabled = async (db: Db, key: string): Promise<boolean> => {
-  const rows = await db.select().from(systemSettings).where(eq(systemSettings.key, key));
-  const v = rows[0]?.valuePlaintext;
-  if (v === undefined || v === null) return true;
+  const v = await readSettingPlain(db, key);
+  if (v === null) return true;
   return v.toLowerCase() !== 'false' && v !== '0';
 };
 
-// Operator-tunable system-prompt customization for enrichment. Stored
-// in system_settings under enrichment.prompt.* keys. The prompt
-// builder is the only consumer; cache invalidation on edits is handled
-// by ENRICHMENT_PROMPT_VERSION which the operator-write path bumps.
 const PROMPT_KEY_MODE = 'enrichment.prompt.mode';
 const PROMPT_KEY_CLEANSE_RULES = 'enrichment.prompt.cleanse_rules';
 const PROMPT_KEY_CATEGORIZE_RULES = 'enrichment.prompt.categorize_rules';
@@ -107,11 +103,6 @@ interface EnrichmentPromptOverrides {
   categorizeRules: string | null;
   fullSystemPrompt: string | null;
 }
-
-const readSettingPlain = async (db: Db, key: string): Promise<string | null> => {
-  const rows = await db.select().from(systemSettings).where(eq(systemSettings.key, key));
-  return rows[0]?.valuePlaintext ?? null;
-};
 
 const readPromptOverrides = async (db: Db): Promise<EnrichmentPromptOverrides> => {
   const [modeRaw, cleanseRules, categorizeRules, fullSystemPrompt] = await Promise.all([
@@ -465,25 +456,6 @@ export interface EnrichmentPromptUpdate {
   fullSystemPrompt?: string | null | undefined;
 }
 
-const upsertPromptSetting = async (
-  db: Db,
-  key: string,
-  value: string | null,
-  actorUserId: string,
-): Promise<void> => {
-  if (value === null) {
-    await db.delete(systemSettings).where(eq(systemSettings.key, key));
-    return;
-  }
-  await db
-    .insert(systemSettings)
-    .values({ key, valuePlaintext: value, isSecret: false })
-    .onConflictDoUpdate({
-      target: systemSettings.key,
-      set: { valuePlaintext: value, updatedAt: sql`now()`, updatedByUserId: actorUserId },
-    });
-};
-
 export const setEnrichmentPrompt = async (
   db: Db,
   update: EnrichmentPromptUpdate,
@@ -495,27 +467,26 @@ export const setEnrichmentPrompt = async (
   const normalize = (v: string | null | undefined): string | null | undefined => {
     if (v === undefined) return undefined;
     if (v === null) return null;
-    const trimmed = v.trim();
-    return trimmed.length === 0 ? null : v;
+    return v.trim().length === 0 ? null : v;
   };
   const cleanseRules = normalize(update.cleanseRules);
   const categorizeRules = normalize(update.categorizeRules);
   const fullSystemPrompt = normalize(update.fullSystemPrompt);
 
   if (update.mode !== undefined) {
-    await upsertPromptSetting(db, PROMPT_KEY_MODE, update.mode, actorUserId);
+    await upsertSetting(db, PROMPT_KEY_MODE, update.mode, actorUserId);
   }
   if (cleanseRules !== undefined) {
-    await upsertPromptSetting(db, PROMPT_KEY_CLEANSE_RULES, cleanseRules, actorUserId);
+    await upsertSetting(db, PROMPT_KEY_CLEANSE_RULES, cleanseRules, actorUserId);
   }
   if (categorizeRules !== undefined) {
-    await upsertPromptSetting(db, PROMPT_KEY_CATEGORIZE_RULES, categorizeRules, actorUserId);
+    await upsertSetting(db, PROMPT_KEY_CATEGORIZE_RULES, categorizeRules, actorUserId);
   }
   if (fullSystemPrompt !== undefined) {
-    await upsertPromptSetting(db, PROMPT_KEY_FULL, fullSystemPrompt, actorUserId);
+    await upsertSetting(db, PROMPT_KEY_FULL, fullSystemPrompt, actorUserId);
   }
 
-  await db.insert(auditLog).values({
+  await writeAudit(db, {
     actorUserId,
     entityType: 'system_settings',
     entityId: 'enrichment.prompt',
@@ -538,18 +509,8 @@ export const setEnrichmentToggle = async (
   actorUserId: string,
 ): Promise<void> => {
   const key = which === 'cleanse' ? 'enrichment.cleanse_enabled' : 'enrichment.category_enabled';
-  await db
-    .insert(systemSettings)
-    .values({ key, valuePlaintext: enabled ? 'true' : 'false', isSecret: false })
-    .onConflictDoUpdate({
-      target: systemSettings.key,
-      set: {
-        valuePlaintext: enabled ? 'true' : 'false',
-        updatedAt: sql`now()`,
-        updatedByUserId: actorUserId,
-      },
-    });
-  await db.insert(auditLog).values({
+  await upsertSetting(db, key, enabled ? 'true' : 'false', actorUserId);
+  await writeAudit(db, {
     actorUserId,
     entityType: 'system_settings',
     entityId: key,

@@ -27,7 +27,11 @@ import {
   setEnrichmentToggle,
 } from '../services/enrichment.js';
 import { clearPricing, listPricings, setPricing } from '../services/pricing.js';
-import { AnthropicProvider, probeGlmOcrHealth } from '@vibe-tx-converter/extractor';
+import {
+  AnthropicProvider,
+  type EnrichmentPromptMode,
+  probeGlmOcrHealth,
+} from '@vibe-tx-converter/extractor';
 import { extractionQueue } from '../jobs/queues.js';
 import { logger } from '../lib/logger.js';
 
@@ -809,7 +813,7 @@ export const adminRouter = (): Router => {
         return v;
       };
 
-      let mode: 'rules' | 'full' | undefined;
+      let mode: EnrichmentPromptMode | undefined;
       if (body.mode !== undefined) {
         if (body.mode !== 'rules' && body.mode !== 'full') {
           throw new ValidationError("mode must be 'rules' or 'full'");

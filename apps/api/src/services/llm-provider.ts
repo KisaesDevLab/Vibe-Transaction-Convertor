@@ -1,5 +1,3 @@
-import { eq } from 'drizzle-orm';
-
 import {
   AnthropicProvider,
   LocalGatewayProvider,
@@ -7,28 +5,15 @@ import {
 } from '@vibe-tx-converter/extractor';
 
 import type { Db } from '../db/client.js';
-import { systemSettings } from '../db/schema.js';
 import { unwrapSecret } from '../lib/secrets.js';
 import { getMergedPriceTable } from './pricing.js';
+import { readSetting } from './system-settings.js';
 
 const KEY_PROVIDER = 'llm.provider';
 const KEY_ANTHROPIC_KEY = 'llm.anthropic.api_key';
 const KEY_ANTHROPIC_MODEL = 'llm.anthropic.model';
 
 export type ProviderId = 'local' | 'anthropic';
-
-const readSetting = async (
-  db: Db,
-  key: string,
-): Promise<{ valuePlaintext: string | null; valueEncrypted: Buffer | null } | null> => {
-  const rows = await db.select().from(systemSettings).where(eq(systemSettings.key, key));
-  const row = rows[0];
-  if (!row) return null;
-  return {
-    valuePlaintext: row.valuePlaintext,
-    valueEncrypted: row.valueEncrypted as Buffer | null,
-  };
-};
 
 export const resolveProviderId = async (db: Db): Promise<ProviderId> => {
   const r = await readSetting(db, KEY_PROVIDER);
