@@ -58,18 +58,25 @@ class CancelledError extends Error {
   }
 }
 
-// Phase 15 #17 cooperative cancellation. The /cancel route flips
-// status='failed' with errorMessage 'cancelled by operator'; this
-// helper polls between phases and bails before doing more LLM/DB work
-// that would race the route's transaction wipe.
+// Cooperative cancellation. Two trigger conditions, both treated as
+// "the operator pulled the plug, stop touching this statement":
+//   1. /cancel flipped status='failed' with errorMessage 'cancelled
+//      by operator' (Phase 15 #17).
+//   2. /statements/:id DELETE removed the row entirely while we were
+//      mid-extraction — the row lookup returns empty and a downstream
+//      transactions INSERT would FK-violate.
+// In either case we bail at the next phase boundary so the worker
+// doesn't charge through a doomed extraction.
 const checkCancelled = async (statementId: string): Promise<void> => {
   const rows = await db
     .select({ status: statements.status, errorMessage: statements.errorMessage })
     .from(statements)
     .where(eq(statements.id, statementId));
   const row = rows[0];
+  if (!row) {
+    throw new CancelledError();
+  }
   if (
-    row &&
     row.status === 'failed' &&
     typeof row.errorMessage === 'string' &&
     row.errorMessage.startsWith('cancelled')

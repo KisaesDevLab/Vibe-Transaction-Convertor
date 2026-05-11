@@ -207,6 +207,16 @@ export function StatementReviewPage() {
               {reExtract.isPending ? 'Enqueueing…' : 'Re-extract'}
             </button>
           ) : null}
+          {isAdmin ? (
+            <button
+              type="button"
+              onClick={() => setDeleteOpen(true)}
+              disabled={deleteStmt.isPending}
+              className="rounded-md border border-red-300 px-3 py-1.5 text-sm text-red-900 hover:bg-red-50 disabled:opacity-50"
+            >
+              {deleteStmt.isPending ? 'Deleting…' : 'Delete'}
+            </button>
+          ) : null}
           <Link
             to={`/statements/${statementId}/export`}
             className="rounded-md border border-surface-muted px-3 py-1.5 text-sm hover:bg-surface-subtle"
@@ -253,28 +263,8 @@ export function StatementReviewPage() {
       </header>
 
       {s.errorMessage ? (
-        <div className="space-y-2 rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-900">
-          <p>
-            <strong>Extraction failed.</strong> {s.errorMessage}
-          </p>
-          {isAdmin && (s.status === 'failed' || s.status === 'awaiting-locale-confirmation') ? (
-            <p className="text-xs text-red-800">
-              If this statement is unrecoverable, delete it to free the source PDF for re-upload.
-              Re-extract instead if you only want to retry without re-uploading.
-            </p>
-          ) : null}
-          {isAdmin && (s.status === 'failed' || s.status === 'awaiting-locale-confirmation') ? (
-            <div className="flex flex-wrap gap-2 pt-1">
-              <button
-                type="button"
-                onClick={() => setDeleteOpen(true)}
-                disabled={deleteStmt.isPending}
-                className="rounded-md border border-red-300 bg-white px-3 py-1.5 text-xs font-medium text-red-900 hover:bg-red-100 disabled:opacity-50"
-              >
-                {deleteStmt.isPending ? 'Deleting…' : 'Delete statement'}
-              </button>
-            </div>
-          ) : null}
+        <div className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-900">
+          <strong>Extraction failed.</strong> {s.errorMessage}
         </div>
       ) : null}
 

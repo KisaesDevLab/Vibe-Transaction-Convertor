@@ -852,11 +852,12 @@ export const statementsRouter = (): Router => {
   });
 
   // Admin: delete a stuck statement so the operator can re-upload the
-  // same PDF cleanly. Only allowed for terminal-but-unusable states
-  // (`failed`, `awaiting-locale-confirmation`) — successful statements
-  // (`review`, `exported`) and in-flight ones must not be deletable
-  // through this path. For in-flight extractions, /cancel first to
-  // flip to `failed`, then delete.
+  // same PDF cleanly. Allowed at any point in the statement lifecycle:
+  // in-flight worker activity bails cooperatively at the next phase
+  // boundary (the worker's checkCancelled treats a missing statement
+  // row as a cancellation signal), the queued BullMQ job is removed
+  // up front, and any partial transactions/export rows cascade off
+  // the statement row delete.
   //
   // Cascade: transactions and export_jobs FK with ON DELETE CASCADE
   // (schema.ts), so the statements row delete drops both. audit_log
@@ -874,12 +875,6 @@ export const statementsRouter = (): Router => {
       const rows = await db.select().from(statements).where(eq(statements.id, id));
       const stmt = rows[0];
       if (!stmt) throw new NotFoundError(`statement ${id}`);
-      const DELETABLE = new Set<typeof stmt.status>(['failed', 'awaiting-locale-confirmation']);
-      if (!DELETABLE.has(stmt.status)) {
-        throw new ValidationError(
-          `cannot delete a ${stmt.status} statement — cancel first if it is still in flight`,
-        );
-      }
 
       const txCountRows = await db
         .select({ c: sql<number>`count(*)::int` })
