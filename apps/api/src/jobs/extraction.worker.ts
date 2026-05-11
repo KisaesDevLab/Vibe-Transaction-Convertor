@@ -33,6 +33,7 @@ import {
   type ProviderId,
 } from '../services/llm-provider.js';
 import { redisOcrCache } from '../services/ocr-cache.js';
+import { resolvePdfStrategy } from '../services/pdf-strategy.js';
 import { writeAudit } from '../services/audit.js';
 
 import { QUEUE_EXTRACTION, getJobConnection, type ExtractionJobData } from './queues.js';
@@ -484,11 +485,6 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
   // the same Buffer twice (which would detach the ArrayBuffer and
   // throw "Cannot perform Construct on a detached ArrayBuffer").
   const analysis = await analyzePdfFromBuffer(await readFile(data.sourcePdfPath));
-  const method: ExtractionMethod = routePdf(analysis);
-  await setStatus(stmtId, method === 'ocr' ? 'ocr' : 'extracting', {
-    extractionMethod: method,
-    sourcePdfPages: analysis.pageCount,
-  });
 
   // Phase 14: when this statement is a per-account slice (page_range
   // set), filter pages to that range BEFORE handing markdown to the LLM.
@@ -500,12 +496,34 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
     return page1 >= pageRange.start && page1 <= pageRange.end;
   };
 
-  let markdown: string;
+  // PDF processing strategy resolves the per-statement override against
+  // the firm default. Strategy decides which extraction method to try
+  // first (text-layer vs OCR) and whether to fall back to OCR when the
+  // LLM stack rejects the text-layer input.
+  const strategy = await resolvePdfStrategy(db, stmtRows[0]?.processingStrategyOverride);
+  let method: ExtractionMethod;
+  if (strategy === 'force-ocr') {
+    method = 'ocr';
+  } else if (strategy === 'force-text') {
+    if (!analysis.hasTextLayer) {
+      throw new Error(
+        'force-text strategy requested but this PDF has no text layer — ' +
+          'switch to auto / force-ocr / auto-ocr-fallback',
+      );
+    }
+    method = 'text';
+  } else {
+    method = routePdf(analysis);
+  }
 
-  if (method === 'text') {
+  await setStatus(stmtId, method === 'ocr' ? 'ocr' : 'extracting', {
+    extractionMethod: method,
+    sourcePdfPages: analysis.pageCount,
+  });
+
+  const produceTextMarkdown = async (): Promise<string> => {
     const pages = await extractTextLayerFromBuffer(await readFile(data.sourcePdfPath));
     const scoped = pages.filter((p) => inRange(p.index));
-    markdown = scoped.map((p) => `# Page ${p.index + 1}\n\n${p.text}`).join('\n\n');
     // Persist detected splits so the UI can offer a split-or-acknowledge
     // flow. Only run detection on un-split (whole-PDF) extractions —
     // sliced re-extractions are by definition single-account already.
@@ -522,7 +540,10 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
         );
       }
     }
-  } else {
+    return scoped.map((p) => `# Page ${p.index + 1}\n\n${p.text}`).join('\n\n');
+  };
+
+  const produceOcrMarkdown = async (): Promise<string> => {
     // OCR path. rasterizePdf shells out to pdftoppm (poppler-utils).
     // The standalone Dockerfile installs poppler; on host machines the
     // operator needs `brew install poppler` (or apt/choco equivalent).
@@ -538,10 +559,12 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
       ...(ocrConfig.timeoutMs ? { timeoutMs: ocrConfig.timeoutMs } : {}),
       ...(ocrConfig.concurrency ? { concurrency: ocrConfig.concurrency } : {}),
     });
-    markdown = ocr.pages
+    return ocr.pages
       .map((p, i) => `# Page ${(scopedRasters[i]?.index ?? p.index) + 1}\n\n${p.markdown}`)
       .join('\n\n');
-  }
+  };
+
+  let markdown = method === 'text' ? await produceTextMarkdown() : await produceOcrMarkdown();
 
   await checkCancelled(stmtId);
   await setStatus(stmtId, 'extracting');
@@ -551,79 +574,106 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
   // the better outcome and commits it once at the end.
   const policy = await resolveProviderPolicy(db);
   const { primary, secondary } = providerOrderFor(policy);
-  const attemptCtx: AttemptContext = {
+  let attemptCtx: AttemptContext = {
     stmtId,
     markdown,
     ...(dateFormatOverride ? { dateFormatOverride } : {}),
   };
 
-  let chosen = await attemptExtraction(primary, attemptCtx);
-
-  // AMBIGUOUS date format halts the worker regardless of fallback —
-  // operator confirmation resolves it via /confirm-date-format.
-  if (chosen.dateFormat === 'AMBIGUOUS' && !dateFormatOverride) {
+  const persistAmbiguousHalt = async (a: AttemptOutcome): Promise<void> => {
     await db
       .update(statements)
       .set({
         status: 'awaiting-locale-confirmation',
         sourceDateFormat: 'AMBIGUOUS',
-        sourceDateFormatConfidence: chosen.dateFormatConfidence,
-        llmProvider: chosen.providerId,
-        llmInputTokens: chosen.totalInputTokens,
-        llmOutputTokens: chosen.totalOutputTokens,
-        llmCallCount: chosen.totalCallCount,
-        llmCostMicros: chosen.totalCostMicros,
-        llmModelVersion: chosen.modelVersion,
+        sourceDateFormatConfidence: a.dateFormatConfidence,
+        llmProvider: a.providerId,
+        llmInputTokens: a.totalInputTokens,
+        llmOutputTokens: a.totalOutputTokens,
+        llmCallCount: a.totalCallCount,
+        llmCostMicros: a.totalCostMicros,
+        llmModelVersion: a.modelVersion,
         updatedAt: sql`now()`,
       })
       .where(eq(statements.id, stmtId));
     logger.info(
-      { stmtId, providerId: chosen.providerId },
+      { stmtId, providerId: a.providerId },
       'extraction halted: ambiguous source date format — awaiting operator confirmation',
     );
-    return;
-  }
+  };
 
-  if (chosen.rejection !== null && secondary !== null) {
+  // Provider-fallback orchestration. Returns the better of (primary,
+  // secondary) outcomes, or just the primary when no secondary or no
+  // rejection. AMBIGUOUS short-circuits — the caller persists halt
+  // state and returns. Pure orchestration; no statement-row writes
+  // besides the existing extraction-fallback audit log.
+  const runProviderFallback = async (ctx: AttemptContext): Promise<AttemptOutcome> => {
+    const first = await attemptExtraction(primary, ctx);
+    if (first.dateFormat === 'AMBIGUOUS' && !ctx.dateFormatOverride) return first;
+    if (first.rejection === null || secondary === null) return first;
     await writeAudit(db, {
       entityType: 'statement',
       entityId: stmtId,
       action: 'statement.extraction-fallback',
       payload: {
-        from: chosen.providerId,
+        from: first.providerId,
         to: secondary,
+        reason: first.rejection,
+        ...(first.error ? { primaryError: first.error.message } : {}),
+      },
+    });
+    logger.info(
+      { stmtId, from: first.providerId, to: secondary, reason: first.rejection },
+      'falling back to secondary provider',
+    );
+    await setStatus(stmtId, 'extracting');
+    const second = await attemptExtraction(secondary, ctx);
+    if (second.dateFormat === 'AMBIGUOUS' && !ctx.dateFormatOverride) return second;
+    return pickBetterAttempt(first, second);
+  };
+
+  let chosen = await runProviderFallback(attemptCtx);
+
+  if (chosen.dateFormat === 'AMBIGUOUS' && !dateFormatOverride) {
+    await persistAmbiguousHalt(chosen);
+    return;
+  }
+
+  // OCR fallback. Only fires when:
+  //   - strategy is `auto-ocr-fallback`, and
+  //   - we tried text-layer first (otherwise there's nothing to fall
+  //     back to), and
+  //   - the provider stack rejected with any of the four triggers.
+  // Provider fallback runs *inside* each input attempt — so the OCR
+  // retry also exercises the secondary provider via runProviderFallback.
+  // Worst case: 4 LLM calls (text×{primary,secondary} → ocr×{primary,secondary}).
+  if (strategy === 'auto-ocr-fallback' && method === 'text' && chosen.rejection !== null) {
+    await writeAudit(db, {
+      entityType: 'statement',
+      entityId: stmtId,
+      action: 'statement.input-fallback',
+      payload: {
+        from: 'text-layer',
+        to: 'ocr',
         reason: chosen.rejection,
         ...(chosen.error ? { primaryError: chosen.error.message } : {}),
       },
     });
     logger.info(
-      { stmtId, from: chosen.providerId, to: secondary, reason: chosen.rejection },
-      'falling back to secondary provider',
+      { stmtId, reason: chosen.rejection },
+      'text-layer extraction rejected — retrying with GLM-OCR',
     );
+    await setStatus(stmtId, 'ocr', { extractionMethod: 'hybrid' });
+    markdown = await produceOcrMarkdown();
+    attemptCtx = { ...attemptCtx, markdown };
     await setStatus(stmtId, 'extracting');
-    const fallback = await attemptExtraction(secondary, attemptCtx);
-    // Secondary seeing AMBIGUOUS is unusual but defensible — same halt
-    // path with its telemetry. Primary's telemetry is forfeit in this
-    // edge case; the audit row above still records the attempt.
-    if (fallback.dateFormat === 'AMBIGUOUS' && !dateFormatOverride) {
-      await db
-        .update(statements)
-        .set({
-          status: 'awaiting-locale-confirmation',
-          sourceDateFormat: 'AMBIGUOUS',
-          sourceDateFormatConfidence: fallback.dateFormatConfidence,
-          llmProvider: fallback.providerId,
-          llmInputTokens: fallback.totalInputTokens,
-          llmOutputTokens: fallback.totalOutputTokens,
-          llmCallCount: fallback.totalCallCount,
-          llmCostMicros: fallback.totalCostMicros,
-          llmModelVersion: fallback.modelVersion,
-          updatedAt: sql`now()`,
-        })
-        .where(eq(statements.id, stmtId));
+    const ocrChosen = await runProviderFallback(attemptCtx);
+    if (ocrChosen.dateFormat === 'AMBIGUOUS' && !dateFormatOverride) {
+      await persistAmbiguousHalt(ocrChosen);
       return;
     }
-    chosen = pickBetterAttempt(chosen, fallback);
+    chosen = pickBetterAttempt(chosen, ocrChosen);
+    method = 'hybrid';
   }
 
   // Hard failure path: neither attempt produced usable data. Re-throw
@@ -752,6 +802,7 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
       txCount: effectiveTxs.length,
       llmEmittedTxCount: chosen.llmEmittedTxCount,
       policy,
+      strategy,
       ...(repairApplied ? { repairApplied } : {}),
     },
   });

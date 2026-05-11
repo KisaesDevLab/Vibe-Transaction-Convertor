@@ -32,6 +32,11 @@ import {
   setEnrichmentPrompt,
   setEnrichmentToggle,
 } from '../services/enrichment.js';
+import {
+  getFirmDefaultPdfStrategy,
+  isPdfProcessingStrategy,
+  setFirmDefaultPdfStrategy,
+} from '../services/pdf-strategy.js';
 import { clearPricing, listPricings, setPricing } from '../services/pricing.js';
 import {
   AnthropicProvider,
@@ -776,7 +781,31 @@ export const adminRouter = (): Router => {
     }
   });
 
-  // ----- Phase 33: enrichment toggles -----
+  // Firm-wide default PDF processing strategy. Per-upload overrides
+  // are written directly to the statements row at ingest time.
+  router.get('/pdf-strategy', async (_req, res, next) => {
+    try {
+      const strategy = await getFirmDefaultPdfStrategy(db);
+      res.json({ strategy });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.post('/pdf-strategy', async (req, res, next) => {
+    try {
+      const v = req.body?.strategy;
+      if (!isPdfProcessingStrategy(v)) {
+        throw new ValidationError(
+          'strategy must be one of: auto, force-text, force-ocr, auto-ocr-fallback',
+        );
+      }
+      await setFirmDefaultPdfStrategy(db, v, req.user!.id);
+      res.json({ strategy: v });
+    } catch (err) {
+      next(err);
+    }
+  });
 
   router.get('/enrichment', async (_req, res, next) => {
     try {

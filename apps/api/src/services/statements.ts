@@ -7,6 +7,8 @@ import type { Statement, User } from '../db/types.js';
 import { ConflictError, NotFoundError } from '../lib/errors.js';
 import { writeAudit } from './audit.js';
 
+import type { PdfProcessingStrategy } from './pdf-strategy.js';
+
 export interface UploadIngestInput {
   accountId: string;
   hash: string;
@@ -14,6 +16,9 @@ export interface UploadIngestInput {
   filename: string;
   bytes: number;
   pages: number;
+  // Per-upload override of the firm-wide PDF processing strategy.
+  // null falls back to the firm default at extraction time.
+  processingStrategyOverride?: PdfProcessingStrategy | null;
 }
 
 export interface UploadIngestResult {
@@ -43,6 +48,7 @@ export const ingestUpload = async (
       sourcePdfPath: input.storedPath,
       sourcePdfPages: input.pages,
       status: 'uploaded',
+      processingStrategyOverride: input.processingStrategyOverride ?? null,
     })
     .onConflictDoNothing({
       target: [statements.accountId, statements.sourcePdfHash],

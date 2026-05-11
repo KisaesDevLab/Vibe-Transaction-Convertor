@@ -55,6 +55,23 @@ export const reconciliationStatus = vibetc.enum('reconciliation_status', [
 
 export const extractionMethod = vibetc.enum('extraction_method', ['text', 'ocr', 'hybrid']);
 
+// Per-statement override for the PDF processing order. Resolves against
+// the global `pdf.processing.strategy` system_settings row at extraction
+// time; NULL means "use the firm default".
+//   - auto              : text-layer if present, OCR if not. No retry.
+//   - force-text        : always use the text layer. Fail if absent.
+//   - force-ocr         : always run GLM-OCR, even with a text layer.
+//   - auto-ocr-fallback : text-layer first; re-run extraction with OCR
+//                         when the LLM stack rejects the text-layer
+//                         input (HTTP / malformed / empty-txs /
+//                         discrepancy).
+export const pdfProcessingStrategy = vibetc.enum('pdf_processing_strategy', [
+  'auto',
+  'force-text',
+  'force-ocr',
+  'auto-ocr-fallback',
+]);
+
 export const sourceDateFormat = vibetc.enum('source_date_format', [
   'MDY',
   'DMY',
@@ -238,6 +255,9 @@ export const statements = vibetc.table(
     // Phase 14 #6/#7: when a PDF was split per detected account, this
     // captures the page range for this slice. NULL means "the whole PDF".
     pageRange: int4range('page_range'),
+    // Per-upload override of the firm-wide PDF processing strategy.
+    // NULL = use the firm default from system_settings.
+    processingStrategyOverride: pdfProcessingStrategy('processing_strategy_override'),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
   },

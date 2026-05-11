@@ -103,12 +103,28 @@ const readCsrfFromCookie = (): string =>
     .find((c) => c.startsWith('vibetc_csrf='))
     ?.split('=')[1] ?? '';
 
+export type PdfProcessingStrategy = 'auto' | 'force-text' | 'force-ocr' | 'auto-ocr-fallback';
+
+export interface UploadInput {
+  files: File[];
+  // Per-file strategy override, aligned with `files` by index. null
+  // entries fall through to the firm default at extraction time.
+  strategies?: Array<PdfProcessingStrategy | null>;
+}
+
 export const useUpload = (accountId: string) => {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async (files: File[]): Promise<UploadResult> => {
+    mutationFn: async (input: UploadInput): Promise<UploadResult> => {
+      const { files, strategies } = input;
       const form = new FormData();
       for (const f of files) form.append('files', f);
+      if (strategies && strategies.some((s) => s !== null)) {
+        // Pad / truncate to match files length so the server's index
+        // alignment stays unambiguous.
+        const aligned = files.map((_, i) => strategies[i] ?? null);
+        form.append('processingStrategies', JSON.stringify(aligned));
+      }
       const res = await fetch(withBase(`/api/accounts/${accountId}/uploads`), {
         method: 'POST',
         credentials: 'include',

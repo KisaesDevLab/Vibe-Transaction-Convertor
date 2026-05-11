@@ -12,6 +12,31 @@ import { api, ApiError } from '../lib/api';
 
 type LlmProviderPolicy = 'local-only' | 'anthropic-only' | 'local-first' | 'anthropic-first';
 
+type PdfProcessingStrategy = 'auto' | 'force-text' | 'force-ocr' | 'auto-ocr-fallback';
+
+const PDF_STRATEGY_LABELS: Record<PdfProcessingStrategy, { title: string; description: string }> = {
+  auto: {
+    title: 'Auto',
+    description:
+      'Text-layer when the PDF has one; GLM-OCR when it doesn’t. No retry. Current default.',
+  },
+  'force-text': {
+    title: 'Force text-layer',
+    description:
+      'Always read the embedded text layer. Upload fails if the PDF has none (scanned-only banks).',
+  },
+  'force-ocr': {
+    title: 'Force GLM-OCR',
+    description:
+      'Always run GLM-OCR, even when a text layer is present. Useful when the embedded text is scrambled or hidden.',
+  },
+  'auto-ocr-fallback': {
+    title: 'Text-layer with OCR fallback',
+    description:
+      'Try the text layer first; if the LLM rejects the result (HTTP error, malformed response, empty transactions, or reconciliation discrepancy), retry with GLM-OCR. Up to twice the LLM cost when triggered.',
+  },
+};
+
 interface ProviderStatus {
   // `provider` is the currently-active primary, derived from the
   // policy. `policy` is what's actually persisted; older API clients
@@ -82,6 +107,15 @@ export function LlmProviderAdminPage() {
   const switchPolicy = useMutation({
     mutationFn: (p: LlmProviderPolicy) => api.post('/api/admin/llm-provider', { policy: p }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'llm-provider'] }),
+  });
+  const pdfStrategy = useQuery({
+    queryKey: ['admin', 'pdf-strategy'],
+    queryFn: () => api.get<{ strategy: PdfProcessingStrategy }>('/api/admin/pdf-strategy'),
+  });
+  const switchPdfStrategy = useMutation({
+    mutationFn: (s: PdfProcessingStrategy) =>
+      api.post<{ strategy: PdfProcessingStrategy }>('/api/admin/pdf-strategy', { strategy: s }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'pdf-strategy'] }),
   });
   const setKey = useMutation({
     mutationFn: (apiKey: string) => api.post('/api/admin/llm-provider/anthropic-key', { apiKey }),
@@ -230,6 +264,38 @@ export function LlmProviderAdminPage() {
               </button>
             </div>
           </>
+        ) : (
+          <p className="mt-2 text-sm text-ink-muted">Loading…</p>
+        )}
+      </section>
+
+      <section className="rounded-lg border border-surface-muted bg-white p-4">
+        <h2 className="text-base font-medium">PDF processing strategy (firm default)</h2>
+        <p className="mt-1 text-xs text-ink-muted">
+          Controls how each PDF is turned into markdown before the LLM sees it. Operators can
+          override per upload from the upload picker.
+        </p>
+        {pdfStrategy.data ? (
+          <fieldset className="mt-3 space-y-2 text-sm">
+            {(Object.keys(PDF_STRATEGY_LABELS) as PdfProcessingStrategy[]).map((s) => (
+              <label key={s} className="flex items-start gap-2">
+                <input
+                  type="radio"
+                  name="pdf-strategy"
+                  checked={pdfStrategy.data!.strategy === s}
+                  disabled={switchPdfStrategy.isPending}
+                  onChange={() => switchPdfStrategy.mutate(s)}
+                  className="mt-1"
+                />
+                <div className="flex flex-col">
+                  <span className="font-medium">{PDF_STRATEGY_LABELS[s].title}</span>
+                  <span className="text-xs text-ink-muted">
+                    {PDF_STRATEGY_LABELS[s].description}
+                  </span>
+                </div>
+              </label>
+            ))}
+          </fieldset>
         ) : (
           <p className="mt-2 text-sm text-ink-muted">Loading…</p>
         )}

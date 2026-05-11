@@ -10,6 +10,7 @@ import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from '.
 import { logger } from '../lib/logger.js';
 import { findByHash, ingestUpload, streamSourcePdf } from '../services/statements.js';
 import { writeAudit } from '../services/audit.js';
+import { isPdfProcessingStrategy, type PdfProcessingStrategy } from '../services/pdf-strategy.js';
 import { checkFreeSpace, isPdfMagicBytes, sha256Of, storePdf } from '../services/upload-storage.js';
 import { eq } from 'drizzle-orm';
 import { accounts, statements } from '../db/schema.js';
@@ -83,10 +84,41 @@ export const uploadsByAccountRouter = (): Router => {
         throw new ValidationError(`batch exceeds ${maxBatch()} files`);
       }
 
+      // Per-file PDF processing strategy override. Form field is a JSON
+      // array aligned by index with the `files` field; entries may be
+      // null/missing to fall back to the firm default at extraction
+      // time. Reject any malformed strategy value up front so the
+      // operator sees the validation failure synchronously rather than
+      // discovering it via a stuck statement later.
+      const strategies: Array<PdfProcessingStrategy | null> = (() => {
+        const raw = req.body?.processingStrategies;
+        if (raw === undefined || raw === null || raw === '') return [];
+        let parsed: unknown;
+        try {
+          parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+        } catch {
+          throw new ValidationError('processingStrategies must be JSON');
+        }
+        if (!Array.isArray(parsed)) {
+          throw new ValidationError('processingStrategies must be an array');
+        }
+        return parsed.map((v, i) => {
+          if (v === null || v === undefined || v === '') return null;
+          if (!isPdfProcessingStrategy(v)) {
+            throw new ValidationError(
+              `processingStrategies[${i}] is not a valid strategy: ${String(v)}`,
+            );
+          }
+          return v;
+        });
+      })();
+
       const ingested: IngestedFile[] = [];
       const errors: IngestError[] = [];
 
-      for (const f of files) {
+      for (let fi = 0; fi < files.length; fi += 1) {
+        const f = files[fi]!;
+        const processingStrategyOverride = strategies[fi] ?? null;
         try {
           if (!isPdfMagicBytes(f.buffer)) {
             errors.push({ filename: f.originalname, error: 'not a PDF' });
@@ -138,6 +170,7 @@ export const uploadsByAccountRouter = (): Router => {
             filename: f.originalname,
             bytes: stored.bytes,
             pages,
+            processingStrategyOverride,
           });
 
           ingested.push({
