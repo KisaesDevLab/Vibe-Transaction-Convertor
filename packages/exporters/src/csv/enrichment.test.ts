@@ -10,7 +10,9 @@ describe('renderCsv generic — Phase 33 enrichment columns', () => {
     const out = renderCsv('generic', [
       { postedDate: '2026-03-08', description: 'PAYROLL', amountCents: 320_000n },
     ]);
-    expect(out.split('\r\n')[0]).toBe(
+    // Strip the leading UTF-8 BOM before splitting on the CSV record separator.
+    expect(out.startsWith('﻿')).toBe(true);
+    expect(out.slice(1).split('\r\n')[0]).toBe(
       'Date,Description,Amount,RunningBalance,CheckNumber,TRNTYPE,FITID,CleansedDescription,Category',
     );
   });
@@ -37,6 +39,21 @@ describe('renderCsv generic — Phase 33 enrichment columns', () => {
     );
     // Note the trailing two empty cells for the null row.
     expect(out).toContain('03/09/2026,OPAQUE LINE,1.00,,,,,,');
+  });
+
+  it('starts with a UTF-8 BOM so Excel renders em-dashes/accents correctly', () => {
+    const out = renderCsv('generic', [
+      {
+        postedDate: '2026-03-08',
+        description: 'POS DBT 0123 SQ *AMTHAUS',
+        amountCents: -42_50n,
+        cleansedDescription: 'Square — Amthaus',
+      },
+    ]);
+    // BOM at byte offset 0; the em dash flows through to the output as
+    // a real U+2014, not a Windows-1252 mojibake substitute.
+    expect(out.codePointAt(0)).toBe(0xfeff);
+    expect(out).toContain('Square — Amthaus');
   });
 
   it('quotes commas in cleansed and category cells', () => {

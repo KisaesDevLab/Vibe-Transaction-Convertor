@@ -91,22 +91,30 @@ const stripDtServer = (s: string): string =>
 // CRLF preserved as `\r\n` in the JS string literals so the file is safe
 // to edit in any editor (LF on disk, CRLF in the buffer).
 
+// U+FEFF UTF-8 BOM prepended to every CSV so Excel on Windows decodes
+// non-ASCII (em dashes, accented merchants) as UTF-8 instead of cp1252.
+const BOM = '﻿';
+
 const EXPECTED_CSV_QBO3 =
+  BOM +
   'Date,Description,Amount\r\n' +
   '03/08/2026,PAYROLL,3200.00\r\n' +
   '03/12/2026,GROCERY,-74.21\r\n';
 
 const EXPECTED_CSV_QBO4 =
+  BOM +
   'Date,Description,Credit,Debit\r\n' +
   '03/08/2026,PAYROLL,3200.00,\r\n' +
   '03/12/2026,GROCERY,,74.21\r\n';
 
 const EXPECTED_CSV_XERO =
+  BOM +
   '*Date,*Amount,Payee,Description,Reference\r\n' +
   '03/08/2026,3200.00,PAYROLL,PAYROLL,\r\n' +
   '03/12/2026,-74.21,GROCERY,GROCERY,\r\n';
 
 const EXPECTED_CSV_GENERIC =
+  BOM +
   'Date,Description,Amount,RunningBalance,CheckNumber,TRNTYPE,FITID,CleansedDescription,Category\r\n' +
   '03/08/2026,PAYROLL,3200.00,4125.79,,DIRECTDEP,VTC-abc1234567890def,,\r\n' +
   '03/12/2026,GROCERY,-74.21,4051.58,,POS,VTC-zzz1234567890def,,\r\n';

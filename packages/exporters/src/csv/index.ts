@@ -125,6 +125,14 @@ export interface RenderCsvOptions {
   headerComment?: string;
 }
 
+// UTF-8 BOM (U+FEFF, bytes EF BB BF). Excel on Windows ignores HTTP
+// `charset=utf-8` once the file is on disk and falls back to the
+// system codepage (Windows-1252), which mojibakes any non-ASCII byte
+// (em dashes, accented merchants). A leading BOM forces Excel — and
+// every other modern spreadsheet importer (Google Sheets, Numbers,
+// Xero, QuickBooks Online CSV import) — into UTF-8 mode.
+const UTF8_BOM = '﻿';
+
 export const renderCsv = (
   template: CsvTemplate,
   rows: CsvRow[],
@@ -142,8 +150,7 @@ export const renderCsv = (
         return renderGeneric(rows);
     }
   })();
-  if (opts.headerComment && template === 'generic') {
-    return `# ${opts.headerComment}\r\n${body}`;
-  }
-  return body;
+  const withHeader =
+    opts.headerComment && template === 'generic' ? `# ${opts.headerComment}\r\n${body}` : body;
+  return UTF8_BOM + withHeader;
 };

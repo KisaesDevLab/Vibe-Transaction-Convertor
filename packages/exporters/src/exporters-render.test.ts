@@ -225,7 +225,9 @@ describe('CSV exporters', () => {
 
   it('xero matches its 5-column header', () => {
     const out = renderCsv('xero', rows);
-    expect(out.startsWith('*Date,*Amount,Payee,Description,Reference\r\n')).toBe(true);
+    // Strip the leading UTF-8 BOM before the header-string match.
+    expect(out.startsWith('﻿')).toBe(true);
+    expect(out.slice(1).startsWith('*Date,*Amount,Payee,Description,Reference\r\n')).toBe(true);
     // No "Cheque Number" column anymore.
     expect(out).not.toContain('Cheque Number');
   });
