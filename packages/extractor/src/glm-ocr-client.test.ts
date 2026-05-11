@@ -83,4 +83,16 @@ describe('ocrPdfPages', () => {
       ocrPdfPages([Buffer.from('p')], { baseUrl: 'http://x', fetcher, maxAttempts: 2 }),
     ).rejects.toThrow(/HTTP 500/);
   });
+
+  it('fails fast on 4xx without retrying — wrong URL or bad payload is not transient', async () => {
+    let attempts = 0;
+    const fetcher = buildFetcher(async () => {
+      attempts += 1;
+      return failResponse(404);
+    });
+    await expect(
+      ocrPdfPages([Buffer.from('p')], { baseUrl: 'http://x', fetcher, maxAttempts: 5 }),
+    ).rejects.toThrow(/GLM-OCR POST http:\/\/x\/ocr → HTTP 404/);
+    expect(attempts).toBe(1);
+  });
 });

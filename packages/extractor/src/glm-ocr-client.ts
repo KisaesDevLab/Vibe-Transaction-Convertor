@@ -48,10 +48,12 @@ export interface GlmOcrClientOptions {
 
 export class GlmOcrError extends Error {
   readonly status: number | undefined;
-  constructor(message: string, status?: number) {
+  readonly url: string | undefined;
+  constructor(message: string, status?: number, url?: string) {
     super(message);
     this.name = 'GlmOcrError';
     this.status = status;
+    this.url = url;
   }
 }
 
@@ -162,26 +164,25 @@ const ocrPage = async (
     );
   }
 
+  const url = `${cfg.baseUrl}/ocr`;
   let lastErr: unknown;
   for (let attempt = 1; attempt <= cfg.maxAttempts; attempt += 1) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), cfg.timeoutMs);
     try {
-      const res = await cfg.fetcher(`${cfg.baseUrl}/ocr`, {
+      const res = await cfg.fetcher(url, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ pages: [{ image_base64: image.toString('base64') }] }),
         signal: controller.signal,
       });
       if (!res.ok) {
-        if (res.status >= 500 && attempt < cfg.maxAttempts) {
-          throw new GlmOcrError(`HTTP ${res.status}`, res.status);
-        }
-        throw new GlmOcrError(`HTTP ${res.status}`, res.status);
+        throw new GlmOcrError(`GLM-OCR POST ${url} → HTTP ${res.status}`, res.status, url);
       }
       const body = (await res.json()) as { pages?: OcrPageResult[] };
       const page = body.pages?.[0];
-      if (!page) throw new GlmOcrError('OCR response missing page');
+      if (!page)
+        throw new GlmOcrError(`GLM-OCR POST ${url} → response missing page`, undefined, url);
       const normalized: OcrPageResult = {
         index: pageIndex,
         markdown: page.markdown,
@@ -192,6 +193,15 @@ const ocrPage = async (
       return { result: normalized, cached: false };
     } catch (err) {
       lastErr = err;
+      // 4xx is a config/contract bug (wrong URL, bad auth, malformed
+      // payload) — retrying doesn't change the outcome and wastes a
+      // visible amount of wall time on a multi-page statement. Only
+      // retry on 5xx, timeouts (AbortError), and network failures.
+      if (err instanceof GlmOcrError && err.status !== undefined && err.status < 500) {
+        clearTimeout(timer);
+        onFailure();
+        throw err;
+      }
       if (attempt < cfg.maxAttempts) {
         const backoffMs = 200 * 2 ** (attempt - 1);
         await sleep(backoffMs);
