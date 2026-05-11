@@ -18,7 +18,7 @@ import {
   useStatement,
 } from '../hooks/useStatementsList';
 import { useMe } from '../hooks/useAuth';
-import { ApiError } from '../lib/api';
+import { ApiError, downloadFile } from '../lib/api';
 
 const FORMATS: Array<{ value: string; label: string; description: string }> = [
   { value: 'csv-qbo3', label: 'CSV (QBO 3-col)', description: 'Date, Description, Amount' },
@@ -38,45 +38,10 @@ const FORMATS: Array<{ value: string; label: string; description: string }> = [
   { value: 'qfx', label: 'QFX', description: 'OFX 1.0.2 SGML for Quicken' },
 ];
 
-const csrfHeader = (): Record<string, string> => ({
-  'x-csrf-token':
-    document.cookie
-      .split('; ')
-      .find((c) => c.startsWith('vibetc_csrf='))
-      ?.split('=')[1] ?? '',
-});
-
 const formatBytes = (bytes: number): string => {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
-};
-
-const downloadFromUrl = async (
-  url: string,
-  method: 'GET' | 'POST',
-  fallbackName: string,
-): Promise<void> => {
-  const init: RequestInit = { method, credentials: 'include' };
-  if (method === 'POST') init.headers = csrfHeader();
-  const res = await fetch(url, init);
-  if (!res.ok) {
-    const body = (await res.json().catch(() => ({ message: `HTTP ${res.status}` }))) as {
-      message?: string;
-      code?: string;
-      details?: unknown;
-    };
-    throw new ApiError(res.status, body);
-  }
-  const blob = await res.blob();
-  const cd = res.headers.get('content-disposition') ?? '';
-  const filename = /filename="([^"]+)"/.exec(cd)?.[1] ?? fallbackName;
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
 };
 
 export function ExportPage() {
@@ -110,9 +75,9 @@ export function ExportPage() {
 
   const onDownloadOne = async (fmt: string): Promise<void> => {
     try {
-      await downloadFromUrl(
-        `/api/statements/${statementId}/exports/${fmt}${allowOverride ? '?override=true' : ''}`,
+      await downloadFile(
         'POST',
+        `/api/statements/${statementId}/exports/${fmt}${allowOverride ? '?override=true' : ''}`,
         `export.${fmt.startsWith('csv-') ? 'csv' : fmt}`,
       );
       toast.success(`Downloaded ${fmt}`);
@@ -136,9 +101,9 @@ export function ExportPage() {
     // for, but it's still the most efficient path — JSZip on the client
     // for a subset would require parallel rendering.
     try {
-      await downloadFromUrl(
-        `/api/statements/${statementId}/exports-bundle${allowOverride ? '?override=true' : ''}`,
+      await downloadFile(
         'POST',
+        `/api/statements/${statementId}/exports-bundle${allowOverride ? '?override=true' : ''}`,
         'exports-bundle.zip',
       );
       toast.success(`Downloaded all 7 formats as a zip`);
@@ -150,7 +115,7 @@ export function ExportPage() {
 
   const onDownloadJob = async (jobId: string): Promise<void> => {
     try {
-      await downloadFromUrl(`/api/exports/${jobId}/file`, 'GET', `export-${jobId.slice(0, 8)}`);
+      await downloadFile('GET', `/api/exports/${jobId}/file`, `export-${jobId.slice(0, 8)}`);
       toast.success('Downloaded prior export');
     } catch (err) {
       toast.error(err instanceof ApiError ? err.message : 'download failed');

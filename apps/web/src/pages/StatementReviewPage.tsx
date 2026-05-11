@@ -29,7 +29,7 @@ import { useAccount } from '../hooks/useStatements';
 import { useAccounts } from '../hooks/useAccounts';
 import { useCompany } from '../hooks/useCompanies';
 import { useMe } from '../hooks/useAuth';
-import { ApiError } from '../lib/api';
+import { ApiError, downloadFile } from '../lib/api';
 import { SplitStatementModal } from '../components/SplitStatementModal';
 
 const FORMATS: Array<{ value: string; label: string }> = [
@@ -42,47 +42,16 @@ const FORMATS: Array<{ value: string; label: string }> = [
   { value: 'qfx', label: 'QFX' },
 ];
 
-const csrfHeader = (): Record<string, string> => ({
-  'x-csrf-token':
-    document.cookie
-      .split('; ')
-      .find((c) => c.startsWith('vibetc_csrf='))
-      ?.split('=')[1] ?? '',
-});
-
-const downloadFromUrl = async (url: string, fallbackName: string): Promise<void> => {
-  const res = await fetch(url, {
-    method: 'POST',
-    credentials: 'include',
-    headers: csrfHeader(),
-  });
-  if (!res.ok) {
-    const body = (await res.json().catch(() => ({ message: `HTTP ${res.status}` }))) as {
-      message?: string;
-      code?: string;
-      details?: unknown;
-    };
-    throw new ApiError(res.status, body);
-  }
-  const blob = await res.blob();
-  const cd = res.headers.get('content-disposition') ?? '';
-  const filename = /filename="([^"]+)"/.exec(cd)?.[1] ?? fallbackName;
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-};
-
 const downloadExport = (statementId: string, format: string, override: boolean): Promise<void> =>
-  downloadFromUrl(
+  downloadFile(
+    'POST',
     `/api/statements/${statementId}/exports/${format}${override ? '?override=true' : ''}`,
     'export',
   );
 
 const downloadBundle = (statementId: string, override: boolean): Promise<void> =>
-  downloadFromUrl(
+  downloadFile(
+    'POST',
     `/api/statements/${statementId}/exports-bundle${override ? '?override=true' : ''}`,
     'export-bundle.zip',
   );

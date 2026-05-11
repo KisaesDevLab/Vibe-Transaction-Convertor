@@ -112,3 +112,41 @@ export const api = {
   put: <T = unknown>(path: string, body?: unknown) => fetchJson<T>('PUT', path, { body }),
   delete: <T = unknown>(path: string) => fetchJson<T>('DELETE', path),
 };
+
+// File download with the same prefix + CSRF + error-shape contract as
+// fetchJson. Must go through withBase() — without it the request
+// escapes the Vibe-Appliance path prefix (e.g. /vibe-tx-converter/)
+// and 404s against the shared ingress. Triggers a browser save via a
+// transient <a download>; throws ApiError on non-2xx so callers can
+// surface the server's message in a toast.
+export const downloadFile = async (
+  method: Method,
+  path: string,
+  fallbackFilename = 'download',
+): Promise<void> => {
+  const headers: Record<string, string> = {};
+  if (method !== 'GET') headers['x-csrf-token'] = await ensureCsrf();
+  const res = await fetch(withBase(path), { method, credentials: 'include', headers });
+  if (!res.ok) {
+    const contentType = res.headers.get('content-type') ?? '';
+    const body = contentType.includes('application/json')
+      ? ((await res.json().catch(() => ({ message: `HTTP ${res.status}` }))) as {
+          message?: string;
+          code?: string;
+          details?: unknown;
+        })
+      : { message: `HTTP ${res.status}` };
+    throw new ApiError(res.status, body);
+  }
+  const blob = await res.blob();
+  const cd = res.headers.get('content-disposition') ?? '';
+  const filename = /filename="([^"]+)"/.exec(cd)?.[1] ?? fallbackFilename;
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+};
