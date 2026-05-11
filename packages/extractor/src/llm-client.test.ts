@@ -101,12 +101,34 @@ describe('AnthropicProvider', () => {
     expect(provider.id).toBe('anthropic');
   });
 
-  it('throws when the response has no tool_use block', async () => {
+  it('wraps missing-tool_use as ExtractionResponseError so the audit log captures the raw body', async () => {
     const provider = new AnthropicProvider({
       apiKey: 'k',
-      fetcher: async () => okJsonResponse({ content: [{ type: 'text', text: 'sorry' }] }),
+      fetcher: async () =>
+        okJsonResponse({ content: [{ type: 'text', text: 'I cannot use the tool' }] }),
     });
-    await expect(provider.extract('md')).rejects.toThrow(/tool_use/);
+    await expect(provider.extract('md')).rejects.toMatchObject({
+      name: 'ExtractionResponseError',
+      summary: 'anthropic response missing tool_use block',
+      rawResponse: expect.stringContaining('I cannot use the tool'),
+    });
+  });
+});
+
+describe('LocalGatewayProvider empty-completion handling', () => {
+  it('surfaces an ExtractionResponseError when the gateway returns an empty content string', async () => {
+    const provider = new LocalGatewayProvider({
+      baseUrl: 'http://gw.test',
+      fetcher: async () =>
+        okJsonResponse({
+          choices: [{ message: { content: '' }, finish_reason: 'length' }],
+        }),
+    });
+    await expect(provider.extract('md')).rejects.toMatchObject({
+      name: 'ExtractionResponseError',
+      summary: 'local gateway returned an empty completion',
+      issues: 'finish_reason=length',
+    });
   });
 });
 

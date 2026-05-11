@@ -528,6 +528,16 @@ export const statementsRouter = (): Router => {
         parsed.push({ accountId, pageStart, pageEnd });
       }
 
+      // Remove any in-flight extraction for the parent up front so the
+      // worker bails at the next phase boundary instead of charging
+      // through and re-flipping the parent to `review` post-split. The
+      // worker's checkCancelled detects any `failed` status and bails.
+      try {
+        await removeExtractionJob(id);
+      } catch (err) {
+        logger.warn({ err, stmtId: id }, 'failed to remove parent extraction job during split');
+      }
+
       // Wipe parent's transactions so the parent row is purely an audit
       // marker; its FITIDs would all be wrong post-split anyway. The
       // delete-with-zero-rows case is a no-op (drizzle still requires
@@ -558,6 +568,11 @@ export const statementsRouter = (): Router => {
             sourcePdfPages: parent.sourcePdfPages,
             status: 'uploaded',
             pageRange: { start: split.pageStart, end: split.pageEnd },
+            // Inherit the parent's processing strategy. If the operator
+            // picked force-ocr at upload because they knew the scan was
+            // multi-account, the children need the same decision —
+            // otherwise they fall back to firm default and re-detect.
+            processingStrategyOverride: parent.processingStrategyOverride,
           })
           .returning({ id: statements.id });
         if (!child) throw new Error('insert returned no row');

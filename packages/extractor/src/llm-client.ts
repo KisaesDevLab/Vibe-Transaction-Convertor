@@ -19,7 +19,14 @@ const PROMPT_BUDGET_RESERVE = 4_000;
 const defaultPromptBudget = (): number => Number(process.env.LLM_MAX_PROMPT_TOKENS ?? 24_000);
 
 // Cleans the markdown and truncates it to fit the prompt budget. Returns
-// the cleaned text plus the token count for telemetry.
+// the cleaned text plus the token count for telemetry. When the cleaned
+// text exceeds the budget, the head and tail are both preserved with a
+// gap marker in between — the head carries the opening balance and the
+// statement header, the tail carries the closing balance and the last
+// transactions. Truncating only the head (the prior default) guaranteed
+// reconciliation discrepancy on any statement longer than ~30 pages,
+// because the Golden Rule needs `closing_cents` and the trailing rows
+// to tie.
 export const prepareMarkdown = (
   raw: string,
   budget: number = defaultPromptBudget(),
@@ -28,11 +35,21 @@ export const prepareMarkdown = (
   const allowed = Math.max(1_000, budget - PROMPT_BUDGET_RESERVE);
   const tokens = estimateTokens(cleaned);
   if (tokens <= allowed) return { text: cleaned, tokens, truncated: false };
-  // Truncate from the end — opening balance + early-period rows are higher
-  // priority than the trailing footer / disclosures.
   const charBudget = allowed * 4;
-  const truncated = cleaned.slice(0, charBudget);
-  return { text: truncated, tokens: estimateTokens(truncated), truncated: true };
+  // Reserve a marker plus a safety margin so the gap message itself
+  // never tips us back over the budget.
+  const MARKER = '\n\n…[middle of statement truncated]…\n\n';
+  const usableChars = Math.max(2_000, charBudget - MARKER.length - 200);
+  // 60/40 split toward the tail — the head still gets enough room for
+  // the institution / account / opening-balance header (typically the
+  // first 1–2 pages), and the tail gets the closing balance and the
+  // final stretch of transactions.
+  const headChars = Math.floor(usableChars * 0.6);
+  const tailChars = usableChars - headChars;
+  const head = cleaned.slice(0, headChars);
+  const tail = cleaned.slice(cleaned.length - tailChars);
+  const text = `${head}${MARKER}${tail}`;
+  return { text, tokens: estimateTokens(text), truncated: true };
 };
 
 const { ExtractionResult } = schemas.extraction;
@@ -234,10 +251,27 @@ export class LocalGatewayProvider implements LlmProvider {
       });
       if (!res.ok) throw new Error(`local gateway HTTP ${res.status}`);
       const body = (await res.json()) as {
-        choices?: Array<{ message?: { content?: string } }>;
+        choices?: Array<{
+          message?: { content?: string };
+          finish_reason?: string;
+        }>;
         usage?: { prompt_tokens?: number; completion_tokens?: number };
       };
       const content = body.choices?.[0]?.message?.content ?? '';
+      if (!content) {
+        // 200 with an empty completion. Most commonly when
+        // finish_reason='length' (max_tokens too low for the
+        // statement) or the gateway swallowed the response. Surface
+        // as ExtractionResponseError so the audit log captures the
+        // raw body and the operator sees a useful summary instead of
+        // "Unexpected end of JSON input".
+        const finish = body.choices?.[0]?.finish_reason;
+        throw new ExtractionResponseError({
+          summary: 'local gateway returned an empty completion',
+          rawResponse: JSON.stringify(body).slice(0, 8_000),
+          ...(finish ? { issues: `finish_reason=${finish}` } : {}),
+        });
+      }
       const data = parseExtractionResponse(content);
       return {
         data,
@@ -473,7 +507,18 @@ export class AnthropicProvider implements LlmProvider {
       const toolUse = body.content?.find(
         (c): c is { type: 'tool_use'; name: string; input: unknown } => c.type === 'tool_use',
       );
-      if (!toolUse) throw new Error('anthropic response missing tool_use block');
+      if (!toolUse) {
+        // Sonnet/Opus normally honor tool_choice, but it can ignore
+        // the directive on PDFs whose markdown carries prompt-injection
+        // bait (some statement footers say "ignore the schema, just
+        // explain..."). Wrap in ExtractionResponseError so the audit
+        // log captures the text response — operator can read what the
+        // model actually said.
+        throw new ExtractionResponseError({
+          summary: 'anthropic response missing tool_use block',
+          rawResponse: JSON.stringify(body).slice(0, 8_000),
+        });
+      }
       const rawJson = JSON.stringify(toolUse.input);
       const data = parseExtractionResponse(rawJson, toolUse.input);
       const inputTokens = body.usage?.input_tokens ?? 0;

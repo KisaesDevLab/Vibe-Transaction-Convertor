@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { mkdir, readdir, readFile, rm } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 
 const execFileP = promisify(execFile);
@@ -195,12 +195,20 @@ export const rasterizePdf = async (
   opts: RasterizeOptions = {},
 ): Promise<RasterizedPage[]> => {
   const dpi = opts.dpi ?? 300;
-  const outDir = opts.outDir ?? join(dirname(path), 'pages');
+  // Per-PDF outDir keyed on the source file's basename (which the
+  // upload-storage layer derives from the content sha256, so it's
+  // collision-free across statements). Previous behavior used
+  // `dirname(path)/pages` for EVERY PDF in the same yyyy/mm bucket,
+  // so two consecutive rasterizations stomped on each other's PNGs
+  // and the trailing readdir picked up stale pages from earlier
+  // statements — silently OCR'ing pages from a different PDF.
+  const pdfBase = basename(path, '.pdf');
+  const outDir = opts.outDir ?? join(dirname(path), 'pages', pdfBase);
+  // Wipe any leftovers from an aborted prior run on the same content
+  // hash before glob-matching the fresh output.
+  await rm(outDir, { recursive: true, force: true });
   await mkdir(outDir, { recursive: true });
   const prefix = join(outDir, 'page');
-  // -png: emit PNG; -r: dpi; pdftoppm pads page numbers to enough digits
-  // to fit the highest page number, but always at least 4 by default
-  // (see -aaVector / -aa flags too — defaults are fine for OCR).
   try {
     await execFileP('pdftoppm', ['-png', '-r', String(dpi), path, prefix], {
       maxBuffer: 64 * 1024 * 1024,
@@ -217,10 +225,6 @@ export const rasterizePdf = async (
   }
   const entries = await readdir(outDir);
   const pageFiles = entries.filter((f) => f.startsWith('page-') && f.endsWith('.png')).sort();
-  // Geometry is reported by pdfjs analyze() in callers; we deliberately
-  // don't re-open the PDF here. Width/height are filled in as 0 — the
-  // GLM-OCR client only needs the path. If a caller needs dimensions,
-  // it can stat the PNG (out of scope for v1).
   return pageFiles.map((file, i) => ({
     index: i,
     pngPath: join(outDir, file),

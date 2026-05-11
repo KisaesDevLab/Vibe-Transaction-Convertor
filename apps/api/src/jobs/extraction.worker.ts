@@ -1,5 +1,5 @@
 import { Worker } from 'bullmq';
-import { eq, sql } from 'drizzle-orm';
+import { and, eq, inArray, sql } from 'drizzle-orm';
 import { readFile } from 'node:fs/promises';
 
 import {
@@ -58,29 +58,30 @@ class CancelledError extends Error {
   }
 }
 
-// Cooperative cancellation. Two trigger conditions, both treated as
+// Cooperative cancellation. Any of the following is treated as
 // "the operator pulled the plug, stop touching this statement":
-//   1. /cancel flipped status='failed' with errorMessage 'cancelled
-//      by operator' (Phase 15 #17).
+//   1. /cancel set status='failed' with errorMessage 'cancelled by
+//      operator' (Phase 15 #17).
 //   2. /statements/:id DELETE removed the row entirely while we were
 //      mid-extraction — the row lookup returns empty and a downstream
 //      transactions INSERT would FK-violate.
-// In either case we bail at the next phase boundary so the worker
-// doesn't charge through a doomed extraction.
+//   3. /split superseded this row with N child statements (parent's
+//      `pageRange` stays null but status flips to `failed` with a
+//      different errorMessage). Same intent — don't keep extracting
+//      a row whose transactions are about to be replaced by children.
+// In short: a `failed` row never has more work to do. We bail at the
+// next phase boundary so the worker doesn't charge through a doomed
+// extraction.
 const checkCancelled = async (statementId: string): Promise<void> => {
   const rows = await db
-    .select({ status: statements.status, errorMessage: statements.errorMessage })
+    .select({ status: statements.status })
     .from(statements)
     .where(eq(statements.id, statementId));
   const row = rows[0];
   if (!row) {
     throw new CancelledError();
   }
-  if (
-    row.status === 'failed' &&
-    typeof row.errorMessage === 'string' &&
-    row.errorMessage.startsWith('cancelled')
-  ) {
+  if (row.status === 'failed') {
     throw new CancelledError();
   }
 };
@@ -749,54 +750,72 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
     })),
   );
 
-  // Bulk insert transactions (idempotent on (statement_id, fitid)).
-  // Iterate effectiveTxs (post-repair) so insertions reflect the
-  // reconciled, repaired state — never the pre-repair LLM output.
-  for (let i = 0; i < effectiveTxs.length; i += 1) {
-    const tx = effectiveTxs[i]!;
-    const seq = seqAssigned[i]!.seqInDay;
-    const fitid = computeFitid({
-      postedDate: tx.postedDate,
-      amountCents: tx.amountCents,
-      description: tx.description,
-      seqInDay: seq,
-    });
-    const trntype = inferTrntype({
-      description: tx.description,
-      amountCents: tx.amountCents,
-      isCreditCard,
-      ...(tx.checkNumber ? { checkNumber: tx.checkNumber } : {}),
-      ...(tx.trntypeHint ? { llmHint: tx.trntypeHint } : {}),
-    });
-    await db
-      .insert(transactions)
-      .values({
-        statementId: stmtId,
-        seqInDay: seq,
-        postedDate: tx.postedDate,
-        description: tx.description,
-        normalizedDescription: normalizeDescription(tx.description),
-        amountCents: tx.amountCents,
-        runningBalanceCents: tx.runningBalanceCents,
-        checkNumber: tx.checkNumber,
-        trntype,
-        fitid,
-        sourcePage: tx.sourcePage,
-        sourceBboxJson: null,
-        confidence: tx.confidence,
-      })
-      .onConflictDoNothing();
-  }
+  // Atomic finalize. checkCancelled fires immediately before so the
+  // race window between status-check and DB-commit is minimized, then
+  // the transaction inserts and final UPDATE happen in a single DB
+  // transaction guarded by `WHERE status IN ('reconciling',
+  // 'extracting')`. If /cancel, /split, DELETE, or another operator
+  // action has flipped the status off those values (or removed the
+  // row), the UPDATE matches 0 rows and we abort — the transaction
+  // rolls back, undoing any inserts so the row's verdict from /cancel
+  // (or its absence after DELETE) stands.
+  await checkCancelled(stmtId);
 
-  await db
-    .update(statements)
-    .set({
-      reconciliationStatus: reconciled.status === 'verified' ? 'verified' : 'discrepancy',
-      periodBoundsViolations: reconciled.periodBoundsViolations,
-      status: 'review',
-      updatedAt: sql`now()`,
-    })
-    .where(eq(statements.id, stmtId));
+  await db.transaction(async (tx) => {
+    for (let i = 0; i < effectiveTxs.length; i += 1) {
+      const txn = effectiveTxs[i]!;
+      const seq = seqAssigned[i]!.seqInDay;
+      const fitid = computeFitid({
+        postedDate: txn.postedDate,
+        amountCents: txn.amountCents,
+        description: txn.description,
+        seqInDay: seq,
+      });
+      const trntype = inferTrntype({
+        description: txn.description,
+        amountCents: txn.amountCents,
+        isCreditCard,
+        ...(txn.checkNumber ? { checkNumber: txn.checkNumber } : {}),
+        ...(txn.trntypeHint ? { llmHint: txn.trntypeHint } : {}),
+      });
+      await tx
+        .insert(transactions)
+        .values({
+          statementId: stmtId,
+          seqInDay: seq,
+          postedDate: txn.postedDate,
+          description: txn.description,
+          normalizedDescription: normalizeDescription(txn.description),
+          amountCents: txn.amountCents,
+          runningBalanceCents: txn.runningBalanceCents,
+          checkNumber: txn.checkNumber,
+          trntype,
+          fitid,
+          sourcePage: txn.sourcePage,
+          sourceBboxJson: null,
+          confidence: txn.confidence,
+        })
+        .onConflictDoNothing();
+    }
+
+    const updated = await tx
+      .update(statements)
+      .set({
+        reconciliationStatus: reconciled.status === 'verified' ? 'verified' : 'discrepancy',
+        periodBoundsViolations: reconciled.periodBoundsViolations,
+        status: 'review',
+        updatedAt: sql`now()`,
+      })
+      .where(
+        and(eq(statements.id, stmtId), inArray(statements.status, ['reconciling', 'extracting'])),
+      )
+      .returning({ id: statements.id });
+    if (updated.length === 0) {
+      // /cancel, /split, or DELETE landed first. Roll back so the
+      // transactions we just inserted don't outlive their statement.
+      throw new CancelledError();
+    }
+  });
 
   await writeAudit(db, {
     entityType: 'statement',
