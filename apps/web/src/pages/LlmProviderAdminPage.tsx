@@ -10,14 +10,43 @@ import { Link } from 'react-router-dom';
 import { useToast } from '../components/Toast';
 import { api, ApiError } from '../lib/api';
 
+type LlmProviderPolicy = 'local-only' | 'anthropic-only' | 'local-first' | 'anthropic-first';
+
 interface ProviderStatus {
+  // `provider` is the currently-active primary, derived from the
+  // policy. `policy` is what's actually persisted; older API clients
+  // pre-policy still read `provider` only.
   provider: 'local' | 'anthropic';
+  policy: LlmProviderPolicy;
   anthropicModel: string | null;
   anthropicKeyConfigured: boolean;
   anthropicKeyLastFour: string | null;
   allowedModels: string[];
   monthlyCapUsd: number | null;
 }
+
+const POLICY_LABELS: Record<LlmProviderPolicy, { title: string; description: string }> = {
+  'local-only': {
+    title: 'Local only',
+    description:
+      'Always use the local Vibe Gateway (Qwen). No outbound API call. Statement fails if the local extraction fails.',
+  },
+  'anthropic-only': {
+    title: 'Anthropic only',
+    description:
+      'Always send OCR-extracted markdown to Anthropic. Statement fails if Anthropic fails.',
+  },
+  'local-first': {
+    title: 'Local first, fall back to Anthropic',
+    description:
+      'Try the local gateway; if extraction fails (HTTP error, malformed response, empty transactions, or reconciliation discrepancy), retry once on Anthropic.',
+  },
+  'anthropic-first': {
+    title: 'Anthropic first, fall back to local',
+    description:
+      'Try Anthropic; if extraction fails any of the four triggers, retry once on the local gateway.',
+  },
+};
 
 interface TestResult {
   provider: 'local' | 'anthropic';
@@ -50,8 +79,8 @@ export function LlmProviderAdminPage() {
     queryFn: () => api.get<CostSummary>('/api/admin/llm-provider/cost-summary'),
   });
 
-  const switchProvider = useMutation({
-    mutationFn: (p: 'local' | 'anthropic') => api.post('/api/admin/llm-provider', { provider: p }),
+  const switchPolicy = useMutation({
+    mutationFn: (p: LlmProviderPolicy) => api.post('/api/admin/llm-provider', { policy: p }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'llm-provider'] }),
   });
   const setKey = useMutation({
@@ -150,47 +179,54 @@ export function LlmProviderAdminPage() {
       </header>
 
       <section className="rounded-lg border border-surface-muted bg-white p-4">
-        <h2 className="text-base font-medium">Routing</h2>
+        <h2 className="text-base font-medium">Routing policy</h2>
         {provider.data ? (
           <>
             <p className="mt-2 text-sm">
-              Currently routing extractions to{' '}
-              <strong className="font-mono">{provider.data.provider}</strong>.{' '}
+              Current policy: <strong className="font-mono">{provider.data.policy}</strong>. Primary
+              provider: <strong className="font-mono">{provider.data.provider}</strong>
               {provider.data.provider === 'anthropic' && provider.data.anthropicModel
-                ? `Model: ${provider.data.anthropicModel}.`
+                ? ` (${provider.data.anthropicModel})`
                 : ''}
+              .
             </p>
-            <div className="mt-3 flex flex-wrap gap-2">
-              <button
-                type="button"
-                disabled={provider.data.provider === 'local'}
-                onClick={() => switchProvider.mutate('local')}
-                className="rounded-md border border-surface-muted px-3 py-1.5 text-sm disabled:opacity-50"
-              >
-                Use local Vibe Gateway
-              </button>
-              <button
-                type="button"
-                disabled={
-                  provider.data.provider === 'anthropic' || !provider.data.anthropicKeyConfigured
-                }
-                onClick={() => switchProvider.mutate('anthropic')}
-                className="rounded-md border border-surface-muted px-3 py-1.5 text-sm disabled:opacity-50"
-                title={
-                  !provider.data.anthropicKeyConfigured
-                    ? 'Set an Anthropic API key first'
-                    : 'Switch routing to Anthropic'
-                }
-              >
-                Use Anthropic
-              </button>
+            <fieldset className="mt-3 space-y-2 text-sm">
+              {(Object.keys(POLICY_LABELS) as LlmProviderPolicy[]).map((p) => {
+                const usesAnthropic = p !== 'local-only';
+                const disabled =
+                  switchPolicy.isPending ||
+                  (usesAnthropic && !provider.data!.anthropicKeyConfigured);
+                return (
+                  <label key={p} className="flex items-start gap-2">
+                    <input
+                      type="radio"
+                      name="policy"
+                      checked={provider.data!.policy === p}
+                      disabled={disabled}
+                      onChange={() => switchPolicy.mutate(p)}
+                      className="mt-1"
+                    />
+                    <div className="flex flex-col">
+                      <span className="font-medium">{POLICY_LABELS[p].title}</span>
+                      <span className="text-xs text-ink-muted">{POLICY_LABELS[p].description}</span>
+                      {disabled && usesAnthropic && !provider.data!.anthropicKeyConfigured ? (
+                        <span className="mt-0.5 text-xs text-amber-700">
+                          Set an Anthropic API key below to enable this policy.
+                        </span>
+                      ) : null}
+                    </div>
+                  </label>
+                );
+              })}
+            </fieldset>
+            <div className="mt-3">
               <button
                 type="button"
                 onClick={() => void onTest()}
                 disabled={test.isPending}
                 className="rounded-md border border-accent px-3 py-1.5 text-sm text-accent hover:bg-accent/5"
               >
-                {test.isPending ? 'Testing…' : 'Test connection'}
+                {test.isPending ? 'Testing…' : 'Test primary connection'}
               </button>
             </div>
           </>

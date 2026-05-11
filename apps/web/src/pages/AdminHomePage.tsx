@@ -5,8 +5,11 @@ import { Link } from 'react-router-dom';
 import { UpdateAvailableBanner } from '../components/UpdateAvailableBanner';
 import { api, ApiError } from '../lib/api';
 
+type LlmProviderPolicy = 'local-only' | 'anthropic-only' | 'local-first' | 'anthropic-first';
+
 interface ProviderStatus {
   provider: 'local' | 'anthropic';
+  policy: LlmProviderPolicy;
   anthropicModel: string | null;
   anthropicKeyConfigured: boolean;
 }
@@ -76,8 +79,8 @@ export function AdminHomePage() {
     .filter((s) => s.status === 'failed')
     .sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1))
     .slice(0, 5);
-  const switchProvider = useMutation({
-    mutationFn: (p: 'local' | 'anthropic') => api.post('/api/admin/llm-provider', { provider: p }),
+  const switchPolicy = useMutation({
+    mutationFn: (p: LlmProviderPolicy) => api.post('/api/admin/llm-provider', { policy: p }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'llm-provider'] }),
   });
   const setKey = useMutation({
@@ -150,30 +153,37 @@ export function AdminHomePage() {
         {provider.data ? (
           <>
             <p className="mt-1 text-sm">
-              Current: <strong>{provider.data.provider}</strong>
+              Policy: <strong className="font-mono">{provider.data.policy}</strong> · primary{' '}
+              <strong>{provider.data.provider}</strong>
               {provider.data.provider === 'anthropic'
-                ? ` · model ${provider.data.anthropicModel ?? 'claude-sonnet-4-6'}`
-                : ' · Qwen3-8B via Vibe LLM Gateway'}
+                ? ` (${provider.data.anthropicModel ?? 'claude-sonnet-4-6'})`
+                : ' (Qwen3-8B via Vibe LLM Gateway)'}
             </p>
-            <div className="mt-3 flex gap-2">
+            <div className="mt-3 flex flex-wrap gap-2">
               <button
                 type="button"
-                disabled={provider.data.provider === 'local'}
-                onClick={() => switchProvider.mutate('local')}
+                disabled={provider.data.policy === 'local-only'}
+                onClick={() => switchPolicy.mutate('local-only')}
                 className="rounded-md border border-surface-muted px-3 py-1.5 text-sm disabled:opacity-50"
               >
-                Use local
+                Local only
               </button>
               <button
                 type="button"
                 disabled={
-                  provider.data.provider === 'anthropic' || !provider.data.anthropicKeyConfigured
+                  provider.data.policy === 'anthropic-only' || !provider.data.anthropicKeyConfigured
                 }
-                onClick={() => switchProvider.mutate('anthropic')}
+                onClick={() => switchPolicy.mutate('anthropic-only')}
                 className="rounded-md border border-surface-muted px-3 py-1.5 text-sm disabled:opacity-50"
               >
-                Use Anthropic
+                Anthropic only
               </button>
+              <Link
+                to="/admin/llm-provider"
+                className="rounded-md border border-accent px-3 py-1.5 text-sm text-accent hover:bg-accent/5"
+              >
+                Routing & fallback →
+              </Link>
             </div>
 
             <form onSubmit={onSetKey} className="mt-4 border-t border-surface-muted pt-4">

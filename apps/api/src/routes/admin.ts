@@ -19,7 +19,13 @@ import {
   setEngineConfig,
   type EngineKey,
 } from '../services/engines.js';
-import { buildProvider, invalidateProviderCache } from '../services/llm-provider.js';
+import {
+  buildProvider,
+  invalidateProviderCache,
+  providerOrderFor,
+  resolveProviderPolicy,
+  type LlmProviderPolicy,
+} from '../services/llm-provider.js';
 import {
   enrichmentPromptStatus,
   enrichmentToggleStatus,
@@ -59,10 +65,6 @@ export const adminRouter = (): Router => {
 
   router.get('/llm-provider', async (_req, res, next) => {
     try {
-      const provRows = await db
-        .select()
-        .from(systemSettings)
-        .where(eq(systemSettings.key, PROVIDER_KEY));
       const modelRows = await db
         .select()
         .from(systemSettings)
@@ -89,8 +91,13 @@ export const adminRouter = (): Router => {
           // wrapped value is corrupt — surface as no-key.
         }
       }
+      const policy = await resolveProviderPolicy(db);
+      const { primary } = providerOrderFor(policy);
       res.json({
-        provider: provRows[0]?.valuePlaintext ?? 'local',
+        // Primary provider — what runs first when extraction starts.
+        // Pre-policy clients read this field; new clients read `policy`.
+        provider: primary,
+        policy,
         anthropicModel: modelRows[0]?.valuePlaintext ?? null,
         anthropicKeyConfigured: lastFour !== null,
         anthropicKeyLastFour: lastFour,
@@ -106,16 +113,31 @@ export const adminRouter = (): Router => {
 
   router.post('/llm-provider', async (req, res, next) => {
     try {
-      const provider = req.body?.provider;
-      if (provider !== 'local' && provider !== 'anthropic') {
-        throw new ValidationError('provider must be "local" or "anthropic"');
-      }
+      // Accept either `policy` (4-mode) or legacy `provider` (2-mode).
+      // Legacy values map to their *-only counterparts so old clients
+      // can keep posting `{provider: "local"}` indefinitely.
+      const POLICIES: LlmProviderPolicy[] = [
+        'local-only',
+        'anthropic-only',
+        'local-first',
+        'anthropic-first',
+      ];
+      const raw = req.body?.policy ?? req.body?.provider;
+      let policy: LlmProviderPolicy;
+      if (raw === 'local') policy = 'local-only';
+      else if (raw === 'anthropic') policy = 'anthropic-only';
+      else if (typeof raw === 'string' && POLICIES.includes(raw as LlmProviderPolicy))
+        policy = raw as LlmProviderPolicy;
+      else
+        throw new ValidationError(
+          `policy must be one of ${POLICIES.join(', ')} (or legacy "local"/"anthropic")`,
+        );
       await db
         .insert(systemSettings)
-        .values({ key: PROVIDER_KEY, valuePlaintext: provider, isSecret: false })
+        .values({ key: PROVIDER_KEY, valuePlaintext: policy, isSecret: false })
         .onConflictDoUpdate({
           target: systemSettings.key,
-          set: { valuePlaintext: provider, updatedAt: sql`now()`, updatedByUserId: req.user!.id },
+          set: { valuePlaintext: policy, updatedAt: sql`now()`, updatedByUserId: req.user!.id },
         });
       invalidateProviderCache();
       await writeAudit(db, {
@@ -123,9 +145,10 @@ export const adminRouter = (): Router => {
         entityType: 'system_settings',
         entityId: PROVIDER_KEY,
         action: 'llm-provider.change',
-        payload: { provider },
+        payload: { policy },
       });
-      res.json({ ok: true, provider });
+      const { primary } = providerOrderFor(policy);
+      res.json({ ok: true, policy, provider: primary });
     } catch (err) {
       next(err);
     }

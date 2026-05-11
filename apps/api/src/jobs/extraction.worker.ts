@@ -26,7 +26,12 @@ import { db } from '../db/client.js';
 import { accounts, statements, systemSettings, transactions } from '../db/schema.js';
 import { logger } from '../lib/logger.js';
 import { getEngineConfig } from '../services/engines.js';
-import { buildProvider } from '../services/llm-provider.js';
+import {
+  buildProviderForId,
+  providerOrderFor,
+  resolveProviderPolicy,
+  type ProviderId,
+} from '../services/llm-provider.js';
 import { redisOcrCache } from '../services/ocr-cache.js';
 import { writeAudit } from '../services/audit.js';
 
@@ -70,6 +75,387 @@ const checkCancelled = async (statementId: string): Promise<void> => {
   ) {
     throw new CancelledError();
   }
+};
+
+// In-memory result of a single provider's extraction attempt: the LLM
+// call plus any same-provider repair passes. The orchestrator inspects
+// `rejection` to decide whether to fall back to the secondary provider.
+interface ProcessedTx {
+  postedDate: string;
+  description: string;
+  amountCents: bigint;
+  runningBalanceCents: bigint | null;
+  checkNumber: string | null;
+  trntypeHint: schemas.extraction.Trntype | undefined;
+  sourcePage: number;
+  confidence: number;
+  sourceLine: number;
+}
+
+type AttemptRejection = 'http' | 'malformed' | 'empty-txs' | 'discrepancy' | null;
+
+interface AttemptOutcome {
+  providerId: ProviderId;
+  rejection: AttemptRejection;
+  // Raw error from a thrown attempt; non-null only for 'http' or
+  // 'malformed' rejections. The orchestrator re-throws it when no
+  // fallback rescues the call.
+  error: Error | null;
+  // Pre-repair LLM result count (kept for the audit payload).
+  llmEmittedTxCount: number;
+  effectiveTxs: ProcessedTx[];
+  reconciled: ReturnType<typeof reconcileGoldenRule> | null;
+  repairApplied: string | null;
+  // Telemetry roll-up across the extraction call + any in-attempt repair calls.
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  totalCallCount: number;
+  totalCostMicros: bigint;
+  modelVersion: string | null;
+  // Schema-typed source-date metadata. Pulled out so the orchestrator
+  // can halt on AMBIGUOUS without inspecting `effectiveTxs`.
+  dateFormat: schemas.extraction.ExtractionResult['source_date_format']['format'] | null;
+  dateFormatConfidence: number;
+  periodStart: string | null;
+  periodEnd: string | null;
+  openingBalanceCents: bigint | null;
+  closingBalanceCents: bigint | null;
+}
+
+interface AttemptContext {
+  stmtId: string;
+  markdown: string;
+  dateFormatOverride?: 'MDY' | 'DMY' | 'YMD';
+}
+
+const checkAnthropicMonthlyCap = async (stmtId: string): Promise<string | null> => {
+  const capRows = await db
+    .select()
+    .from(systemSettings)
+    .where(eq(systemSettings.key, 'llm.anthropic.monthly_cap_usd'));
+  const capUsd = capRows[0]?.valuePlaintext ? Number.parseFloat(capRows[0].valuePlaintext) : null;
+  if (capUsd === null || !Number.isFinite(capUsd)) return null;
+  const spentRows = await db
+    .select({ total: sql<string>`coalesce(sum(${statements.llmCostMicros}), 0)` })
+    .from(statements)
+    .where(sql`date_trunc('month', ${statements.createdAt}) = date_trunc('month', now())`);
+  const spentUsd = Number(BigInt(spentRows[0]?.total ?? '0')) / 1_000_000;
+  if (spentUsd >= capUsd) {
+    const msg = `monthly Anthropic spend cap reached: $${spentUsd.toFixed(2)} ≥ $${capUsd.toFixed(2)}`;
+    logger.warn({ stmtId, spentUsd, capUsd }, 'extraction blocked by monthly cap');
+    return msg;
+  }
+  return null;
+};
+
+const mapLlmTxs = (txs: schemas.extraction.ExtractionResult['transactions']): ProcessedTx[] =>
+  txs.map((t, idx) => ({
+    postedDate: t.posted_date,
+    description: t.description,
+    amountCents: BigInt(t.amount_cents),
+    runningBalanceCents:
+      t.running_balance_cents !== undefined && t.running_balance_cents !== null
+        ? BigInt(t.running_balance_cents)
+        : null,
+    checkNumber: t.check_number ?? null,
+    trntypeHint: t.trntype,
+    sourcePage: t.source_page,
+    confidence: t.confidence ?? 1,
+    sourceLine: idx,
+  }));
+
+// Run extraction + reconciliation + repair using a single provider. The
+// LLM call (and any same-provider repair calls) accumulate into the
+// telemetry roll-up. Errors are caught and converted into a rejection
+// reason so the orchestrator can decide whether to fall back; nothing
+// is persisted to the DB here.
+const attemptExtraction = async (
+  providerId: ProviderId,
+  ctx: AttemptContext,
+): Promise<AttemptOutcome> => {
+  const empty: Omit<AttemptOutcome, 'providerId' | 'rejection' | 'error'> = {
+    llmEmittedTxCount: 0,
+    effectiveTxs: [],
+    reconciled: null,
+    repairApplied: null,
+    totalInputTokens: 0,
+    totalOutputTokens: 0,
+    totalCallCount: 0,
+    totalCostMicros: 0n,
+    modelVersion: null,
+    dateFormat: null,
+    dateFormatConfidence: 0,
+    periodStart: null,
+    periodEnd: null,
+    openingBalanceCents: null,
+    closingBalanceCents: null,
+  };
+
+  let provider;
+  try {
+    provider = await buildProviderForId(db, providerId);
+  } catch (err) {
+    return { providerId, rejection: 'http', error: err as Error, ...empty };
+  }
+
+  if (provider.id === 'anthropic') {
+    const blocked = await checkAnthropicMonthlyCap(ctx.stmtId);
+    if (blocked !== null) {
+      return { providerId, rejection: 'http', error: new Error(blocked), ...empty };
+    }
+  }
+
+  let result: Awaited<ReturnType<typeof provider.extract>>;
+  try {
+    result = await provider.extract(ctx.markdown, {
+      schema: schemas.extraction.ExtractionJsonSchema,
+      ...(ctx.dateFormatOverride ? { dateFormatOverride: ctx.dateFormatOverride } : {}),
+    });
+  } catch (err) {
+    const rejection: AttemptRejection =
+      err instanceof ExtractionResponseError ? 'malformed' : 'http';
+    return { providerId, rejection, error: err as Error, ...empty };
+  }
+
+  const dateFormat = result.data.source_date_format.format;
+  const dateFormatConfidence = result.data.source_date_format.confidence;
+  const periodStart = result.data.period.start;
+  const periodEnd = result.data.period.end;
+  const openingCentsNumber = result.data.balances.opening_cents;
+  const closingCentsNumber = result.data.balances.closing_cents;
+  const openingCents = BigInt(openingCentsNumber);
+  const closingCents = BigInt(closingCentsNumber);
+  const llmEmittedTxCount = result.data.transactions.length;
+
+  // Carry telemetry from the first call so AMBIGUOUS halts and empty
+  // returns still record what the LLM spent.
+  let totalInputTokens = result.telemetry.inputTokens ?? 0;
+  let totalOutputTokens = result.telemetry.outputTokens ?? 0;
+  let totalCallCount = 1;
+  let totalCostMicros = result.telemetry.costMicros;
+
+  const halfResult = {
+    providerId,
+    error: null,
+    llmEmittedTxCount,
+    totalInputTokens,
+    totalOutputTokens,
+    totalCallCount,
+    totalCostMicros,
+    modelVersion: result.telemetry.model,
+    dateFormat,
+    dateFormatConfidence,
+    periodStart,
+    periodEnd,
+    openingBalanceCents: openingCents,
+    closingBalanceCents: closingCents,
+    repairApplied: null,
+  } as const;
+
+  // AMBIGUOUS halts the worker regardless of fallback — secondary would
+  // see the same ambiguous PDF. Return with rejection=null so
+  // orchestrator's halt path uses this attempt's telemetry/period.
+  if (dateFormat === 'AMBIGUOUS' && !ctx.dateFormatOverride) {
+    return {
+      ...halfResult,
+      rejection: null,
+      effectiveTxs: [],
+      reconciled: null,
+    };
+  }
+
+  if (llmEmittedTxCount === 0) {
+    return {
+      ...halfResult,
+      rejection: 'empty-txs',
+      effectiveTxs: [],
+      reconciled: null,
+    };
+  }
+
+  let effectiveTxs = mapLlmTxs(result.data.transactions);
+
+  let reconciled = reconcileGoldenRule({
+    openingBalanceCents: openingCents,
+    closingBalanceCents: closingCents,
+    transactions: effectiveTxs.map((t) => ({
+      amountCents: t.amountCents,
+      runningBalanceCents: t.runningBalanceCents,
+    })),
+    periodStart,
+    periodEnd,
+    transactionDates: effectiveTxs.map((t) => t.postedDate),
+  });
+
+  let repairApplied: string | null = null;
+
+  // Same-provider LLM repair pass (ADR-010, Phase 16 #6). When the
+  // discrepancy is upstream of the provider switch, this repair has a
+  // better chance to converge than a second cold extraction.
+  if (reconciled.status === 'discrepancy') {
+    const suspects = findSuspectRows(
+      openingCents,
+      effectiveTxs.map((t) => ({
+        amountCents: t.amountCents,
+        runningBalanceCents: t.runningBalanceCents,
+      })),
+    );
+    const repairPrompt = repairPromptFor({
+      markdown: ctx.markdown,
+      attemptedTransactions: effectiveTxs.map((t) => ({
+        posted_date: t.postedDate,
+        description: t.description,
+        amount_cents: t.amountCents,
+        running_balance_cents: t.runningBalanceCents,
+      })),
+      deltaCents: reconciled.deltaCents,
+      suspectRowIndices: suspects.map((s) => s.index),
+      openingBalanceCents: openingCents,
+      closingBalanceCents: closingCents,
+    });
+    try {
+      const repairResult = await provider.extract(repairPrompt, {
+        schema: schemas.extraction.ExtractionJsonSchema,
+        ...(ctx.dateFormatOverride ? { dateFormatOverride: ctx.dateFormatOverride } : {}),
+      });
+      const repairedTxs = mapLlmTxs(repairResult.data.transactions);
+      const verifyAfterLlmRepair = reconcileGoldenRule({
+        openingBalanceCents: openingCents,
+        closingBalanceCents: closingCents,
+        transactions: repairedTxs.map((t) => ({
+          amountCents: t.amountCents,
+          runningBalanceCents: t.runningBalanceCents,
+        })),
+        periodStart,
+        periodEnd,
+        transactionDates: repairedTxs.map((t) => t.postedDate),
+      });
+      // Roll telemetry in regardless of whether the repair verified.
+      totalInputTokens += repairResult.telemetry.inputTokens ?? 0;
+      totalOutputTokens += repairResult.telemetry.outputTokens ?? 0;
+      totalCallCount += 1;
+      totalCostMicros += repairResult.telemetry.costMicros;
+      if (verifyAfterLlmRepair.status === 'verified') {
+        effectiveTxs = repairedTxs;
+        reconciled = verifyAfterLlmRepair;
+        repairApplied = `llm-repair (${repairedTxs.length} rows)`;
+        logger.info(
+          {
+            stmtId: ctx.stmtId,
+            providerId,
+            originalCount: llmEmittedTxCount,
+            repairedCount: repairedTxs.length,
+          },
+          'reconcile repair applied via LLM second pass',
+        );
+      } else {
+        logger.info(
+          {
+            stmtId: ctx.stmtId,
+            providerId,
+            deltaAfterRepair: verifyAfterLlmRepair.deltaCents.toString(),
+          },
+          'LLM repair did not verify — falling through to heuristic repair',
+        );
+      }
+    } catch (err) {
+      logger.warn(
+        { stmtId: ctx.stmtId, providerId, err: (err as Error).message },
+        'LLM repair pass threw — falling through',
+      );
+    }
+  }
+
+  // Heuristic repair (sign-flip / drop-row) — cheap last resort before
+  // giving up and letting the orchestrator try the secondary provider.
+  if (reconciled.status === 'discrepancy') {
+    const candidate = repairPass(
+      effectiveTxs.map((t) => ({ amountCents: t.amountCents, description: t.description })),
+      reconciled.deltaCents,
+    );
+    if (candidate) {
+      const repairedAmounts = candidate.transactions;
+      let candidateTxs: typeof effectiveTxs;
+      if (repairedAmounts.length === effectiveTxs.length) {
+        candidateTxs = effectiveTxs.map((t, i) => ({
+          ...t,
+          amountCents: repairedAmounts[i]!.amountCents,
+        }));
+      } else {
+        const out: typeof effectiveTxs = [];
+        let r = 0;
+        for (const original of effectiveTxs) {
+          if (
+            r < repairedAmounts.length &&
+            repairedAmounts[r]!.amountCents === original.amountCents &&
+            repairedAmounts[r]!.description === original.description
+          ) {
+            out.push(original);
+            r += 1;
+          }
+        }
+        candidateTxs = out;
+      }
+      const verifyAfterRepair = reconcileGoldenRule({
+        openingBalanceCents: openingCents,
+        closingBalanceCents: closingCents,
+        transactions: candidateTxs.map((t) => ({ amountCents: t.amountCents })),
+        periodStart,
+        periodEnd,
+        transactionDates: candidateTxs.map((t) => t.postedDate),
+      });
+      if (verifyAfterRepair.status === 'verified') {
+        effectiveTxs = candidateTxs;
+        reconciled = verifyAfterRepair;
+        repairApplied = candidate.fixDescription;
+        logger.info(
+          { stmtId: ctx.stmtId, providerId, fix: candidate.fixDescription },
+          'reconcile repair applied',
+        );
+      } else {
+        logger.info(
+          { stmtId: ctx.stmtId, providerId, fix: candidate.fixDescription },
+          'reconcile repair candidate rejected — still discrepant after fix',
+        );
+      }
+    }
+  }
+
+  return {
+    providerId,
+    rejection: reconciled.status === 'verified' ? null : 'discrepancy',
+    error: null,
+    llmEmittedTxCount,
+    effectiveTxs,
+    reconciled,
+    repairApplied,
+    totalInputTokens,
+    totalOutputTokens,
+    totalCallCount,
+    totalCostMicros,
+    modelVersion: result.telemetry.model,
+    dateFormat,
+    dateFormatConfidence,
+    periodStart,
+    periodEnd,
+    openingBalanceCents: openingCents,
+    closingBalanceCents: closingCents,
+  };
+};
+
+// Choose between the primary attempt (which triggered fallback) and the
+// secondary attempt. "Usable" = produced data we could potentially
+// commit; HTTP/malformed errors yield no data. Among usable outcomes
+// prefer the verified one; otherwise prefer the fallback (operator
+// opted in, secondary is the explicit second opinion).
+const pickBetterAttempt = (primary: AttemptOutcome, secondary: AttemptOutcome): AttemptOutcome => {
+  const usable = (a: AttemptOutcome): boolean =>
+    a.rejection !== 'http' && a.rejection !== 'malformed';
+  if (usable(secondary) && !usable(primary)) return secondary;
+  if (usable(primary) && !usable(secondary)) return primary;
+  if (secondary.rejection === null && primary.rejection !== null) return secondary;
+  if (primary.rejection === null && secondary.rejection !== null) return primary;
+  return secondary;
 };
 
 export const processExtraction = async (data: ExtractionJobData): Promise<void> => {
@@ -157,291 +543,145 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
       .join('\n\n');
   }
 
-  // LLM extraction. Pass the JSON Schema explicitly so the local Vibe
-  // Gateway uses guided_json mode (ADR-004); the Anthropic provider
-  // gets the same schema via its tool_use input_schema (ADR-020).
   await checkCancelled(stmtId);
   await setStatus(stmtId, 'extracting');
-  const provider = await buildProvider(db);
 
-  // Phase 26 #34: enforce monthly cost cap before calling Anthropic.
-  // The cap is a soft USD ceiling — checked against current calendar-
-  // month accrued spend. Local provider is free, so we don't bother.
-  if (provider.id === 'anthropic') {
-    const capRows = await db
-      .select()
-      .from(systemSettings)
-      .where(eq(systemSettings.key, 'llm.anthropic.monthly_cap_usd'));
-    const capUsd = capRows[0]?.valuePlaintext ? Number.parseFloat(capRows[0].valuePlaintext) : null;
-    if (capUsd !== null && Number.isFinite(capUsd)) {
-      const spentRows = await db
-        .select({
-          total: sql<string>`coalesce(sum(${statements.llmCostMicros}), 0)`,
-        })
-        .from(statements)
-        .where(sql`date_trunc('month', ${statements.createdAt}) = date_trunc('month', now())`);
-      const spentUsd = Number(BigInt(spentRows[0]?.total ?? '0')) / 1_000_000;
-      if (spentUsd >= capUsd) {
-        const msg = `monthly Anthropic spend cap reached: $${spentUsd.toFixed(2)} ≥ $${capUsd.toFixed(2)}`;
-        await db
-          .update(statements)
-          .set({ status: 'failed', errorMessage: msg, updatedAt: sql`now()` })
-          .where(eq(statements.id, stmtId));
-        logger.warn({ stmtId, spentUsd, capUsd }, 'extraction blocked by monthly cap');
-        return;
-      }
-    }
-  }
-
-  const result = await provider.extract(markdown, {
-    schema: schemas.extraction.ExtractionJsonSchema,
+  // Two-provider orchestration. Each attempt runs the LLM call + repair
+  // pass in memory without persisting anything; the orchestrator picks
+  // the better outcome and commits it once at the end.
+  const policy = await resolveProviderPolicy(db);
+  const { primary, secondary } = providerOrderFor(policy);
+  const attemptCtx: AttemptContext = {
+    stmtId,
+    markdown,
     ...(dateFormatOverride ? { dateFormatOverride } : {}),
-  });
+  };
 
-  // Phase 15 item 4a: when the LLM returns AMBIGUOUS, halt and ask the
-  // operator. The /confirm-date-format endpoint flips the status back to
-  // 'uploaded' and re-enqueues with the operator-chosen format. Skip
-  // this gate when the operator has already confirmed (the worker is
-  // running with dateFormatOverride set).
-  // Phase 12 #1 nested shape: pull out the bits the worker needs.
-  const dateFormat = result.data.source_date_format.format;
-  const dateFormatConfidence = result.data.source_date_format.confidence;
-  const periodStart = result.data.period.start;
-  const periodEnd = result.data.period.end;
-  const openingCentsNumber = result.data.balances.opening_cents;
-  const closingCentsNumber = result.data.balances.closing_cents;
+  let chosen = await attemptExtraction(primary, attemptCtx);
 
-  if (!dateFormatOverride && dateFormat === 'AMBIGUOUS') {
+  // AMBIGUOUS date format halts the worker regardless of fallback —
+  // operator confirmation resolves it via /confirm-date-format.
+  if (chosen.dateFormat === 'AMBIGUOUS' && !dateFormatOverride) {
     await db
       .update(statements)
       .set({
         status: 'awaiting-locale-confirmation',
         sourceDateFormat: 'AMBIGUOUS',
-        sourceDateFormatConfidence: dateFormatConfidence,
-        llmProvider: provider.id,
-        llmInputTokens: result.telemetry.inputTokens,
-        llmOutputTokens: result.telemetry.outputTokens,
-        llmCallCount: 1,
-        llmCostMicros: result.telemetry.costMicros,
-        llmModelVersion: result.telemetry.model,
+        sourceDateFormatConfidence: chosen.dateFormatConfidence,
+        llmProvider: chosen.providerId,
+        llmInputTokens: chosen.totalInputTokens,
+        llmOutputTokens: chosen.totalOutputTokens,
+        llmCallCount: chosen.totalCallCount,
+        llmCostMicros: chosen.totalCostMicros,
+        llmModelVersion: chosen.modelVersion,
         updatedAt: sql`now()`,
       })
       .where(eq(statements.id, stmtId));
     logger.info(
-      { stmtId },
+      { stmtId, providerId: chosen.providerId },
       'extraction halted: ambiguous source date format — awaiting operator confirmation',
     );
     return;
   }
 
-  await db
-    .update(statements)
-    .set({
-      llmProvider: provider.id,
-      llmInputTokens: result.telemetry.inputTokens,
-      llmOutputTokens: result.telemetry.outputTokens,
-      llmCallCount: 1,
-      llmCostMicros: result.telemetry.costMicros,
-      llmModelVersion: result.telemetry.model,
-      sourceDateFormat: dateFormat,
-      sourceDateFormatConfidence: dateFormatConfidence,
-      periodStart,
-      periodEnd,
-      openingBalanceCents: BigInt(openingCentsNumber),
-      closingBalanceCents: BigInt(closingCentsNumber),
-      updatedAt: sql`now()`,
-    })
-    .where(eq(statements.id, stmtId));
+  if (chosen.rejection !== null && secondary !== null) {
+    await writeAudit(db, {
+      entityType: 'statement',
+      entityId: stmtId,
+      action: 'statement.extraction-fallback',
+      payload: {
+        from: chosen.providerId,
+        to: secondary,
+        reason: chosen.rejection,
+        ...(chosen.error ? { primaryError: chosen.error.message } : {}),
+      },
+    });
+    logger.info(
+      { stmtId, from: chosen.providerId, to: secondary, reason: chosen.rejection },
+      'falling back to secondary provider',
+    );
+    await setStatus(stmtId, 'extracting');
+    const fallback = await attemptExtraction(secondary, attemptCtx);
+    // Secondary seeing AMBIGUOUS is unusual but defensible — same halt
+    // path with its telemetry. Primary's telemetry is forfeit in this
+    // edge case; the audit row above still records the attempt.
+    if (fallback.dateFormat === 'AMBIGUOUS' && !dateFormatOverride) {
+      await db
+        .update(statements)
+        .set({
+          status: 'awaiting-locale-confirmation',
+          sourceDateFormat: 'AMBIGUOUS',
+          sourceDateFormatConfidence: fallback.dateFormatConfidence,
+          llmProvider: fallback.providerId,
+          llmInputTokens: fallback.totalInputTokens,
+          llmOutputTokens: fallback.totalOutputTokens,
+          llmCallCount: fallback.totalCallCount,
+          llmCostMicros: fallback.totalCostMicros,
+          llmModelVersion: fallback.modelVersion,
+          updatedAt: sql`now()`,
+        })
+        .where(eq(statements.id, stmtId));
+      return;
+    }
+    chosen = pickBetterAttempt(chosen, fallback);
+  }
+
+  // Hard failure path: neither attempt produced usable data. Re-throw
+  // the chosen error so the worker's outer catch records it via the
+  // diagnostic-capture path (statement.extraction-failed audit row,
+  // user-friendly errorMessage on the statements row).
+  if (chosen.rejection === 'http' || chosen.rejection === 'malformed') {
+    throw chosen.error ?? new Error('extraction failed with no usable result');
+  }
 
   await checkCancelled(stmtId);
   await setStatus(stmtId, 'reconciling');
 
-  // Reconcile, then attempt the repair pass (ADR-010 + Phase 16) when
-  // the Golden Rule fails. Repair tries sign-flip and drop-duplicate;
-  // when it succeeds we mutate `effectiveTxs` in-place so all downstream
-  // FITID + insert logic uses the corrected list.
-  const openingCents = BigInt(openingCentsNumber);
-  const closingCents = BigInt(closingCentsNumber);
-  let effectiveTxs = result.data.transactions.map((t, idx) => ({
-    postedDate: t.posted_date,
-    description: t.description,
-    amountCents: BigInt(t.amount_cents),
-    runningBalanceCents:
-      t.running_balance_cents !== undefined && t.running_balance_cents !== null
-        ? BigInt(t.running_balance_cents)
-        : null,
-    checkNumber: t.check_number ?? null,
-    trntypeHint: t.trntype,
-    sourcePage: t.source_page,
-    confidence: t.confidence ?? 1,
-    sourceLine: idx,
-  }));
-
-  let reconciled = reconcileGoldenRule({
-    openingBalanceCents: openingCents,
-    closingBalanceCents: closingCents,
-    transactions: effectiveTxs.map((t) => ({
-      amountCents: t.amountCents,
-      runningBalanceCents: t.runningBalanceCents,
-    })),
-    periodStart: periodStart,
-    periodEnd: periodEnd,
-    transactionDates: effectiveTxs.map((t) => t.postedDate),
-  });
-
-  let repairApplied: string | null = null;
-
-  // Phase 16 #6: LLM-driven repair pass FIRST. When reconcile fails, send
-  // the markdown back to the LLM with the failed transaction list and the
-  // delta. The LLM re-reads the markdown and returns a corrected list. We
-  // commit it only if the second reconcile actually verifies. Falls
-  // through to the heuristic repair below on failure.
-  if (reconciled.status === 'discrepancy') {
-    const suspects = findSuspectRows(
-      openingCents,
-      effectiveTxs.map((t) => ({
-        amountCents: t.amountCents,
-        runningBalanceCents: t.runningBalanceCents,
-      })),
-    );
-    const repairPrompt = repairPromptFor({
-      markdown,
-      attemptedTransactions: effectiveTxs.map((t) => ({
-        posted_date: t.postedDate,
-        description: t.description,
-        amount_cents: t.amountCents,
-        running_balance_cents: t.runningBalanceCents,
-      })),
-      deltaCents: reconciled.deltaCents,
-      suspectRowIndices: suspects.map((s) => s.index),
-      openingBalanceCents: openingCents,
-      closingBalanceCents: closingCents,
+  // Empty-tx fallback path can still land here when no secondary was
+  // available. Treat as an inserted-zero outcome — the operator sees
+  // `review` status with zero transactions and reconciliation=verified
+  // (no movement) or discrepancy if balances mismatch.
+  if (chosen.periodStart === null || chosen.periodEnd === null) {
+    throw new Error('extraction outcome missing period bounds');
+  }
+  if (chosen.openingBalanceCents === null || chosen.closingBalanceCents === null) {
+    throw new Error('extraction outcome missing balance bounds');
+  }
+  if (!chosen.reconciled) {
+    // Empty-txs path with no secondary: synthesize a reconciliation
+    // result so the persistence block below can record status.
+    chosen.reconciled = reconcileGoldenRule({
+      openingBalanceCents: chosen.openingBalanceCents,
+      closingBalanceCents: chosen.closingBalanceCents,
+      transactions: [],
+      periodStart: chosen.periodStart,
+      periodEnd: chosen.periodEnd,
+      transactionDates: [],
     });
-    try {
-      const repairResult = await provider.extract(repairPrompt, {
-        schema: schemas.extraction.ExtractionJsonSchema,
-        ...(dateFormatOverride ? { dateFormatOverride } : {}),
-      });
-      const repairedTxs = repairResult.data.transactions.map((t, idx) => ({
-        postedDate: t.posted_date,
-        description: t.description,
-        amountCents: BigInt(t.amount_cents),
-        runningBalanceCents:
-          t.running_balance_cents !== undefined && t.running_balance_cents !== null
-            ? BigInt(t.running_balance_cents)
-            : null,
-        checkNumber: t.check_number ?? null,
-        trntypeHint: t.trntype,
-        sourcePage: t.source_page,
-        confidence: t.confidence ?? 1,
-        sourceLine: idx,
-      }));
-      const verifyAfterLlmRepair = reconcileGoldenRule({
-        openingBalanceCents: openingCents,
-        closingBalanceCents: closingCents,
-        transactions: repairedTxs.map((t) => ({
-          amountCents: t.amountCents,
-          runningBalanceCents: t.runningBalanceCents,
-        })),
-        periodStart: periodStart,
-        periodEnd: periodEnd,
-        transactionDates: repairedTxs.map((t) => t.postedDate),
-      });
-      if (verifyAfterLlmRepair.status === 'verified') {
-        effectiveTxs = repairedTxs;
-        reconciled = verifyAfterLlmRepair;
-        repairApplied = `llm-repair (${repairedTxs.length} rows)`;
-        logger.info(
-          {
-            stmtId,
-            originalCount: result.data.transactions.length,
-            repairedCount: repairedTxs.length,
-          },
-          'reconcile repair applied via LLM second pass',
-        );
-        // Roll up the second-call telemetry.
-        await db
-          .update(statements)
-          .set({
-            llmInputTokens:
-              (result.telemetry.inputTokens ?? 0) + (repairResult.telemetry.inputTokens ?? 0),
-            llmOutputTokens:
-              (result.telemetry.outputTokens ?? 0) + (repairResult.telemetry.outputTokens ?? 0),
-            llmCallCount: 2,
-            llmCostMicros: result.telemetry.costMicros + repairResult.telemetry.costMicros,
-            updatedAt: sql`now()`,
-          })
-          .where(eq(statements.id, stmtId));
-      } else {
-        logger.info(
-          { stmtId, deltaAfterRepair: verifyAfterLlmRepair.deltaCents.toString() },
-          'LLM repair did not verify — falling through to heuristic repair',
-        );
-      }
-    } catch (err) {
-      logger.warn(
-        { stmtId, err: (err as Error).message },
-        'LLM repair pass threw — falling through',
-      );
-    }
   }
 
-  // Heuristic repair (sign-flip / drop-row) as a last resort if the LLM
-  // pass also failed. Cheaper than escalating to the user but only fixes
-  // a narrow class of discrepancies.
-  if (reconciled.status === 'discrepancy') {
-    const candidate = repairPass(
-      effectiveTxs.map((t) => ({ amountCents: t.amountCents, description: t.description })),
-      reconciled.deltaCents,
-    );
-    if (candidate) {
-      // Compute the repaired list in a temp variable; only commit it
-      // back to effectiveTxs if the second reconcile actually verifies.
-      // Otherwise we'd corrupt the user's row data with no reward.
-      const repairedAmounts = candidate.transactions;
-      let candidateTxs: typeof effectiveTxs;
-      if (repairedAmounts.length === effectiveTxs.length) {
-        candidateTxs = effectiveTxs.map((t, i) => ({
-          ...t,
-          amountCents: repairedAmounts[i]!.amountCents,
-        }));
-      } else {
-        // length differs → a row was dropped; rebuild by matching position.
-        const out: typeof effectiveTxs = [];
-        let r = 0;
-        for (const original of effectiveTxs) {
-          if (
-            r < repairedAmounts.length &&
-            repairedAmounts[r]!.amountCents === original.amountCents &&
-            repairedAmounts[r]!.description === original.description
-          ) {
-            out.push(original);
-            r += 1;
-          }
-        }
-        candidateTxs = out;
-      }
-      const verifyAfterRepair = reconcileGoldenRule({
-        openingBalanceCents: openingCents,
-        closingBalanceCents: closingCents,
-        transactions: candidateTxs.map((t) => ({ amountCents: t.amountCents })),
-        periodStart: periodStart,
-        periodEnd: periodEnd,
-        transactionDates: candidateTxs.map((t) => t.postedDate),
-      });
-      if (verifyAfterRepair.status === 'verified') {
-        effectiveTxs = candidateTxs;
-        reconciled = verifyAfterRepair;
-        repairApplied = candidate.fixDescription;
-        logger.info({ stmtId, fix: candidate.fixDescription }, 'reconcile repair applied');
-      } else {
-        logger.info(
-          { stmtId, fix: candidate.fixDescription },
-          'reconcile repair candidate rejected — still discrepant after fix',
-        );
-      }
-    }
-  }
+  await db
+    .update(statements)
+    .set({
+      llmProvider: chosen.providerId,
+      llmInputTokens: chosen.totalInputTokens,
+      llmOutputTokens: chosen.totalOutputTokens,
+      llmCallCount: chosen.totalCallCount,
+      llmCostMicros: chosen.totalCostMicros,
+      llmModelVersion: chosen.modelVersion,
+      sourceDateFormat: chosen.dateFormat,
+      sourceDateFormatConfidence: chosen.dateFormatConfidence,
+      periodStart: chosen.periodStart,
+      periodEnd: chosen.periodEnd,
+      openingBalanceCents: chosen.openingBalanceCents,
+      closingBalanceCents: chosen.closingBalanceCents,
+      updatedAt: sql`now()`,
+    })
+    .where(eq(statements.id, stmtId));
+
+  const effectiveTxs = chosen.effectiveTxs;
+  const reconciled = chosen.reconciled;
+  const repairApplied = chosen.repairApplied;
 
   const seqAssigned = assignSeqInDay(
     effectiveTxs.map((t) => ({
@@ -507,10 +747,11 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
     action: 'statement.extracted',
     payload: {
       method,
-      provider: provider.id,
+      provider: chosen.providerId,
       reconciliation: reconciled.status,
       txCount: effectiveTxs.length,
-      llmEmittedTxCount: result.data.transactions.length,
+      llmEmittedTxCount: chosen.llmEmittedTxCount,
+      policy,
       ...(repairApplied ? { repairApplied } : {}),
     },
   });

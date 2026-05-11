@@ -15,34 +15,75 @@ const KEY_ANTHROPIC_MODEL = 'llm.anthropic.model';
 
 export type ProviderId = 'local' | 'anthropic';
 
-export const resolveProviderId = async (db: Db): Promise<ProviderId> => {
+// Operator-selectable routing policy for the LLM extraction call.
+// - local-only / anthropic-only: hard pick, current behavior.
+// - local-first / anthropic-first: try the primary; if extraction
+//   fails one of the configured triggers (HTTP error, malformed
+//   response, empty transactions, reconciliation discrepancy),
+//   automatically retry once on the secondary.
+export type LlmProviderPolicy = 'local-only' | 'anthropic-only' | 'local-first' | 'anthropic-first';
+
+// Stored under the existing `llm.provider` system_settings key. Pre-
+// policy values (`local`, `anthropic`) map to the *-only modes so an
+// in-place upgrade doesn't change behavior.
+export const resolveProviderPolicy = async (db: Db): Promise<LlmProviderPolicy> => {
   const r = await readSetting(db, KEY_PROVIDER);
-  const v = r?.valuePlaintext;
-  return v === 'anthropic' ? 'anthropic' : 'local';
+  switch (r?.valuePlaintext) {
+    case 'anthropic':
+    case 'anthropic-only':
+      return 'anthropic-only';
+    case 'local-first':
+      return 'local-first';
+    case 'anthropic-first':
+      return 'anthropic-first';
+    case 'local':
+    case 'local-only':
+    default:
+      return 'local-only';
+  }
 };
 
-// Phase 13: 60-second provider cache. Constructing the provider hits
-// system_settings (3 rows) and unwraps the API key. The worker may build
-// 100+ providers per minute under load, so we cache instances and
-// invalidate via invalidateProviderCache(). Admin-routes that mutate
-// LLM settings call the invalidator.
+export const providerOrderFor = (
+  policy: LlmProviderPolicy,
+): { primary: ProviderId; secondary: ProviderId | null } => {
+  switch (policy) {
+    case 'local-only':
+      return { primary: 'local', secondary: null };
+    case 'anthropic-only':
+      return { primary: 'anthropic', secondary: null };
+    case 'local-first':
+      return { primary: 'local', secondary: 'anthropic' };
+    case 'anthropic-first':
+      return { primary: 'anthropic', secondary: 'local' };
+  }
+};
+
+// Backward-compat shim: routes that only care about "which one provider
+// is active" continue to use this. Returns the policy's primary.
+export const resolveProviderId = async (db: Db): Promise<ProviderId> => {
+  const policy = await resolveProviderPolicy(db);
+  return providerOrderFor(policy).primary;
+};
+
+// Per-id provider cache (60s). Falling-back attempts may need both
+// providers in the same worker invocation, so we keep separate slots
+// keyed by ProviderId rather than a single shared instance.
 const PROVIDER_TTL_MS = 60_000;
-let cached: { at: number; provider: LlmProvider } | null = null;
+const cache = new Map<ProviderId, { at: number; provider: LlmProvider }>();
 
 export const invalidateProviderCache = (): void => {
-  cached = null;
+  cache.clear();
 };
 
-const constructProvider = async (db: Db): Promise<LlmProvider> => {
-  const id = await resolveProviderId(db);
-  if (id === 'local') {
-    // engine.llm_gateway.url is operator-configurable from /admin/engines.
-    // Fall back to LLM_GATEWAY_URL env if the DB has no override.
-    const gatewayRow = await readSetting(db, 'engine.llm_gateway.url');
-    const baseUrl = gatewayRow?.valuePlaintext ?? undefined;
-    return new LocalGatewayProvider(baseUrl ? { baseUrl } : {});
-  }
+const constructLocal = async (db: Db): Promise<LlmProvider> => {
+  // engine.llm_gateway.url is operator-configurable from /admin/engines.
+  // Fall back to LLM_GATEWAY_URL env if the DB has no override.
+  const gatewayRow = await readSetting(db, 'engine.llm_gateway.url');
+  const baseUrl = gatewayRow?.valuePlaintext ?? undefined;
+  return new LocalGatewayProvider(baseUrl ? { baseUrl } : {});
+};
 
+const constructAnthropic = async (db: Db): Promise<LlmProvider> => {
   const keyRow = await readSetting(db, KEY_ANTHROPIC_KEY);
   let apiKey: string | undefined;
   if (keyRow?.valueEncrypted) {
@@ -51,7 +92,7 @@ const constructProvider = async (db: Db): Promise<LlmProvider> => {
     apiKey = process.env.ANTHROPIC_API_KEY;
   }
   if (!apiKey) {
-    throw new Error('llm.provider=anthropic but no API key in DB or ANTHROPIC_API_KEY env');
+    throw new Error('anthropic provider requested but no API key in DB or ANTHROPIC_API_KEY env');
   }
   const modelRow = await readSetting(db, KEY_ANTHROPIC_MODEL);
   const model = modelRow?.valuePlaintext ?? process.env.ANTHROPIC_MODEL ?? 'claude-sonnet-4-6';
@@ -61,9 +102,17 @@ const constructProvider = async (db: Db): Promise<LlmProvider> => {
   return new AnthropicProvider({ apiKey, model, priceTable });
 };
 
-export const buildProvider = async (db: Db): Promise<LlmProvider> => {
-  if (cached && Date.now() - cached.at < PROVIDER_TTL_MS) return cached.provider;
-  const provider = await constructProvider(db);
-  cached = { at: Date.now(), provider };
+export const buildProviderForId = async (db: Db, id: ProviderId): Promise<LlmProvider> => {
+  const hit = cache.get(id);
+  if (hit && Date.now() - hit.at < PROVIDER_TTL_MS) return hit.provider;
+  const provider = id === 'local' ? await constructLocal(db) : await constructAnthropic(db);
+  cache.set(id, { at: Date.now(), provider });
   return provider;
+};
+
+// Resolves the policy's primary and returns that provider. Used by
+// callers that don't participate in fallback (legacy code paths).
+export const buildProvider = async (db: Db): Promise<LlmProvider> => {
+  const id = await resolveProviderId(db);
+  return buildProviderForId(db, id);
 };
