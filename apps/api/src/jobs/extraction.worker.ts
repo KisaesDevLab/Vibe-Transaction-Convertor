@@ -467,8 +467,81 @@ const pickBetterAttempt = (primary: AttemptOutcome, secondary: AttemptOutcome): 
   return secondary;
 };
 
+// Diagnostic record persisted to audit_log on every extraction
+// outcome. Operators read this via the per-statement audit panel
+// when an extraction misbehaves — it's structured enough to answer
+// "which provider, which input method, how long, what reconciled,
+// what rejected" without grepping pino logs.
+interface AttemptTraceEntry {
+  providerId: ProviderId;
+  inputMethod: 'text-layer' | 'ocr';
+  rejection: AttemptRejection;
+  durationMs: number;
+  llmCallCount: number;
+  inputTokens: number;
+  outputTokens: number;
+  // bigint serializes to string in JSONB.
+  costMicros: string;
+  modelVersion: string | null;
+  txCount: number;
+  llmEmittedTxCount: number;
+  reconciliation: 'verified' | 'discrepancy' | null;
+  deltaCents: string | null;
+  repairApplied: string | null;
+  dateFormat: schemas.extraction.ExtractionResult['source_date_format']['format'] | null;
+  error: { class: string; message: string } | null;
+}
+
+const traceEntryFor = (
+  outcome: AttemptOutcome,
+  inputMethod: 'text-layer' | 'ocr',
+  durationMs: number,
+): AttemptTraceEntry => ({
+  providerId: outcome.providerId,
+  inputMethod,
+  rejection: outcome.rejection,
+  durationMs,
+  llmCallCount: outcome.totalCallCount,
+  inputTokens: outcome.totalInputTokens,
+  outputTokens: outcome.totalOutputTokens,
+  costMicros: outcome.totalCostMicros.toString(),
+  modelVersion: outcome.modelVersion,
+  txCount: outcome.effectiveTxs.length,
+  llmEmittedTxCount: outcome.llmEmittedTxCount,
+  reconciliation: outcome.reconciled
+    ? outcome.reconciled.status === 'verified'
+      ? 'verified'
+      : 'discrepancy'
+    : null,
+  deltaCents: outcome.reconciled?.deltaCents.toString() ?? null,
+  repairApplied: outcome.repairApplied,
+  dateFormat: outcome.dateFormat,
+  error: outcome.error
+    ? { class: outcome.error.constructor?.name ?? 'Error', message: outcome.error.message }
+    : null,
+});
+
 export const processExtraction = async (data: ExtractionJobData): Promise<void> => {
   const stmtId = data.statementId;
+  const workerStartedAt = Date.now();
+
+  // Diagnostic trace accumulators. Persisted to audit_log on every
+  // outcome (success, failure, AMBIGUOUS halt) so operators can read
+  // the full processing breakdown — per-attempt durations + tokens +
+  // costs, phase timings, fallback decisions — without grepping
+  // pino logs.
+  const attempts: AttemptTraceEntry[] = [];
+  const timing = {
+    preprocessMs: 0,
+    markdownMs: 0,
+    llmMs: 0,
+    ocrFallbackMarkdownMs: 0,
+    persistMs: 0,
+  };
+  let providerFallbackFired = false;
+  let ocrFallbackFired = false;
+  let phaseStart = Date.now();
+
   await setStatus(stmtId, 'preprocessing');
 
   // Look up the account up front so TRNTYPE inference can apply the
@@ -524,6 +597,9 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
     method = routePdf(analysis);
   }
 
+  timing.preprocessMs = Date.now() - phaseStart;
+  phaseStart = Date.now();
+
   await setStatus(stmtId, method === 'ocr' ? 'ocr' : 'extracting', {
     extractionMethod: method,
     sourcePdfPages: analysis.pageCount,
@@ -573,6 +649,7 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
   };
 
   let markdown = method === 'text' ? await produceTextMarkdown() : await produceOcrMarkdown();
+  timing.markdownMs = Date.now() - phaseStart;
 
   await checkCancelled(stmtId);
   await setStatus(stmtId, 'extracting');
@@ -610,15 +687,82 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
     );
   };
 
+  // Build the trace payload that every termination point writes to
+  // audit_log. The payload is the operator's "what just happened"
+  // forensic record: PDF analysis, configured + effective routing,
+  // per-attempt detail (durations, tokens, cost, rejection, repair),
+  // and phase timings. Markdown text itself is NOT included — only
+  // its size — to keep the audit row under JSONB's practical
+  // payload limit and avoid PII leakage to audit-viewer roles.
+  const buildTrace = (
+    outcome: 'success' | 'failed' | 'halted-ambiguous',
+    finalAttempt?: AttemptOutcome,
+    finalError?: Error | null,
+  ): Record<string, unknown> => ({
+    outcome,
+    pdf: {
+      hash: data.sourcePdfHash.slice(0, 12),
+      pages: analysis.pageCount,
+      hasTextLayer: analysis.hasTextLayer,
+      textLayerCoverage: Number(analysis.textLayerCoverage.toFixed(3)),
+      avgCharsPerPage: Math.round(analysis.avgCharsPerPage),
+      suspectedScan: analysis.suspectedScan,
+      pageRange: pageRange ? { start: pageRange.start, end: pageRange.end } : null,
+    },
+    strategy: {
+      configured: strategy,
+      effectiveMethod: method,
+      ocrFallbackFired,
+    },
+    providerPolicy: {
+      policy,
+      primary,
+      secondary,
+      providerFallbackFired,
+    },
+    markdown: {
+      chars: markdown.length,
+    },
+    attempts,
+    timing: {
+      totalMs: Date.now() - workerStartedAt,
+      preprocessMs: timing.preprocessMs,
+      markdownMs: timing.markdownMs,
+      llmMs: timing.llmMs,
+      ocrFallbackMarkdownMs: timing.ocrFallbackMarkdownMs,
+      persistMs: timing.persistMs,
+    },
+    ...(finalAttempt
+      ? {
+          chosen: {
+            providerId: finalAttempt.providerId,
+            txCount: finalAttempt.effectiveTxs.length,
+            reconciliation: finalAttempt.reconciled?.status ?? null,
+            deltaCents: finalAttempt.reconciled?.deltaCents.toString() ?? null,
+            repairApplied: finalAttempt.repairApplied,
+          },
+        }
+      : {}),
+    ...(finalError
+      ? { error: { class: finalError.constructor?.name ?? 'Error', message: finalError.message } }
+      : {}),
+  });
+
   // Provider-fallback orchestration. Returns the better of (primary,
   // secondary) outcomes, or just the primary when no secondary or no
   // rejection. AMBIGUOUS short-circuits — the caller persists halt
   // state and returns. Pure orchestration; no statement-row writes
   // besides the existing extraction-fallback audit log.
-  const runProviderFallback = async (ctx: AttemptContext): Promise<AttemptOutcome> => {
+  const runProviderFallback = async (
+    ctx: AttemptContext,
+    inputMethod: 'text-layer' | 'ocr',
+  ): Promise<AttemptOutcome> => {
+    const firstStart = Date.now();
     const first = await attemptExtraction(primary, ctx);
+    attempts.push(traceEntryFor(first, inputMethod, Date.now() - firstStart));
     if (first.dateFormat === 'AMBIGUOUS' && !ctx.dateFormatOverride) return first;
     if (first.rejection === null || secondary === null) return first;
+    providerFallbackFired = true;
     await writeAudit(db, {
       entityType: 'statement',
       entityId: stmtId,
@@ -627,23 +771,34 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
         from: first.providerId,
         to: secondary,
         reason: first.rejection,
+        inputMethod,
         ...(first.error ? { primaryError: first.error.message } : {}),
       },
     });
     logger.info(
-      { stmtId, from: first.providerId, to: secondary, reason: first.rejection },
+      { stmtId, from: first.providerId, to: secondary, reason: first.rejection, inputMethod },
       'falling back to secondary provider',
     );
     await setStatus(stmtId, 'extracting');
+    const secondStart = Date.now();
     const second = await attemptExtraction(secondary, ctx);
+    attempts.push(traceEntryFor(second, inputMethod, Date.now() - secondStart));
     if (second.dateFormat === 'AMBIGUOUS' && !ctx.dateFormatOverride) return second;
     return pickBetterAttempt(first, second);
   };
 
-  let chosen = await runProviderFallback(attemptCtx);
+  const llmStart = Date.now();
+  let chosen = await runProviderFallback(attemptCtx, method === 'ocr' ? 'ocr' : 'text-layer');
+  timing.llmMs = Date.now() - llmStart;
 
   if (chosen.dateFormat === 'AMBIGUOUS' && !dateFormatOverride) {
     await persistAmbiguousHalt(chosen);
+    await writeAudit(db, {
+      entityType: 'statement',
+      entityId: stmtId,
+      action: 'statement.extraction-trace',
+      payload: buildTrace('halted-ambiguous', chosen),
+    });
     return;
   }
 
@@ -656,6 +811,7 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
   // retry also exercises the secondary provider via runProviderFallback.
   // Worst case: 4 LLM calls (text×{primary,secondary} → ocr×{primary,secondary}).
   if (strategy === 'auto-ocr-fallback' && method === 'text' && chosen.rejection !== null) {
+    ocrFallbackFired = true;
     await writeAudit(db, {
       entityType: 'statement',
       entityId: stmtId,
@@ -672,12 +828,22 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
       'text-layer extraction rejected — retrying with GLM-OCR',
     );
     await setStatus(stmtId, 'ocr', { extractionMethod: 'hybrid' });
+    const ocrMarkdownStart = Date.now();
     markdown = await produceOcrMarkdown();
+    timing.ocrFallbackMarkdownMs = Date.now() - ocrMarkdownStart;
     attemptCtx = { ...attemptCtx, markdown };
     await setStatus(stmtId, 'extracting');
-    const ocrChosen = await runProviderFallback(attemptCtx);
+    const ocrLlmStart = Date.now();
+    const ocrChosen = await runProviderFallback(attemptCtx, 'ocr');
+    timing.llmMs += Date.now() - ocrLlmStart;
     if (ocrChosen.dateFormat === 'AMBIGUOUS' && !dateFormatOverride) {
       await persistAmbiguousHalt(ocrChosen);
+      await writeAudit(db, {
+        entityType: 'statement',
+        entityId: stmtId,
+        action: 'statement.extraction-trace',
+        payload: buildTrace('halted-ambiguous', ocrChosen),
+      });
       return;
     }
     chosen = pickBetterAttempt(chosen, ocrChosen);
@@ -817,11 +983,14 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
     }
   });
 
+  timing.persistMs = Date.now() - phaseStart;
   await writeAudit(db, {
     entityType: 'statement',
     entityId: stmtId,
     action: 'statement.extracted',
     payload: {
+      // Existing concise summary (kept stable for any operator
+      // tooling that grepped the old payload shape).
       method,
       provider: chosen.providerId,
       reconciliation: reconciled.status,
@@ -830,6 +999,10 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
       policy,
       strategy,
       ...(repairApplied ? { repairApplied } : {}),
+      // Full processing trace — operator reads this when a successful
+      // extraction looks suspect (cost surprise, slow run, fallback
+      // fired silently) without having to re-run the job.
+      trace: buildTrace('success', chosen),
     },
   });
 };
