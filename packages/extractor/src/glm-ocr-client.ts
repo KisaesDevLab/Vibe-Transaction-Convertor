@@ -2,23 +2,41 @@ import { createHash } from 'node:crypto';
 
 // GLM-OCR HTTP contract.
 //
-// Request (we always send this exact shape):
-//   POST {GLM_OCR_URL}/ocr
+// The vibe-glm-ocr image (used in both standalone and appliance modes)
+// runs llama.cpp's llama-server hosting the GLM-OCR multimodal model.
+// It exposes an OpenAI-compatible chat-completions API; there is no
+// native /ocr endpoint. Sibling apps reach it by service name on port
+// 8090 (e.g. http://vibe-glm-ocr:8090).
+//
+// Request (one POST per page — llama-server isn't batched, so we
+// parallelise via the `concurrency` knob instead):
+//   POST {GLM_OCR_URL}{ocrPath}    — default ocrPath = /v1/chat/completions
 //     content-type: application/json
-//     body: { pages: [{ image_base64: string }, ...] }
+//     body: {
+//       "model": "GLM-OCR",
+//       "messages": [{ "role": "user", "content": [
+//         { "type": "image_url",
+//           "image_url": { "url": "data:image/png;base64,<base64>" } },
+//         { "type": "text", "text": "Text Recognition:" }
+//       ] }],
+//       "temperature": 0.02
+//     }
 //
-// Response (we accept any of the variants below — see parseOcrResponse):
-//   1. { pages: [{ markdown|text|content|output|ocr_text|raw, confidence|score|conf }, ...] }
-//   2. { data: { pages: [ ... ] } }
-//   3. { result: { ...page... } }   or   { result: "raw markdown" }
-//   4. { markdown|text|...: ..., confidence|...: ... }            (single-page flat)
-//   5. "raw markdown string"                                       (bare-string body)
-// Confidence is coerced from strings, percent (0..100), missing → defaultConfidence.
-// Unrecognized shapes throw GlmOcrError; the error carries the top-level
-// key names (not values) so operators can adjust without leaking PII.
+// Response: standard OpenAI chat completion. The OCR'd markdown is in
+// `choices[0].message.content` (a single string). llama-server does
+// not report per-image confidence, so we stamp `defaultConfidence` on
+// every successful response — empty content rolls down to 0 so the
+// trace can distinguish "got nothing" from "got something".
 //
-//   GET {GLM_OCR_URL}/health   — 200 OK if alive
-//   GET {GLM_OCR_URL}/version  — { version: string }, cached 5 min
+//   GET {GLM_OCR_URL}{healthPath}   — default /health  ; 200 OK if alive
+//   GET {GLM_OCR_URL}{versionPath}  — default /version ; { version }, cached 5 min
+//     (llama-server doesn't actually serve /version — the probe degrades
+//      gracefully to an "unknown" engine version.)
+//
+// Sub-paths, the prompt mode (`Text Recognition:` / `Table Recognition:`),
+// and the model id stay configurable via per-call options or the
+// GLM_OCR_OCR_PATH / GLM_OCR_HEALTH_PATH / GLM_OCR_VERSION_PATH /
+// GLM_OCR_MODEL / GLM_OCR_PROMPT env vars. Paths must start with `/`.
 //
 // All inputs are PNG/JPEG buffers (raster output of pdftoppm). Raw PDFs
 // and source bytes are NOT sent. The page-level confidence rolls up to
@@ -30,20 +48,25 @@ export interface OcrPageResult {
   confidence: number;
 }
 
-export type OcrParseVariant =
-  | 'pages-array'
-  | 'data-pages'
-  | 'result-wrapper'
-  | 'flat-page'
-  | 'output-string'
-  | 'from-cache';
+// Narrow to the two outcomes the OpenAI-shape path produces. We keep
+// the `OcrParseDiagnostic` shape stable across the rewrite so the
+// worker's `summarizeOcrDiagnostics` keeps compiling unchanged.
+export type OcrParseVariant = 'openai-chat' | 'from-cache';
 
 export interface OcrParseDiagnostic {
   pageIndex: number;
   variant: OcrParseVariant;
-  textFieldUsed: 'markdown' | 'text' | 'content' | 'output' | 'ocr_text' | 'raw' | 'none';
-  confidenceSource: 'present-number' | 'coerced-string' | 'coerced-percent' | 'assumed-default';
+  // The OpenAI shape always carries the text in
+  // `choices[0].message.content`; `none` is only used when content was
+  // missing entirely (degenerate response).
+  textFieldUsed: 'content' | 'none';
+  // llama-server never reports a per-image confidence number, so we
+  // always stamp `assumed-default` and let the caller's defaultConfidence
+  // setting govern the magnitude. Kept as a union for future-proofing.
+  confidenceSource: 'assumed-default';
   emptyText: boolean;
+  // Top-level keys of the raw HTTP body — kept for the audit trail so
+  // an unexpected response shape can be diagnosed without re-running.
   bodyTopLevelKeys: string[];
 }
 
@@ -72,6 +95,21 @@ export interface GlmOcrClientOptions {
   // Fallback when GLM-OCR omits a confidence value. 0.5 ("unknown")
   // by default; override via GLM_OCR_DEFAULT_CONFIDENCE.
   defaultConfidence?: number | undefined;
+  // Endpoint sub-paths. Default to `/v1/chat/completions`, `/health`,
+  // `/version` — matching the vibe-glm-ocr image (llama.cpp llama-
+  // server). Override when a deployment puts the OCR behind a path
+  // prefix (e.g. `/ocr/v1/chat/completions`). Paths must start with `/`.
+  ocrPath?: string | undefined;
+  healthPath?: string | undefined;
+  versionPath?: string | undefined;
+  // OpenAI-shape request fields. `model` matches the model id the
+  // upstream serves (vibe-glm-ocr advertises "GLM-OCR"). `prompt` is
+  // the second message-content part — either `Text Recognition:`
+  // (general OCR; bank-statement default) or `Table Recognition:`
+  // (forces structured markdown tables, better for pure tabular
+  // statements but strips prose headers).
+  model?: string | undefined;
+  prompt?: string | undefined;
 }
 
 export class GlmOcrError extends Error {
@@ -105,6 +143,11 @@ interface InternalConfig {
   cache: OcrCacheStore;
   cacheTtlSeconds: number;
   defaultConfidence: number;
+  ocrPath: string;
+  healthPath: string;
+  versionPath: string;
+  model: string;
+  prompt: string;
 }
 
 // In-memory fallback. Honors a soft TTL but doesn't cleanly expire — the
@@ -161,6 +204,16 @@ export const resetOcrCircuit = (): void => {
   cbOpenedAt = 0;
 };
 
+// Normalise a sub-path option to a leading-slash, no-trailing-slash
+// form so concatenation with baseUrl is predictable. Returns the
+// fallback when the input is undefined/empty.
+const resolvePath = (override: string | undefined, fallback: string): string => {
+  const raw = override ?? '';
+  if (raw.length === 0) return fallback;
+  const withLead = raw.startsWith('/') ? raw : `/${raw}`;
+  return withLead.replace(/\/+$/, '') || fallback;
+};
+
 const resolveConfig = (opts: GlmOcrClientOptions = {}): InternalConfig => {
   const baseUrl = (opts.baseUrl ?? process.env.GLM_OCR_URL ?? '').replace(/\/$/, '');
   if (!baseUrl) throw new GlmOcrError('GLM_OCR_URL is not set');
@@ -176,172 +229,114 @@ const resolveConfig = (opts: GlmOcrClientOptions = {}): InternalConfig => {
     cacheTtlSeconds:
       opts.cacheTtlSeconds ?? Number(process.env.GLM_OCR_CACHE_TTL_DAYS ?? 7) * 86_400,
     defaultConfidence:
-      opts.defaultConfidence ?? Number(process.env.GLM_OCR_DEFAULT_CONFIDENCE ?? 0.5),
+      opts.defaultConfidence ?? Number(process.env.GLM_OCR_DEFAULT_CONFIDENCE ?? 0.9),
+    ocrPath: resolvePath(opts.ocrPath ?? process.env.GLM_OCR_OCR_PATH, '/v1/chat/completions'),
+    healthPath: resolvePath(opts.healthPath ?? process.env.GLM_OCR_HEALTH_PATH, '/health'),
+    versionPath: resolvePath(opts.versionPath ?? process.env.GLM_OCR_VERSION_PATH, '/version'),
+    model: opts.model ?? process.env.GLM_OCR_MODEL ?? 'GLM-OCR',
+    prompt: opts.prompt ?? process.env.GLM_OCR_PROMPT ?? 'Text Recognition:',
   };
 };
-
-// First non-null present alias wins; order is significant.
-const TEXT_FIELD_ALIASES = ['markdown', 'text', 'content', 'output', 'ocr_text', 'raw'] as const;
-type TextField = (typeof TEXT_FIELD_ALIASES)[number];
-
-const CONFIDENCE_FIELD_ALIASES = ['confidence', 'score', 'conf'] as const;
 
 const isPlainObject = (v: unknown): v is Record<string, unknown> =>
   typeof v === 'object' && v !== null && !Array.isArray(v);
 
 const topLevelKeys = (body: unknown): string[] => (isPlainObject(body) ? Object.keys(body) : []);
 
-const resolveText = (
-  candidate: Record<string, unknown>,
-): { text: string; field: TextField | 'none'; empty: boolean } => {
-  for (const alias of TEXT_FIELD_ALIASES) {
-    if (alias in candidate) {
-      const raw = candidate[alias];
-      if (raw === null || raw === undefined) {
-        return { text: '', field: alias, empty: true };
-      }
-      const str = typeof raw === 'string' ? raw : String(raw);
-      return { text: str, field: alias, empty: str.length === 0 };
-    }
-  }
-  return { text: '', field: 'none', empty: true };
-};
-
-const coerceConfidence = (
-  raw: unknown,
-  defaultConfidence: number,
-): { value: number; source: OcrParseDiagnostic['confidenceSource'] } => {
-  if (typeof raw === 'number' && Number.isFinite(raw)) {
-    if (raw >= 0 && raw <= 1) return { value: raw, source: 'present-number' };
-    if (raw > 1 && raw <= 100) return { value: raw / 100, source: 'coerced-percent' };
-    return { value: defaultConfidence, source: 'assumed-default' };
-  }
-  if (typeof raw === 'string' && raw.trim().length > 0) {
-    const n = Number(raw);
-    if (Number.isFinite(n)) {
-      const recursed = coerceConfidence(n, defaultConfidence);
-      // Preserve the "string was parsed" provenance only when the value
-      // was actually accepted from the number it parsed to.
-      if (recursed.source === 'present-number' || recursed.source === 'coerced-percent') {
-        return { value: recursed.value, source: 'coerced-string' };
-      }
-      return recursed;
-    }
-  }
-  return { value: defaultConfidence, source: 'assumed-default' };
-};
-
-const resolveConfidence = (
-  candidate: Record<string, unknown>,
-  defaultConfidence: number,
-): { value: number; source: OcrParseDiagnostic['confidenceSource'] } => {
-  for (const alias of CONFIDENCE_FIELD_ALIASES) {
-    if (alias in candidate) {
-      return coerceConfidence(candidate[alias], defaultConfidence);
-    }
-  }
-  return { value: defaultConfidence, source: 'assumed-default' };
-};
-
-// Pure parser. Walks shape variants in order until one yields a page-like
-// object; never throws on missing fields within a recognized shape (those
-// degrade to defaults). Only throws when no shape matches — that error
-// path counts toward the circuit breaker.
-export const parseOcrResponse = (
+// Pure parser for the llama-server (OpenAI-compatible) response shape.
+// The OCR'd markdown lives in `choices[0].message.content`. Anything
+// else is treated as a contract violation and surfaced via GlmOcrError
+// so the circuit breaker can react and the audit log records what
+// actually came back. Exported for unit tests; not part of the public
+// API surface.
+export const parseOpenAiChatResponse = (
   body: unknown,
   pageIndex: number,
   defaultConfidence: number,
 ): { result: OcrPageResult; diagnostic: OcrParseDiagnostic } => {
   const keys = topLevelKeys(body);
-
-  const fromString = (
-    str: string,
-    variant: OcrParseVariant,
-    bodyKeys: string[],
-  ): { result: OcrPageResult; diagnostic: OcrParseDiagnostic } => {
-    const empty = str.length === 0;
-    return {
-      result: { index: pageIndex, markdown: str, confidence: empty ? 0 : defaultConfidence },
-      diagnostic: {
-        pageIndex,
-        variant,
-        textFieldUsed: 'none',
-        confidenceSource: 'assumed-default',
-        emptyText: empty,
-        bodyTopLevelKeys: bodyKeys,
-      },
-    };
-  };
-
-  const fromCandidate = (
-    candidate: Record<string, unknown>,
-    variant: OcrParseVariant,
-    bodyKeys: string[],
-  ): { result: OcrPageResult; diagnostic: OcrParseDiagnostic } => {
-    const { text, field, empty } = resolveText(candidate);
-    const { value: confValue, source: confSource } = resolveConfidence(
-      candidate,
-      defaultConfidence,
-    );
-    // Empty markdown overrides confidence to 0 so the trace
-    // distinguishes "we got nothing" from "we got something but no
-    // quality signal".
-    const confidence = empty ? 0 : confValue;
-    const confidenceSource: OcrParseDiagnostic['confidenceSource'] = empty
-      ? 'assumed-default'
-      : confSource;
-    return {
-      result: { index: pageIndex, markdown: text, confidence },
-      diagnostic: {
-        pageIndex,
-        variant,
-        textFieldUsed: field,
-        confidenceSource,
-        emptyText: empty,
-        bodyTopLevelKeys: bodyKeys,
-      },
-    };
-  };
-
-  if (typeof body === 'string') return fromString(body, 'output-string', []);
-
   if (!isPlainObject(body)) {
     throw new GlmOcrError(
-      `GLM-OCR response: unrecognized shape (top-level keys: ${keys.join(',') || '<none>'})`,
-      undefined,
-      undefined,
+      `GLM-OCR response: expected JSON object, got ${typeof body} (top-level keys: ${keys.join(',') || '<none>'})`,
     );
   }
-
-  if (Array.isArray(body.pages) && body.pages.length > 0 && isPlainObject(body.pages[0])) {
-    return fromCandidate(body.pages[0] as Record<string, unknown>, 'pages-array', keys);
+  const choices = body.choices;
+  if (!Array.isArray(choices) || choices.length === 0) {
+    throw new GlmOcrError(
+      `GLM-OCR response: missing or empty "choices" array (top-level keys: ${keys.join(',') || '<none>'})`,
+    );
   }
-
-  if (isPlainObject(body.data)) {
-    const inner = body.data as Record<string, unknown>;
-    if (Array.isArray(inner.pages) && inner.pages.length > 0 && isPlainObject(inner.pages[0])) {
-      return fromCandidate(inner.pages[0] as Record<string, unknown>, 'data-pages', keys);
-    }
+  const first = choices[0];
+  if (!isPlainObject(first)) {
+    throw new GlmOcrError('GLM-OCR response: choices[0] is not an object');
   }
-
-  if ('result' in body) {
-    const r = body.result;
-    if (typeof r === 'string') return fromString(r, 'result-wrapper', keys);
-    if (isPlainObject(r)) {
-      return fromCandidate(r as Record<string, unknown>, 'result-wrapper', keys);
-    }
+  const message = (first as Record<string, unknown>).message;
+  if (!isPlainObject(message)) {
+    throw new GlmOcrError('GLM-OCR response: choices[0].message is missing');
   }
-
-  const hasTextOrConfAlias =
-    TEXT_FIELD_ALIASES.some((a) => a in body) || CONFIDENCE_FIELD_ALIASES.some((a) => a in body);
-  if (hasTextOrConfAlias) return fromCandidate(body, 'flat-page', keys);
-
-  throw new GlmOcrError(
-    `GLM-OCR response: unrecognized shape (top-level keys: ${keys.join(',') || '<none>'})`,
-    undefined,
-    undefined,
-  );
+  const rawContent = (message as Record<string, unknown>).content;
+  // llama-server returns a string. Some OpenAI variants stream an array
+  // of content parts — handle both defensively by joining string-typed
+  // parts.
+  let text: string;
+  let textFieldUsed: OcrParseDiagnostic['textFieldUsed'];
+  if (typeof rawContent === 'string') {
+    text = rawContent;
+    textFieldUsed = 'content';
+  } else if (Array.isArray(rawContent)) {
+    text = rawContent
+      .map((p) =>
+        typeof p === 'string' ? p : isPlainObject(p) && typeof p.text === 'string' ? p.text : '',
+      )
+      .join('');
+    textFieldUsed = text.length > 0 ? 'content' : 'none';
+  } else {
+    text = '';
+    textFieldUsed = 'none';
+  }
+  const empty = text.length === 0;
+  return {
+    result: {
+      index: pageIndex,
+      markdown: text,
+      confidence: empty ? 0 : defaultConfidence,
+    },
+    diagnostic: {
+      pageIndex,
+      variant: 'openai-chat',
+      textFieldUsed,
+      confidenceSource: 'assumed-default',
+      emptyText: empty,
+      bodyTopLevelKeys: keys,
+    },
+  };
 };
+
+// Build the OpenAI vision request body for a single page image. Pulled
+// out so the test can assert on the exact shape we put on the wire
+// without re-running the full retry/cache stack.
+export const buildOpenAiOcrRequestBody = (
+  image: Buffer,
+  cfg: { model: string; prompt: string },
+): Record<string, unknown> => ({
+  model: cfg.model,
+  messages: [
+    {
+      role: 'user',
+      content: [
+        {
+          type: 'image_url',
+          image_url: { url: `data:image/png;base64,${image.toString('base64')}` },
+        },
+        { type: 'text', text: cfg.prompt },
+      ],
+    },
+  ],
+  // llama-server's GLM-OCR sample uses 0.02; matches the entrypoint
+  // default in vibe-glm-ocr. Locks the model to near-greedy decoding,
+  // which is what you want for OCR.
+  temperature: 0.02,
+});
 
 const ocrPage = async (
   cfg: InternalConfig,
@@ -357,8 +352,8 @@ const ocrPage = async (
       diagnostic: {
         pageIndex,
         variant: 'from-cache',
-        textFieldUsed: 'markdown',
-        confidenceSource: 'present-number',
+        textFieldUsed: 'content',
+        confidenceSource: 'assumed-default',
         emptyText: hit.markdown.length === 0,
         bodyTopLevelKeys: [],
       },
@@ -371,7 +366,8 @@ const ocrPage = async (
     );
   }
 
-  const url = `${cfg.baseUrl}/ocr`;
+  const url = `${cfg.baseUrl}${cfg.ocrPath}`;
+  const requestBody = buildOpenAiOcrRequestBody(image, { model: cfg.model, prompt: cfg.prompt });
   let lastErr: unknown;
   for (let attempt = 1; attempt <= cfg.maxAttempts; attempt += 1) {
     const controller = new AbortController();
@@ -380,14 +376,14 @@ const ocrPage = async (
       const res = await cfg.fetcher(url, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ pages: [{ image_base64: image.toString('base64') }] }),
+        body: JSON.stringify(requestBody),
         signal: controller.signal,
       });
       if (!res.ok) {
         throw new GlmOcrError(`GLM-OCR POST ${url} → HTTP ${res.status}`, res.status, url);
       }
       const body = (await res.json()) as unknown;
-      const { result: normalized, diagnostic } = parseOcrResponse(
+      const { result: normalized, diagnostic } = parseOpenAiChatResponse(
         body,
         pageIndex,
         cfg.defaultConfidence,
@@ -451,6 +447,12 @@ const runWithConcurrency = async <T, R>(
 let cachedEngineVersion: { value: string; expiresAt: number } | null = null;
 const ENGINE_VERSION_TTL_MS = 5 * 60_000;
 
+// Test-only escape hatch — drops the engine-version cache so each test
+// sees a fresh probe. Equivalent to a process restart.
+export const resetEngineVersionCache = (): void => {
+  cachedEngineVersion = null;
+};
+
 export const probeGlmOcrVersion = async (opts: GlmOcrClientOptions = {}): Promise<string> => {
   if (cachedEngineVersion && cachedEngineVersion.expiresAt > Date.now()) {
     return cachedEngineVersion.value;
@@ -460,7 +462,9 @@ export const probeGlmOcrVersion = async (opts: GlmOcrClientOptions = {}): Promis
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 1500);
     try {
-      const res = await cfg.fetcher(`${cfg.baseUrl}/version`, { signal: controller.signal });
+      const res = await cfg.fetcher(`${cfg.baseUrl}${cfg.versionPath}`, {
+        signal: controller.signal,
+      });
       if (!res.ok) return 'glm-ocr/unknown';
       const body = (await res.json()) as { version?: string };
       const version = body.version ?? 'glm-ocr/unknown';
@@ -501,7 +505,9 @@ export const probeGlmOcrHealth = async (
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 1500);
     try {
-      const res = await cfg.fetcher(`${cfg.baseUrl}/health`, { signal: controller.signal });
+      const res = await cfg.fetcher(`${cfg.baseUrl}${cfg.healthPath}`, {
+        signal: controller.signal,
+      });
       return res.ok ? { ok: true, status: res.status } : { ok: false, status: res.status };
     } finally {
       clearTimeout(timer);

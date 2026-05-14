@@ -1,9 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  buildOpenAiOcrRequestBody,
   clearOcrCache,
   GlmOcrError,
   ocrPdfPages,
-  parseOcrResponse,
+  parseOpenAiChatResponse,
+  resetEngineVersionCache,
   resetOcrCircuit,
 } from './glm-ocr-client.js';
 
@@ -21,153 +23,142 @@ const buildFetcher = (
   return async (input, init) => handler({ url: String(input), init: init ?? {} });
 };
 
-describe('parseOcrResponse', () => {
-  const DEF = 0.5;
+// Canonical successful response from vibe-glm-ocr (llama-server) — the
+// shape every other test asserts against.
+const chatResponse = (markdown: string): Response =>
+  okResponse({
+    choices: [{ message: { role: 'assistant', content: markdown }, finish_reason: 'stop' }],
+    usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+  });
 
-  it('accepts pages[0] with markdown + numeric confidence', () => {
-    const { result, diagnostic } = parseOcrResponse(
-      { pages: [{ markdown: '# a', confidence: 0.87 }] },
+describe('parseOpenAiChatResponse', () => {
+  const DEF = 0.9;
+
+  it('pulls the markdown from choices[0].message.content', () => {
+    const { result, diagnostic } = parseOpenAiChatResponse(
+      {
+        choices: [{ message: { role: 'assistant', content: '# header\n| a | b |' } }],
+      },
       0,
       DEF,
     );
-    expect(result).toEqual({ index: 0, markdown: '# a', confidence: 0.87 });
-    expect(diagnostic.variant).toBe('pages-array');
-    expect(diagnostic.textFieldUsed).toBe('markdown');
-    expect(diagnostic.confidenceSource).toBe('present-number');
+    expect(result).toEqual({ index: 0, markdown: '# header\n| a | b |', confidence: DEF });
+    expect(diagnostic.variant).toBe('openai-chat');
+    expect(diagnostic.textFieldUsed).toBe('content');
+    expect(diagnostic.confidenceSource).toBe('assumed-default');
     expect(diagnostic.emptyText).toBe(false);
   });
 
-  it('accepts data.pages[0] with text alias and percent score', () => {
-    const { result, diagnostic } = parseOcrResponse(
-      { data: { pages: [{ text: '# b', score: 92 }] } },
-      3,
-      DEF,
-    );
-    expect(result.markdown).toBe('# b');
-    expect(result.confidence).toBeCloseTo(0.92, 5);
-    expect(result.index).toBe(3);
-    expect(diagnostic.variant).toBe('data-pages');
-    expect(diagnostic.textFieldUsed).toBe('text');
-    expect(diagnostic.confidenceSource).toBe('coerced-percent');
-  });
-
-  it('accepts result wrapper with content + string confidence', () => {
-    const { result, diagnostic } = parseOcrResponse(
-      { result: { content: '# c', confidence: '0.4' } },
-      0,
-      DEF,
-    );
-    expect(result.markdown).toBe('# c');
-    expect(result.confidence).toBe(0.4);
-    expect(diagnostic.variant).toBe('result-wrapper');
-    expect(diagnostic.textFieldUsed).toBe('content');
-    expect(diagnostic.confidenceSource).toBe('coerced-string');
-  });
-
-  it('accepts flat page with only markdown (confidence defaults)', () => {
-    const { result, diagnostic } = parseOcrResponse({ markdown: '# d' }, 0, DEF);
-    expect(result.markdown).toBe('# d');
-    expect(result.confidence).toBe(DEF);
-    expect(diagnostic.variant).toBe('flat-page');
-    expect(diagnostic.textFieldUsed).toBe('markdown');
-    expect(diagnostic.confidenceSource).toBe('assumed-default');
-  });
-
-  it('accepts flat page with output alias and conf=1', () => {
-    const { result, diagnostic } = parseOcrResponse({ output: '# e', conf: 1 }, 0, DEF);
-    expect(result.markdown).toBe('# e');
-    expect(result.confidence).toBe(1);
-    expect(diagnostic.variant).toBe('flat-page');
-    expect(diagnostic.textFieldUsed).toBe('output');
-    expect(diagnostic.confidenceSource).toBe('present-number');
-  });
-
-  it('accepts result wrapper with bare string body', () => {
-    const { result, diagnostic } = parseOcrResponse({ result: '# wrapped' }, 0, DEF);
-    expect(result.markdown).toBe('# wrapped');
-    expect(result.confidence).toBe(DEF);
-    expect(diagnostic.variant).toBe('result-wrapper');
-    expect(diagnostic.textFieldUsed).toBe('none');
-  });
-
-  it('accepts bare-string body as output-string variant', () => {
-    const { result, diagnostic } = parseOcrResponse('# bare', 0, DEF);
-    expect(result.markdown).toBe('# bare');
-    expect(result.confidence).toBe(DEF);
-    expect(diagnostic.variant).toBe('output-string');
-  });
-
-  it('treats empty text field as confidence 0 regardless of source value', () => {
-    const { result, diagnostic } = parseOcrResponse({ ocr_text: '', confidence: 0.9 }, 0, DEF);
-    expect(result.markdown).toBe('');
-    expect(result.confidence).toBe(0);
-    expect(diagnostic.emptyText).toBe(true);
-    expect(diagnostic.confidenceSource).toBe('assumed-default');
-  });
-
-  it('treats null markdown as empty', () => {
-    const { result, diagnostic } = parseOcrResponse({ pages: [{ markdown: null }] }, 0, DEF);
-    expect(result.markdown).toBe('');
-    expect(result.confidence).toBe(0);
-    expect(diagnostic.emptyText).toBe(true);
-  });
-
-  it('coerces non-string text to string', () => {
-    const { result, diagnostic } = parseOcrResponse({ pages: [{ markdown: 42 }] }, 0, DEF);
-    expect(result.markdown).toBe('42');
-    expect(diagnostic.textFieldUsed).toBe('markdown');
-  });
-
-  it('falls back to default when confidence >100', () => {
-    const { result, diagnostic } = parseOcrResponse(
-      { pages: [{ markdown: '# m', confidence: 150 }] },
-      0,
-      DEF,
-    );
-    expect(result.confidence).toBe(DEF);
-    expect(diagnostic.confidenceSource).toBe('assumed-default');
-  });
-
-  it('falls back to default when confidence is negative', () => {
-    const { result, diagnostic } = parseOcrResponse(
-      { pages: [{ text: 'x', confidence: -0.1 }] },
-      0,
-      DEF,
-    );
-    expect(result.confidence).toBe(DEF);
-    expect(diagnostic.confidenceSource).toBe('assumed-default');
-  });
-
-  it('throws on unrecognized object shape and captures top-level keys', () => {
-    let caught: GlmOcrError | null = null;
-    try {
-      parseOcrResponse({ unrelated: 'shape' }, 0, DEF);
-    } catch (err) {
-      caught = err as GlmOcrError;
-    }
-    expect(caught).toBeInstanceOf(GlmOcrError);
-    expect(caught?.message).toContain('unrelated');
-  });
-
-  it('throws on null body', () => {
-    expect(() => parseOcrResponse(null, 0, DEF)).toThrow(GlmOcrError);
-  });
-
-  it('throws on top-level array body', () => {
-    expect(() => parseOcrResponse([], 0, DEF)).toThrow(GlmOcrError);
-  });
-
-  it('throws on empty pages array', () => {
-    expect(() => parseOcrResponse({ pages: [] }, 0, DEF)).toThrow(GlmOcrError);
-  });
-
-  it('preserves pageIndex from caller, not from page body', () => {
-    const { result } = parseOcrResponse(
-      { pages: [{ index: 99, markdown: '# m', confidence: 0.5 }] },
+  it('preserves pageIndex from caller, not from body', () => {
+    const { result } = parseOpenAiChatResponse(
+      { choices: [{ message: { content: 'x' } }] },
       7,
       DEF,
     );
     expect(result.index).toBe(7);
+  });
+
+  it('joins array-typed content parts into a single string', () => {
+    // Some OpenAI variants stream content as an array of parts. Handle
+    // both string objects and plain strings inside the array.
+    const { result } = parseOpenAiChatResponse(
+      {
+        choices: [
+          {
+            message: {
+              content: [
+                { type: 'text', text: 'first ' },
+                'middle ',
+                { type: 'text', text: 'last' },
+              ],
+            },
+          },
+        ],
+      },
+      0,
+      DEF,
+    );
+    expect(result.markdown).toBe('first middle last');
+  });
+
+  it('treats empty content as confidence 0 — distinguishes "got nothing" from "no signal"', () => {
+    const { result, diagnostic } = parseOpenAiChatResponse(
+      { choices: [{ message: { content: '' } }] },
+      0,
+      DEF,
+    );
+    expect(result.markdown).toBe('');
+    expect(result.confidence).toBe(0);
+    expect(diagnostic.emptyText).toBe(true);
+  });
+
+  it('throws on non-object body with top-level keys captured for forensics', () => {
+    let caught: GlmOcrError | null = null;
+    try {
+      parseOpenAiChatResponse('raw string body', 0, DEF);
+    } catch (err) {
+      caught = err as GlmOcrError;
+    }
+    expect(caught).toBeInstanceOf(GlmOcrError);
+    expect(caught?.message).toContain('expected JSON object');
+  });
+
+  it('throws on missing choices array', () => {
+    expect(() => parseOpenAiChatResponse({ id: 'x', object: 'chat.completion' }, 0, DEF)).toThrow(
+      /missing or empty "choices"/,
+    );
+  });
+
+  it('throws on empty choices array', () => {
+    expect(() => parseOpenAiChatResponse({ choices: [] }, 0, DEF)).toThrow(
+      /missing or empty "choices"/,
+    );
+  });
+
+  it('throws on missing message inside choices[0]', () => {
+    expect(() => parseOpenAiChatResponse({ choices: [{ finish_reason: 'stop' }] }, 0, DEF)).toThrow(
+      /message is missing/,
+    );
+  });
+
+  it('captures the top-level keys of the offending body', () => {
+    let caught: GlmOcrError | null = null;
+    try {
+      parseOpenAiChatResponse({ error: { message: 'bad request' } }, 0, DEF);
+    } catch (err) {
+      caught = err as GlmOcrError;
+    }
+    expect(caught?.message).toContain('error');
+  });
+});
+
+describe('buildOpenAiOcrRequestBody', () => {
+  it('emits the vibe-glm-ocr shape with a base64 data URL and prompt', () => {
+    const body = buildOpenAiOcrRequestBody(Buffer.from('PNG-bytes-here'), {
+      model: 'GLM-OCR',
+      prompt: 'Text Recognition:',
+    });
+    expect(body.model).toBe('GLM-OCR');
+    expect(body.temperature).toBe(0.02);
+    const messages = body.messages as Array<{ role: string; content: unknown[] }>;
+    expect(messages).toHaveLength(1);
+    expect(messages[0]?.role).toBe('user');
+    const parts = messages[0]?.content as Array<Record<string, unknown>>;
+    expect(parts[0]?.type).toBe('image_url');
+    expect((parts[0]?.image_url as { url: string }).url).toMatch(
+      /^data:image\/png;base64,UE5HLWJ5dGVzLWhlcmU=/,
+    );
+    expect(parts[1]).toEqual({ type: 'text', text: 'Text Recognition:' });
+  });
+
+  it('honors a custom prompt (Table Recognition)', () => {
+    const body = buildOpenAiOcrRequestBody(Buffer.from('x'), {
+      model: 'GLM-OCR',
+      prompt: 'Table Recognition:',
+    });
+    const messages = body.messages as Array<{ content: unknown[] }>;
+    const parts = messages[0]?.content as Array<Record<string, unknown>>;
+    expect(parts[1]?.text).toBe('Table Recognition:');
   });
 });
 
@@ -175,17 +166,39 @@ describe('ocrPdfPages', () => {
   beforeEach(() => {
     clearOcrCache();
     resetOcrCircuit();
+    resetEngineVersionCache();
   });
   afterEach(() => vi.useRealTimers());
 
+  it('POSTs the OpenAI shape to /v1/chat/completions and parses the markdown', async () => {
+    const captured: { url: string; init: RequestInit }[] = [];
+    const fetcher = buildFetcher(async (args) => {
+      captured.push(args);
+      if (args.url.endsWith('/version')) return okResponse({ version: 'glm-ocr/test' });
+      return chatResponse('# extracted markdown');
+    });
+    const r = await ocrPdfPages([Buffer.from('page-bytes')], {
+      baseUrl: 'http://x',
+      fetcher,
+      concurrency: 1,
+    });
+    expect(r.pages[0]?.markdown).toBe('# extracted markdown');
+    expect(r.parseDiagnostics[0]?.variant).toBe('openai-chat');
+    const ocrCall = captured.find((c) => c.url.endsWith('/v1/chat/completions'));
+    expect(ocrCall).toBeDefined();
+    expect(ocrCall?.url).toBe('http://x/v1/chat/completions');
+    const sent = JSON.parse(String(ocrCall?.init.body));
+    expect(sent.model).toBe('GLM-OCR');
+    expect(sent.messages[0].content[0].type).toBe('image_url');
+    expect(sent.messages[0].content[1].text).toBe('Text Recognition:');
+  });
+
   it('runs OCR over multiple pages with concurrency', async () => {
     const calls: string[] = [];
-    const fetcher = buildFetcher(async ({ init }) => {
-      const body = JSON.parse(String(init.body));
-      calls.push(body.pages[0].image_base64.slice(0, 4));
-      return okResponse({
-        pages: [{ index: 0, markdown: '# page', confidence: 0.91 }],
-      });
+    const fetcher = buildFetcher(async ({ url }) => {
+      if (url.endsWith('/version')) return okResponse({ version: 'glm-ocr/test' });
+      calls.push(url);
+      return chatResponse('# page');
     });
     const result = await ocrPdfPages([Buffer.from('aaa'), Buffer.from('bbb'), Buffer.from('ccc')], {
       baseUrl: 'http://localhost:9999',
@@ -198,15 +211,11 @@ describe('ocrPdfPages', () => {
   });
 
   it('caches results by image hash', async () => {
-    // Count only /ocr hits — /version probes are also fetched and cached
-    // separately (Phase 11 #6) but aren't on the per-image hot path.
     let ocrCount = 0;
     const fetcher = buildFetcher(async ({ url }) => {
-      if (url.endsWith('/version')) {
-        return okResponse({ version: 'glm-ocr/test' });
-      }
+      if (url.endsWith('/version')) return okResponse({ version: 'glm-ocr/test' });
       ocrCount += 1;
-      return okResponse({ pages: [{ index: 0, markdown: 'cached', confidence: 1 }] });
+      return chatResponse('cached');
     });
     const buf = Buffer.from('same-bytes');
     await ocrPdfPages([buf, buf, buf], { baseUrl: 'http://x', fetcher, concurrency: 1 });
@@ -215,10 +224,11 @@ describe('ocrPdfPages', () => {
 
   it('retries on 5xx and eventually succeeds', async () => {
     let attempts = 0;
-    const fetcher = buildFetcher(async () => {
+    const fetcher = buildFetcher(async ({ url }) => {
+      if (url.endsWith('/version')) return okResponse({ version: 'glm-ocr/test' });
       attempts += 1;
       if (attempts < 3) return failResponse(503);
-      return okResponse({ pages: [{ index: 0, markdown: 'ok', confidence: 0.5 }] });
+      return chatResponse('ok');
     });
     const result = await ocrPdfPages([Buffer.from('p')], {
       baseUrl: 'http://x',
@@ -229,7 +239,7 @@ describe('ocrPdfPages', () => {
     expect(result.pages[0]?.markdown).toBe('ok');
   });
 
-  it('throws when REDIS_URL/GLM_OCR_URL absent and no baseUrl override', async () => {
+  it('throws when GLM_OCR_URL absent and no baseUrl override', async () => {
     const orig = process.env.GLM_OCR_URL;
     delete process.env.GLM_OCR_URL;
     await expect(ocrPdfPages([Buffer.from('p')])).rejects.toThrow(/GLM_OCR_URL/);
@@ -237,7 +247,10 @@ describe('ocrPdfPages', () => {
   });
 
   it('gives up after maxAttempts on persistent 5xx', async () => {
-    const fetcher = buildFetcher(async () => failResponse(500));
+    const fetcher = buildFetcher(async ({ url }) => {
+      if (url.endsWith('/version')) return okResponse({ version: 'glm-ocr/test' });
+      return failResponse(500);
+    });
     await expect(
       ocrPdfPages([Buffer.from('p')], { baseUrl: 'http://x', fetcher, maxAttempts: 2 }),
     ).rejects.toThrow(/HTTP 500/);
@@ -245,57 +258,56 @@ describe('ocrPdfPages', () => {
 
   it('fails fast on 4xx without retrying — wrong URL or bad payload is not transient', async () => {
     let attempts = 0;
-    const fetcher = buildFetcher(async () => {
+    const fetcher = buildFetcher(async ({ url }) => {
+      if (url.endsWith('/version')) return okResponse({ version: 'glm-ocr/test' });
       attempts += 1;
       return failResponse(404);
     });
     await expect(
       ocrPdfPages([Buffer.from('p')], { baseUrl: 'http://x', fetcher, maxAttempts: 5 }),
-    ).rejects.toThrow(/GLM-OCR POST http:\/\/x\/ocr → HTTP 404/);
+    ).rejects.toThrow(/GLM-OCR POST http:\/\/x\/v1\/chat\/completions → HTTP 404/);
     expect(attempts).toBe(1);
   });
 
-  it('tolerates text alias on flat upstream payload', async () => {
+  it('honors a custom ocrPath override (escape hatch for path-rewriting proxies)', async () => {
+    const captured: string[] = [];
     const fetcher = buildFetcher(async ({ url }) => {
+      captured.push(url);
       if (url.endsWith('/version')) return okResponse({ version: 'glm-ocr/test' });
-      return okResponse({ text: '# from flat', confidence: 0.8 });
+      return chatResponse('via custom path');
     });
-    const result = await ocrPdfPages([Buffer.from('p')], { baseUrl: 'http://x', fetcher });
-    expect(result.pages[0]?.markdown).toBe('# from flat');
-    expect(result.pages[0]?.confidence).toBe(0.8);
-    expect(result.parseDiagnostics[0]?.variant).toBe('flat-page');
-    expect(result.parseDiagnostics[0]?.textFieldUsed).toBe('text');
-  });
-
-  it('returns parseDiagnostics matching page count with per-call variants', async () => {
-    let n = 0;
-    const fetcher = buildFetcher(async ({ url }) => {
-      if (url.endsWith('/version')) return okResponse({ version: 'glm-ocr/test' });
-      n += 1;
-      if (n === 1) return okResponse({ pages: [{ markdown: 'a', confidence: 0.9 }] });
-      if (n === 2) return okResponse({ data: { pages: [{ text: 'b', score: 90 }] } });
-      return okResponse({ markdown: 'c' });
-    });
-    const result = await ocrPdfPages([Buffer.from('1'), Buffer.from('2'), Buffer.from('3')], {
+    await ocrPdfPages([Buffer.from('p')], {
       baseUrl: 'http://x',
       fetcher,
-      concurrency: 1,
+      ocrPath: '/api/ocr',
     });
-    expect(result.parseDiagnostics).toHaveLength(3);
-    expect(result.parseDiagnostics.map((d) => d.variant)).toEqual([
-      'pages-array',
-      'data-pages',
-      'flat-page',
-    ]);
+    expect(captured.some((u) => u === 'http://x/api/ocr')).toBe(true);
+  });
+
+  it('honors a custom prompt (Table Recognition mode)', async () => {
+    const captured: { init: RequestInit }[] = [];
+    const fetcher = buildFetcher(async (args) => {
+      captured.push(args);
+      if (args.url.endsWith('/version')) return okResponse({ version: 'glm-ocr/test' });
+      return chatResponse('| a |');
+    });
+    await ocrPdfPages([Buffer.from('p')], {
+      baseUrl: 'http://x',
+      fetcher,
+      prompt: 'Table Recognition:',
+    });
+    const ocrCall = captured.find((c) => !String(c.init.body).includes('version'));
+    const sent = JSON.parse(String(ocrCall?.init.body));
+    expect(sent.messages[0].content[1].text).toBe('Table Recognition:');
   });
 
   it('empty markdown across many calls does not trip the circuit breaker', async () => {
     // 11 distinct image buffers (defeats per-image cache), all returning
-    // empty markdown. Soft outcomes must call onSuccess; the breaker
+    // empty content. Soft outcomes must call onSuccess; the breaker
     // (CB_THRESHOLD=10) would otherwise open and reject call 12.
     const fetcher = buildFetcher(async ({ url }) => {
       if (url.endsWith('/version')) return okResponse({ version: 'glm-ocr/test' });
-      return okResponse({ pages: [{ markdown: '', confidence: 0.9 }] });
+      return chatResponse('');
     });
     for (let i = 0; i < 11; i += 1) {
       const buf = Buffer.from(`page-${i}`);
@@ -308,26 +320,36 @@ describe('ocrPdfPages', () => {
     expect(final.pages[0]?.markdown).toBe('');
   });
 
-  it('unrecognized response shape throws GlmOcrError with key forensics', async () => {
+  it('unrecognized response shape throws GlmOcrError', async () => {
     const fetcher = buildFetcher(async ({ url }) => {
       if (url.endsWith('/version')) return okResponse({ version: 'glm-ocr/test' });
-      return okResponse({ wrong: 'shape' });
+      return okResponse({ error: { message: 'bad' } });
     });
     await expect(
       ocrPdfPages([Buffer.from('p')], { baseUrl: 'http://x', fetcher, maxAttempts: 1 }),
-    ).rejects.toThrow(/unrecognized shape.*wrong/);
+    ).rejects.toThrow(/missing or empty "choices"/);
   });
 
   it('cache hit synthesizes a from-cache diagnostic', async () => {
     const fetcher = buildFetcher(async ({ url }) => {
       if (url.endsWith('/version')) return okResponse({ version: 'glm-ocr/test' });
-      return okResponse({ pages: [{ markdown: 'hot', confidence: 0.7 }] });
+      return chatResponse('hot');
     });
     const buf = Buffer.from('repeat');
     const first = await ocrPdfPages([buf], { baseUrl: 'http://x', fetcher });
-    expect(first.parseDiagnostics[0]?.variant).toBe('pages-array');
+    expect(first.parseDiagnostics[0]?.variant).toBe('openai-chat');
     const second = await ocrPdfPages([buf], { baseUrl: 'http://x', fetcher });
     expect(second.parseDiagnostics[0]?.variant).toBe('from-cache');
     expect(second.pages[0]?.markdown).toBe('hot');
+  });
+
+  it('degrades engineVersion to "glm-ocr/unknown" when /version 404s (llama-server has no /version)', async () => {
+    const fetcher = buildFetcher(async ({ url }) => {
+      if (url.endsWith('/version')) return failResponse(404);
+      return chatResponse('still works');
+    });
+    const result = await ocrPdfPages([Buffer.from('p')], { baseUrl: 'http://x', fetcher });
+    expect(result.engineVersion).toBe('glm-ocr/unknown');
+    expect(result.pages[0]?.markdown).toBe('still works');
   });
 });

@@ -26,6 +26,12 @@ interface EngineConfig {
   source: 'db' | 'env' | 'unset';
   timeoutMs?: number;
   concurrency?: number;
+  // Optional sub-path overrides (currently only meaningful for
+  // glm-ocr). null / undefined means "use the client default" — the
+  // edit form treats both as "unset".
+  ocrPath?: string | null;
+  healthPath?: string | null;
+  versionPath?: string | null;
 }
 
 type EngineKey = 'glm-ocr' | 'llm-gateway';
@@ -114,7 +120,8 @@ export function EnginesAdminPage() {
         status={deps.glmOcr}
         config={cfgs?.['glm-ocr'] ?? null}
         showAdvanced
-        notes="Zhipu GLM-OCR over HTTP. Used only when the PDF lacks a text layer. Standalone: typically http://glm-ocr:8080 (compose) or http://localhost:8080 (host). Appliance: shared service URL."
+        showPaths
+        notes="Zhipu GLM-OCR served by llama.cpp's llama-server (image: vibe-glm-ocr). OpenAI-compatible chat-completions API; one POST per page. Used only when the PDF lacks a text layer. URL is typically http://vibe-glm-ocr:8090 (appliance) or http://glm-ocr:8090 (standalone). Path defaults — /v1/chat/completions for OCR, /health for liveness — match the upstream image; only override if you're behind a path-rewriting proxy. /version is best-effort: llama-server doesn't actually expose it, so engineVersion logs 'glm-ocr/unknown'."
       />
 
       <EditableEngine
@@ -238,6 +245,7 @@ function EditableEngine({
   config,
   notes,
   showAdvanced = false,
+  showPaths = false,
 }: {
   engine: EngineKey;
   name: string;
@@ -248,12 +256,19 @@ function EditableEngine({
   config: EngineConfig | null;
   notes?: string | undefined;
   showAdvanced?: boolean | undefined;
+  // Exposes the `/ocr`, `/health`, `/version` path inputs. Currently
+  // only relevant for glm-ocr, but the prop keeps the component
+  // generic for future engines whose path varies by deployment.
+  showPaths?: boolean | undefined;
 }) {
   const qc = useQueryClient();
   const toast = useToast();
   const [url, setUrl] = useState('');
   const [timeoutMs, setTimeoutMs] = useState('');
   const [concurrency, setConcurrency] = useState('');
+  const [ocrPath, setOcrPath] = useState('');
+  const [healthPath, setHealthPath] = useState('');
+  const [versionPath, setVersionPath] = useState('');
 
   // Hydrate inputs whenever the loaded config changes (after a save the
   // server returns the new value, which may differ from what was typed
@@ -263,6 +278,9 @@ function EditableEngine({
     setUrl(config.source === 'db' ? (config.url ?? '') : '');
     setTimeoutMs(config.timeoutMs ? String(config.timeoutMs) : '');
     setConcurrency(config.concurrency ? String(config.concurrency) : '');
+    setOcrPath(config.ocrPath ?? '');
+    setHealthPath(config.healthPath ?? '');
+    setVersionPath(config.versionPath ?? '');
   }, [config]);
 
   const save = useMutation({
@@ -270,6 +288,9 @@ function EditableEngine({
       url?: string | null;
       timeoutMs?: number | null;
       concurrency?: number | null;
+      ocrPath?: string | null;
+      healthPath?: string | null;
+      versionPath?: string | null;
     }) => api.post<EngineConfig>(`/api/admin/engines/${engine}`, input),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['admin', 'engines'] });
@@ -289,8 +310,14 @@ function EditableEngine({
 
   const onSave = async (e: FormEvent): Promise<void> => {
     e.preventDefault();
-    const input: { url?: string | null; timeoutMs?: number | null; concurrency?: number | null } =
-      {};
+    const input: {
+      url?: string | null;
+      timeoutMs?: number | null;
+      concurrency?: number | null;
+      ocrPath?: string | null;
+      healthPath?: string | null;
+      versionPath?: string | null;
+    } = {};
     const trimmed = url.trim();
     if (trimmed.length === 0) input.url = null;
     else input.url = trimmed;
@@ -299,6 +326,12 @@ function EditableEngine({
       input.timeoutMs = t.length === 0 ? null : Number.parseInt(t, 10);
       const c = concurrency.trim();
       input.concurrency = c.length === 0 ? null : Number.parseInt(c, 10);
+    }
+    if (showPaths) {
+      const norm = (s: string): string | null => (s.trim().length === 0 ? null : s.trim());
+      input.ocrPath = norm(ocrPath);
+      input.healthPath = norm(healthPath);
+      input.versionPath = norm(versionPath);
     }
     try {
       await save.mutateAsync(input);
@@ -390,6 +423,40 @@ function EditableEngine({
                 value={concurrency}
                 onChange={(e) => setConcurrency(e.target.value)}
                 className="mt-1 w-full rounded-md border border-surface-muted px-3 py-1.5 text-sm tabular-nums"
+              />
+            </label>
+          </div>
+        ) : null}
+        {showPaths ? (
+          <div className="grid grid-cols-3 gap-2">
+            <label className="block text-xs text-ink-muted">
+              OCR path
+              <input
+                type="text"
+                placeholder="/ocr"
+                value={ocrPath}
+                onChange={(e) => setOcrPath(e.target.value)}
+                className="mt-1 w-full rounded-md border border-surface-muted px-3 py-1.5 text-sm font-mono"
+              />
+            </label>
+            <label className="block text-xs text-ink-muted">
+              Health path
+              <input
+                type="text"
+                placeholder="/health"
+                value={healthPath}
+                onChange={(e) => setHealthPath(e.target.value)}
+                className="mt-1 w-full rounded-md border border-surface-muted px-3 py-1.5 text-sm font-mono"
+              />
+            </label>
+            <label className="block text-xs text-ink-muted">
+              Version path
+              <input
+                type="text"
+                placeholder="/version"
+                value={versionPath}
+                onChange={(e) => setVersionPath(e.target.value)}
+                className="mt-1 w-full rounded-md border border-surface-muted px-3 py-1.5 text-sm font-mono"
               />
             </label>
           </div>

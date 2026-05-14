@@ -8,7 +8,7 @@ x-api-env: &api-env
   PORT: 4000
   DATABASE_URL: postgres://vibetc:vibetc@postgres:5432/vibetc?schema=vibetc
   REDIS_URL: redis://redis:6379
-  GLM_OCR_URL: http://glm-ocr:8080
+  GLM_OCR_URL: http://glm-ocr:8090
   LLM_GATEWAY_URL: http://llm-gateway:8000
   LLM_PROVIDER: local
   LLM_MODEL_ID: qwen3-8b
@@ -55,7 +55,7 @@ services:
     image: vibe/glm-ocr-server:latest
     profiles: ['standalone']
     healthcheck:
-      test: ['CMD-SHELL', 'wget -q -O - http://localhost:8080/health || exit 1']
+      test: ['CMD-SHELL', 'wget -q -O - http://localhost:8090/health || exit 1']
       interval: 5s
       timeout: 5s
       retries: 30

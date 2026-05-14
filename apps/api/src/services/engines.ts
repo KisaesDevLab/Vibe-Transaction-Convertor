@@ -19,6 +19,13 @@ interface EngineSettingKeys {
   url: string;
   timeoutMs?: string;
   concurrency?: string;
+  // Optional sub-path overrides — only meaningful for HTTP-shaped
+  // engines whose endpoint names diverge between the standalone image
+  // and the appliance's shared service (most notably GLM-OCR). NULL or
+  // unset → the client-side defaults apply.
+  ocrPath?: string;
+  healthPath?: string;
+  versionPath?: string;
 }
 
 const KEYS: Record<EngineKey, EngineSettingKeys> = {
@@ -26,6 +33,9 @@ const KEYS: Record<EngineKey, EngineSettingKeys> = {
     url: 'engine.glm_ocr.url',
     timeoutMs: 'engine.glm_ocr.timeout_ms',
     concurrency: 'engine.glm_ocr.concurrency',
+    ocrPath: 'engine.glm_ocr.ocr_path',
+    healthPath: 'engine.glm_ocr.health_path',
+    versionPath: 'engine.glm_ocr.version_path',
   },
   'llm-gateway': {
     url: 'engine.llm_gateway.url',
@@ -42,6 +52,12 @@ export interface EngineConfig {
   source: 'db' | 'env' | 'unset';
   timeoutMs?: number | undefined;
   concurrency?: number | undefined;
+  // Sub-path overrides. Returned for the engines that declare them in
+  // KEYS (currently glm-ocr only). null / undefined means "use the
+  // client default" (typically `/ocr`, `/health`, `/version`).
+  ocrPath?: string | null | undefined;
+  healthPath?: string | null | undefined;
+  versionPath?: string | null | undefined;
 }
 
 const TTL_MS = 60_000;
@@ -90,6 +106,18 @@ const loadConfig = async (db: Db, engine: EngineKey): Promise<EngineConfig> => {
       if (Number.isFinite(n)) out.concurrency = n;
     }
   }
+  if (keys.ocrPath) {
+    const v = await readSetting(db, keys.ocrPath);
+    if (v !== null && v.length > 0) out.ocrPath = v;
+  }
+  if (keys.healthPath) {
+    const v = await readSetting(db, keys.healthPath);
+    if (v !== null && v.length > 0) out.healthPath = v;
+  }
+  if (keys.versionPath) {
+    const v = await readSetting(db, keys.versionPath);
+    if (v !== null && v.length > 0) out.versionPath = v;
+  }
   return out;
 };
 
@@ -118,7 +146,24 @@ export interface SetEngineInput {
   url?: string | null;
   timeoutMs?: number | null;
   concurrency?: number | null;
+  // null clears the override (client default applies). Each path must
+  // start with "/" — the client concatenates it onto baseUrl.
+  ocrPath?: string | null;
+  healthPath?: string | null;
+  versionPath?: string | null;
 }
+
+const normalisePath = (raw: string | null): string | null => {
+  if (raw === null) return null;
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) return null;
+  if (!trimmed.startsWith('/')) {
+    throw new Error('path must start with "/" (e.g. /ocr, /v1/ocr)');
+  }
+  // Strip a trailing slash so concatenation with the baseUrl is
+  // predictable (`baseUrl/ocr` vs `baseUrl/ocr/`).
+  return trimmed.replace(/\/+$/, '');
+};
 
 const writeSetting = async (
   db: Db,
@@ -170,6 +215,15 @@ export const setEngineConfig = async (
           : null;
     await writeSetting(db, keys.concurrency, v, actorId);
   }
+  if (input.ocrPath !== undefined && keys.ocrPath) {
+    await writeSetting(db, keys.ocrPath, normalisePath(input.ocrPath), actorId);
+  }
+  if (input.healthPath !== undefined && keys.healthPath) {
+    await writeSetting(db, keys.healthPath, normalisePath(input.healthPath), actorId);
+  }
+  if (input.versionPath !== undefined && keys.versionPath) {
+    await writeSetting(db, keys.versionPath, normalisePath(input.versionPath), actorId);
+  }
   // Engine URL is read by the LLM provider (for engine.llm_gateway.url)
   // and the OCR client (for engine.glm_ocr.url); drop both caches.
   invalidateEngineCache();
@@ -189,6 +243,15 @@ export const clearEngineConfig = async (
   }
   if (keys.concurrency) {
     await db.delete(systemSettings).where(eq(systemSettings.key, keys.concurrency));
+  }
+  if (keys.ocrPath) {
+    await db.delete(systemSettings).where(eq(systemSettings.key, keys.ocrPath));
+  }
+  if (keys.healthPath) {
+    await db.delete(systemSettings).where(eq(systemSettings.key, keys.healthPath));
+  }
+  if (keys.versionPath) {
+    await db.delete(systemSettings).where(eq(systemSettings.key, keys.versionPath));
   }
   void actorId; // audit-logged at the route layer
   invalidateEngineCache();

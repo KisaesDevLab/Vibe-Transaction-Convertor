@@ -58,14 +58,16 @@ const checkRedis = async (): Promise<DependencyStatus> => {
 const checkHttpHealth = async (
   label: string,
   base: string | undefined,
+  healthPath: string = '/health',
 ): Promise<DependencyStatus> => {
   if (!base) return { status: 'unconfigured' };
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 1500);
+  const path = healthPath.startsWith('/') ? healthPath : `/${healthPath}`;
   try {
     const latencyMs = await time(async () => {
-      const res = await fetch(`${base.replace(/\/$/, '')}/health`, { signal: controller.signal });
-      if (!res.ok) throw new Error(`${label} /health returned ${res.status}`);
+      const res = await fetch(`${base.replace(/\/$/, '')}${path}`, { signal: controller.signal });
+      if (!res.ok) throw new Error(`${label} ${path} returned ${res.status}`);
     });
     return { status: 'ok', latencyMs };
   } catch (err) {
@@ -92,7 +94,11 @@ export const healthRouter = (): Router => {
     const [postgres, redis, glmOcr, llmGateway] = await Promise.all([
       checkPostgres(),
       checkRedis(),
-      checkHttpHealth('glm-ocr', glmOcrCfg?.url ?? process.env.GLM_OCR_URL),
+      checkHttpHealth(
+        'glm-ocr',
+        glmOcrCfg?.url ?? process.env.GLM_OCR_URL,
+        glmOcrCfg?.healthPath ?? process.env.GLM_OCR_HEALTH_PATH ?? '/health',
+      ),
       checkHttpHealth('llm-gateway', llmGwCfg?.url ?? process.env.LLM_GATEWAY_URL),
     ]);
     const dependencies = { postgres, redis, glmOcr, llmGateway };

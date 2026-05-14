@@ -647,8 +647,14 @@ export const adminRouter = (): Router => {
       const engine = String(req.params.engine);
       if (!isEngineKey(engine)) throw new ValidationError(`unknown engine: ${engine}`);
       const body = req.body ?? {};
-      const input: { url?: string | null; timeoutMs?: number | null; concurrency?: number | null } =
-        {};
+      const input: {
+        url?: string | null;
+        timeoutMs?: number | null;
+        concurrency?: number | null;
+        ocrPath?: string | null;
+        healthPath?: string | null;
+        versionPath?: string | null;
+      } = {};
       if (body.url !== undefined) {
         input.url = body.url === null || body.url === '' ? null : String(body.url).trim();
       }
@@ -660,7 +666,24 @@ export const adminRouter = (): Router => {
         input.concurrency =
           body.concurrency === null ? null : Number.parseInt(String(body.concurrency), 10) || null;
       }
-      const next = await setEngineConfig(db, engine, input, req.user!.id);
+      // Path overrides — glm-ocr only. Service-layer normalisation
+      // throws on bad shapes (must start with "/"); surface that as a
+      // ValidationError so the admin UI gets a clean toast.
+      const parsePath = (field: 'ocrPath' | 'healthPath' | 'versionPath'): void => {
+        const raw = body[field];
+        if (raw === undefined) return;
+        input[field] = raw === null || raw === '' ? null : String(raw).trim();
+      };
+      parsePath('ocrPath');
+      parsePath('healthPath');
+      parsePath('versionPath');
+      let nextConfig;
+      try {
+        nextConfig = await setEngineConfig(db, engine, input, req.user!.id);
+      } catch (err) {
+        throw new ValidationError((err as Error).message);
+      }
+      const next = nextConfig;
       await writeAudit(db, {
         actorUserId: req.user!.id,
         entityType: 'system_settings',
@@ -704,7 +727,10 @@ export const adminRouter = (): Router => {
         return;
       }
       if (engine === 'glm-ocr') {
-        const result = await probeGlmOcrHealth({ baseUrl: cfg.url });
+        const result = await probeGlmOcrHealth({
+          baseUrl: cfg.url,
+          ...(cfg.healthPath ? { healthPath: cfg.healthPath } : {}),
+        });
         res.json({ ok: result.ok, source: cfg.source, detail: result.detail ?? null });
         return;
       }

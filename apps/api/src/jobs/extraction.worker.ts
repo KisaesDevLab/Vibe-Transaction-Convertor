@@ -671,6 +671,9 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
       ...(ocrConfig.url ? { baseUrl: ocrConfig.url } : {}),
       ...(ocrConfig.timeoutMs ? { timeoutMs: ocrConfig.timeoutMs } : {}),
       ...(ocrConfig.concurrency ? { concurrency: ocrConfig.concurrency } : {}),
+      ...(ocrConfig.ocrPath ? { ocrPath: ocrConfig.ocrPath } : {}),
+      ...(ocrConfig.healthPath ? { healthPath: ocrConfig.healthPath } : {}),
+      ...(ocrConfig.versionPath ? { versionPath: ocrConfig.versionPath } : {}),
     });
     lastOcrResponse = ocr;
     return ocr.pages
