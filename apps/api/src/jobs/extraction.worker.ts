@@ -545,6 +545,52 @@ const summarizeOcrDiagnostics = (ocr: OcrResponse): Record<string, unknown> => {
   };
 };
 
+// Walk the error.cause chain (Node 20+) flattening into a small array
+// of {class, message} entries so the audit log captures the original
+// DOMException / undici / network error along with whatever we wrapped
+// it in. Capped at 4 levels so a pathological cycle can't blow up the
+// row. Stack traces are kept separate (and truncated) so a multi-MB
+// trace doesn't dwarf the rest of the payload.
+const describeError = (err: Error): Record<string, unknown> => {
+  const chain: Array<{ class: string; message: string; name: string }> = [];
+  let cursor: unknown = err;
+  for (let i = 0; i < 4 && cursor instanceof Error; i += 1) {
+    chain.push({
+      class: cursor.constructor?.name ?? 'Error',
+      name: cursor.name,
+      message: cursor.message,
+    });
+    cursor = (cursor as Error & { cause?: unknown }).cause;
+  }
+  const stack = typeof err.stack === 'string' ? err.stack.split('\n').slice(0, 8).join('\n') : null;
+  const out: Record<string, unknown> = {
+    class: err.constructor?.name ?? 'Error',
+    name: err.name,
+    message: err.message,
+  };
+  if (chain.length > 1) out.causeChain = chain.slice(1);
+  if (stack) out.stack = stack;
+  return out;
+};
+
+// Coarse-grained extraction phases. Tracked so the outer failure-audit
+// row can name the call that blew up rather than just reporting
+// `errorClass: 'DOMException'`. Phase names match the audit payload
+// `phase` field; keep them stable so operators can grep historical
+// rows. `init` is the slot before `preprocessing` proper (DB lookups,
+// PDF analysis); `done` only appears on the success-path trace.
+type ExtractionPhase =
+  | 'init'
+  | 'preprocessing'
+  | 'text-markdown'
+  | 'ocr-markdown'
+  | 'extracting'
+  | 'ocr-fallback-markdown'
+  | 'text-fallback-markdown'
+  | 'reconciling'
+  | 'persisting'
+  | 'done';
+
 export const processExtraction = async (data: ExtractionJobData): Promise<void> => {
   const stmtId = data.statementId;
   const workerStartedAt = Date.now();
@@ -567,158 +613,20 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
   let textFallbackFired = false;
   let lastOcrResponse: OcrResponse | null = null;
   let phaseStart = Date.now();
-
-  await setStatus(stmtId, 'preprocessing');
-
-  // Look up the account up front so TRNTYPE inference can apply the
-  // credit-card sign convention (Phase 17 — `isCreditCard` flag).
-  const acctRows = await db.select().from(accounts).where(eq(accounts.id, data.accountId));
-  const isCreditCard = acctRows[0]?.accountType === 'CREDITCARD';
-
-  // Phase 15 item 4b: if the operator already confirmed a date format
-  // (after a previous AMBIGUOUS extraction), pass that through to the
-  // LLM so it interprets the statement consistently.
-  const stmtRows = await db.select().from(statements).where(eq(statements.id, stmtId));
-  const dateFormatOverride =
-    stmtRows[0]?.sourceDateFormatUserConfirmed === true &&
-    (stmtRows[0]?.sourceDateFormat === 'MDY' ||
-      stmtRows[0]?.sourceDateFormat === 'DMY' ||
-      stmtRows[0]?.sourceDateFormat === 'YMD')
-      ? stmtRows[0].sourceDateFormat
-      : undefined;
-
-  // pdfjs-dist takes ownership of the underlying ArrayBuffer per call,
-  // so we re-read the file before each pdfjs call rather than passing
-  // the same Buffer twice (which would detach the ArrayBuffer and
-  // throw "Cannot perform Construct on a detached ArrayBuffer").
-  const analysis = await analyzePdfFromBuffer(await readFile(data.sourcePdfPath));
-
-  // Phase 14: when this statement is a per-account slice (page_range
-  // set), filter pages to that range BEFORE handing markdown to the LLM.
-  // The LLM sees one account's slice as if it were the whole PDF.
-  const pageRange = stmtRows[0]?.pageRange ?? null;
-  const inRange = (pageIndex0: number): boolean => {
-    if (!pageRange) return true;
-    const page1 = pageIndex0 + 1;
-    return page1 >= pageRange.start && page1 <= pageRange.end;
-  };
-
-  // PDF processing strategy resolves the per-statement override against
-  // the firm default. Strategy decides which extraction method to try
-  // first (text-layer vs OCR) and whether to fall back to OCR when the
-  // LLM stack rejects the text-layer input.
-  const strategy = await resolvePdfStrategy(db, stmtRows[0]?.processingStrategyOverride);
-  let method: ExtractionMethod;
-  if (strategy === 'force-ocr' || strategy === 'auto-text-fallback') {
-    // auto-text-fallback starts with OCR and only falls back to the
-    // text layer if the OCR-fed LLM call rejects. Treated as OCR-first
-    // here; the fallback branch below handles the retry.
-    method = 'ocr';
-  } else if (strategy === 'force-text') {
-    if (!analysis.hasTextLayer) {
-      throw new Error(
-        'force-text strategy requested but this PDF has no text layer — ' +
-          'switch to auto / force-ocr / auto-ocr-fallback / auto-text-fallback',
-      );
-    }
-    method = 'text';
-  } else {
-    method = routePdf(analysis);
-  }
-
-  timing.preprocessMs = Date.now() - phaseStart;
-  phaseStart = Date.now();
-
-  await setStatus(stmtId, method === 'ocr' ? 'ocr' : 'extracting', {
-    extractionMethod: method,
-    sourcePdfPages: analysis.pageCount,
-  });
-
-  const produceTextMarkdown = async (): Promise<string> => {
-    const pages = await extractTextLayerFromBuffer(await readFile(data.sourcePdfPath));
-    const scoped = pages.filter((p) => inRange(p.index));
-    // Persist detected splits so the UI can offer a split-or-acknowledge
-    // flow. Only run detection on un-split (whole-PDF) extractions —
-    // sliced re-extractions are by definition single-account already.
-    if (!pageRange) {
-      const splitInfo = detectMultiAccount(pages);
-      if (splitInfo.multiAccount) {
-        await db
-          .update(statements)
-          .set({ detectedSplits: splitInfo, updatedAt: sql`now()` })
-          .where(eq(statements.id, stmtId));
-        logger.warn(
-          { stmtId, splits: splitInfo.splits },
-          'multi-account PDF detected; persisted splits for UI confirmation',
-        );
-      }
-    }
-    return scoped.map((p) => `# Page ${p.index + 1}\n\n${p.text}`).join('\n\n');
-  };
-
-  const produceOcrMarkdown = async (): Promise<string> => {
-    // OCR path. rasterizePdf shells out to pdftoppm (poppler-utils).
-    // The standalone Dockerfile installs poppler; on host machines the
-    // operator needs `brew install poppler` (or apt/choco equivalent).
-    const rasters = await rasterizePdf(data.sourcePdfPath, { dpi: 300 });
-    const scopedRasters = rasters.filter((r) => inRange(r.index));
-    const images = await Promise.all(scopedRasters.map(async (r) => readFile(r.pngPath)));
-    // DB-backed URL falls back to GLM_OCR_URL env. Resolved per call so
-    // an admin tweak via /admin/engines doesn't require a restart.
-    const ocrConfig = await getEngineConfig(db, 'glm-ocr');
-    const ocr = await ocrPdfPages(images, {
-      cache: redisOcrCache,
-      ...(ocrConfig.url ? { baseUrl: ocrConfig.url } : {}),
-      ...(ocrConfig.timeoutMs ? { timeoutMs: ocrConfig.timeoutMs } : {}),
-      ...(ocrConfig.concurrency ? { concurrency: ocrConfig.concurrency } : {}),
-      ...(ocrConfig.ocrPath ? { ocrPath: ocrConfig.ocrPath } : {}),
-      ...(ocrConfig.healthPath ? { healthPath: ocrConfig.healthPath } : {}),
-      ...(ocrConfig.versionPath ? { versionPath: ocrConfig.versionPath } : {}),
-    });
-    lastOcrResponse = ocr;
-    return ocr.pages
-      .map((p, i) => `# Page ${(scopedRasters[i]?.index ?? p.index) + 1}\n\n${p.markdown}`)
-      .join('\n\n');
-  };
-
-  let markdown = method === 'text' ? await produceTextMarkdown() : await produceOcrMarkdown();
-  timing.markdownMs = Date.now() - phaseStart;
-
-  await checkCancelled(stmtId);
-  await setStatus(stmtId, 'extracting');
-
-  // Two-provider orchestration. Each attempt runs the LLM call + repair
-  // pass in memory without persisting anything; the orchestrator picks
-  // the better outcome and commits it once at the end.
-  const policy = await resolveProviderPolicy(db);
-  const { primary, secondary } = providerOrderFor(policy);
-  let attemptCtx: AttemptContext = {
-    stmtId,
-    markdown,
-    ...(dateFormatOverride ? { dateFormatOverride } : {}),
-  };
-
-  const persistAmbiguousHalt = async (a: AttemptOutcome): Promise<void> => {
-    await db
-      .update(statements)
-      .set({
-        status: 'awaiting-locale-confirmation',
-        sourceDateFormat: 'AMBIGUOUS',
-        sourceDateFormatConfidence: a.dateFormatConfidence,
-        llmProvider: a.providerId,
-        llmInputTokens: a.totalInputTokens,
-        llmOutputTokens: a.totalOutputTokens,
-        llmCallCount: a.totalCallCount,
-        llmCostMicros: a.totalCostMicros,
-        llmModelVersion: a.modelVersion,
-        updatedAt: sql`now()`,
-      })
-      .where(eq(statements.id, stmtId));
-    logger.info(
-      { stmtId, providerId: a.providerId },
-      'extraction halted: ambiguous source date format — awaiting operator confirmation',
-    );
-  };
+  // Phase tracker — updated at each transition so the failure audit
+  // can say "we were in `ocr-markdown` when this fired".
+  let currentPhase: ExtractionPhase = 'init';
+  // Hoisted so the outer catch can include them in the failure trace
+  // even when an error fires mid-extraction. Each starts undefined
+  // and gets populated as the corresponding phase begins.
+  let analysis: Awaited<ReturnType<typeof analyzePdfFromBuffer>> | undefined;
+  let strategy: Awaited<ReturnType<typeof resolvePdfStrategy>> | undefined;
+  let method: ExtractionMethod | undefined;
+  let pageRange: { start: number; end: number } | null = null;
+  let markdown: string = '';
+  let policy: Awaited<ReturnType<typeof resolveProviderPolicy>> | undefined;
+  let primary: ProviderId | undefined;
+  let secondary: ProviderId | null | undefined;
 
   // Build the trace payload that every termination point writes to
   // audit_log. The payload is the operator's "what just happened"
@@ -727,31 +635,36 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
   // and phase timings. Markdown text itself is NOT included — only
   // its size — to keep the audit row under JSONB's practical
   // payload limit and avoid PII leakage to audit-viewer roles.
+  // Hoisted above the try/catch so the failure-path can call it with
+  // whatever state has been populated so far.
   const buildTrace = (
     outcome: 'success' | 'failed' | 'halted-ambiguous',
     finalAttempt?: AttemptOutcome,
     finalError?: Error | null,
   ): Record<string, unknown> => ({
     outcome,
-    pdf: {
-      hash: data.sourcePdfHash.slice(0, 12),
-      pages: analysis.pageCount,
-      hasTextLayer: analysis.hasTextLayer,
-      textLayerCoverage: Number(analysis.textLayerCoverage.toFixed(3)),
-      avgCharsPerPage: Math.round(analysis.avgCharsPerPage),
-      suspectedScan: analysis.suspectedScan,
-      pageRange: pageRange ? { start: pageRange.start, end: pageRange.end } : null,
-    },
+    phase: currentPhase,
+    pdf: analysis
+      ? {
+          hash: data.sourcePdfHash.slice(0, 12),
+          pages: analysis.pageCount,
+          hasTextLayer: analysis.hasTextLayer,
+          textLayerCoverage: Number(analysis.textLayerCoverage.toFixed(3)),
+          avgCharsPerPage: Math.round(analysis.avgCharsPerPage),
+          suspectedScan: analysis.suspectedScan,
+          pageRange: pageRange ? { start: pageRange.start, end: pageRange.end } : null,
+        }
+      : { hash: data.sourcePdfHash.slice(0, 12), pageRange: null },
     strategy: {
-      configured: strategy,
-      effectiveMethod: method,
+      configured: strategy ?? null,
+      effectiveMethod: method ?? null,
       ocrFallbackFired,
       textFallbackFired,
     },
     providerPolicy: {
-      policy,
-      primary,
-      secondary,
+      policy: policy ?? null,
+      primary: primary ?? null,
+      secondary: secondary ?? null,
       providerFallbackFired,
     },
     markdown: {
@@ -778,317 +691,545 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
           },
         }
       : {}),
-    ...(finalError
-      ? { error: { class: finalError.constructor?.name ?? 'Error', message: finalError.message } }
-      : {}),
+    ...(finalError ? { error: describeError(finalError) } : {}),
   });
 
-  // Provider-fallback orchestration. Returns the better of (primary,
-  // secondary) outcomes, or just the primary when no secondary or no
-  // rejection. AMBIGUOUS short-circuits — the caller persists halt
-  // state and returns. Pure orchestration; no statement-row writes
-  // besides the existing extraction-fallback audit log.
-  const runProviderFallback = async (
-    ctx: AttemptContext,
-    inputMethod: 'text-layer' | 'ocr',
-  ): Promise<AttemptOutcome> => {
-    const firstStart = Date.now();
-    const first = await attemptExtraction(primary, ctx);
-    attempts.push(traceEntryFor(first, inputMethod, Date.now() - firstStart));
-    if (first.dateFormat === 'AMBIGUOUS' && !ctx.dateFormatOverride) return first;
-    if (first.rejection === null || secondary === null) return first;
-    providerFallbackFired = true;
-    await writeAudit(db, {
-      entityType: 'statement',
-      entityId: stmtId,
-      action: 'statement.extraction-fallback',
-      payload: {
-        from: first.providerId,
-        to: secondary,
-        reason: first.rejection,
-        inputMethod,
-        ...(first.error ? { primaryError: first.error.message } : {}),
-      },
-    });
-    logger.info(
-      { stmtId, from: first.providerId, to: secondary, reason: first.rejection, inputMethod },
-      'falling back to secondary provider',
-    );
-    await setStatus(stmtId, 'extracting');
-    const secondStart = Date.now();
-    const second = await attemptExtraction(secondary, ctx);
-    attempts.push(traceEntryFor(second, inputMethod, Date.now() - secondStart));
-    if (second.dateFormat === 'AMBIGUOUS' && !ctx.dateFormatOverride) return second;
-    return pickBetterAttempt(first, second);
-  };
+  try {
+    await setStatus(stmtId, 'preprocessing');
+    currentPhase = 'preprocessing';
 
-  const llmStart = Date.now();
-  let chosen = await runProviderFallback(attemptCtx, method === 'ocr' ? 'ocr' : 'text-layer');
-  timing.llmMs = Date.now() - llmStart;
+    // Look up the account up front so TRNTYPE inference can apply the
+    // credit-card sign convention (Phase 17 — `isCreditCard` flag).
+    const acctRows = await db.select().from(accounts).where(eq(accounts.id, data.accountId));
+    const isCreditCard = acctRows[0]?.accountType === 'CREDITCARD';
 
-  if (chosen.dateFormat === 'AMBIGUOUS' && !dateFormatOverride) {
-    await persistAmbiguousHalt(chosen);
-    await writeAudit(db, {
-      entityType: 'statement',
-      entityId: stmtId,
-      action: 'statement.extraction-trace',
-      payload: buildTrace('halted-ambiguous', chosen),
-    });
-    return;
-  }
+    // Phase 15 item 4b: if the operator already confirmed a date format
+    // (after a previous AMBIGUOUS extraction), pass that through to the
+    // LLM so it interprets the statement consistently.
+    const stmtRows = await db.select().from(statements).where(eq(statements.id, stmtId));
+    const dateFormatOverride =
+      stmtRows[0]?.sourceDateFormatUserConfirmed === true &&
+      (stmtRows[0]?.sourceDateFormat === 'MDY' ||
+        stmtRows[0]?.sourceDateFormat === 'DMY' ||
+        stmtRows[0]?.sourceDateFormat === 'YMD')
+        ? stmtRows[0].sourceDateFormat
+        : undefined;
 
-  // OCR fallback. Only fires when:
-  //   - strategy is `auto-ocr-fallback`, and
-  //   - we tried text-layer first (otherwise there's nothing to fall
-  //     back to), and
-  //   - the provider stack rejected with any of the four triggers.
-  // Provider fallback runs *inside* each input attempt — so the OCR
-  // retry also exercises the secondary provider via runProviderFallback.
-  // Worst case: 4 LLM calls (text×{primary,secondary} → ocr×{primary,secondary}).
-  if (strategy === 'auto-ocr-fallback' && method === 'text' && chosen.rejection !== null) {
-    ocrFallbackFired = true;
-    await writeAudit(db, {
-      entityType: 'statement',
-      entityId: stmtId,
-      action: 'statement.input-fallback',
-      payload: {
-        from: 'text-layer',
-        to: 'ocr',
-        reason: chosen.rejection,
-        ...(chosen.error ? { primaryError: chosen.error.message } : {}),
-      },
-    });
-    logger.info(
-      { stmtId, reason: chosen.rejection },
-      'text-layer extraction rejected — retrying with GLM-OCR',
-    );
-    await setStatus(stmtId, 'ocr', { extractionMethod: 'hybrid' });
-    const ocrMarkdownStart = Date.now();
-    markdown = await produceOcrMarkdown();
-    timing.ocrFallbackMarkdownMs = Date.now() - ocrMarkdownStart;
-    attemptCtx = { ...attemptCtx, markdown };
-    await setStatus(stmtId, 'extracting');
-    const ocrLlmStart = Date.now();
-    const ocrChosen = await runProviderFallback(attemptCtx, 'ocr');
-    timing.llmMs += Date.now() - ocrLlmStart;
-    if (ocrChosen.dateFormat === 'AMBIGUOUS' && !dateFormatOverride) {
-      await persistAmbiguousHalt(ocrChosen);
-      await writeAudit(db, {
-        entityType: 'statement',
-        entityId: stmtId,
-        action: 'statement.extraction-trace',
-        payload: buildTrace('halted-ambiguous', ocrChosen),
-      });
-      return;
+    // pdfjs-dist takes ownership of the underlying ArrayBuffer per call,
+    // so we re-read the file before each pdfjs call rather than passing
+    // the same Buffer twice (which would detach the ArrayBuffer and
+    // throw "Cannot perform Construct on a detached ArrayBuffer").
+    analysis = await analyzePdfFromBuffer(await readFile(data.sourcePdfPath));
+
+    // Phase 14: when this statement is a per-account slice (page_range
+    // set), filter pages to that range BEFORE handing markdown to the LLM.
+    // The LLM sees one account's slice as if it were the whole PDF.
+    pageRange = stmtRows[0]?.pageRange ?? null;
+    const inRange = (pageIndex0: number): boolean => {
+      if (!pageRange) return true;
+      const page1 = pageIndex0 + 1;
+      return page1 >= pageRange.start && page1 <= pageRange.end;
+    };
+
+    // PDF processing strategy resolves the per-statement override against
+    // the firm default. Strategy decides which extraction method to try
+    // first (text-layer vs OCR) and whether to fall back to OCR when the
+    // LLM stack rejects the text-layer input.
+    strategy = await resolvePdfStrategy(db, stmtRows[0]?.processingStrategyOverride);
+    if (strategy === 'force-ocr' || strategy === 'auto-text-fallback') {
+      // auto-text-fallback starts with OCR and only falls back to the
+      // text layer if the OCR-fed LLM call rejects. Treated as OCR-first
+      // here; the fallback branch below handles the retry.
+      method = 'ocr';
+    } else if (strategy === 'force-text') {
+      if (!analysis.hasTextLayer) {
+        throw new Error(
+          'force-text strategy requested but this PDF has no text layer — ' +
+            'switch to auto / force-ocr / auto-ocr-fallback / auto-text-fallback',
+        );
+      }
+      method = 'text';
+    } else {
+      method = routePdf(analysis);
     }
-    chosen = pickBetterAttempt(chosen, ocrChosen);
-    method = 'hybrid';
-  }
 
-  // Mirror fallback: auto-text-fallback starts with OCR; if the OCR-fed
-  // LLM call rejected and the PDF has a text layer, retry using the
-  // text layer. Skipped silently when no text layer exists — there's
-  // nothing to fall back to. Worst case mirrors auto-ocr-fallback:
-  // 4 LLM calls (ocr×{primary,secondary} → text×{primary,secondary}).
-  if (
-    strategy === 'auto-text-fallback' &&
-    method === 'ocr' &&
-    chosen.rejection !== null &&
-    analysis.hasTextLayer
-  ) {
-    textFallbackFired = true;
-    await writeAudit(db, {
-      entityType: 'statement',
-      entityId: stmtId,
-      action: 'statement.input-fallback',
-      payload: {
-        from: 'ocr',
-        to: 'text-layer',
-        reason: chosen.rejection,
-        ...(chosen.error ? { primaryError: chosen.error.message } : {}),
-      },
+    timing.preprocessMs = Date.now() - phaseStart;
+    phaseStart = Date.now();
+
+    await setStatus(stmtId, method === 'ocr' ? 'ocr' : 'extracting', {
+      extractionMethod: method,
+      sourcePdfPages: analysis.pageCount,
     });
-    logger.info(
-      { stmtId, reason: chosen.rejection },
-      'OCR extraction rejected — retrying with text-layer',
-    );
-    await setStatus(stmtId, 'extracting', { extractionMethod: 'hybrid' });
-    const textMarkdownStart = Date.now();
-    markdown = await produceTextMarkdown();
-    timing.ocrFallbackMarkdownMs = Date.now() - textMarkdownStart;
-    attemptCtx = { ...attemptCtx, markdown };
-    const textLlmStart = Date.now();
-    const textChosen = await runProviderFallback(attemptCtx, 'text-layer');
-    timing.llmMs += Date.now() - textLlmStart;
-    if (textChosen.dateFormat === 'AMBIGUOUS' && !dateFormatOverride) {
-      await persistAmbiguousHalt(textChosen);
-      await writeAudit(db, {
-        entityType: 'statement',
-        entityId: stmtId,
-        action: 'statement.extraction-trace',
-        payload: buildTrace('halted-ambiguous', textChosen),
+
+    const produceTextMarkdown = async (): Promise<string> => {
+      const pages = await extractTextLayerFromBuffer(await readFile(data.sourcePdfPath));
+      const scoped = pages.filter((p) => inRange(p.index));
+      // Persist detected splits so the UI can offer a split-or-acknowledge
+      // flow. Only run detection on un-split (whole-PDF) extractions —
+      // sliced re-extractions are by definition single-account already.
+      if (!pageRange) {
+        const splitInfo = detectMultiAccount(pages);
+        if (splitInfo.multiAccount) {
+          await db
+            .update(statements)
+            .set({ detectedSplits: splitInfo, updatedAt: sql`now()` })
+            .where(eq(statements.id, stmtId));
+          logger.warn(
+            { stmtId, splits: splitInfo.splits },
+            'multi-account PDF detected; persisted splits for UI confirmation',
+          );
+        }
+      }
+      return scoped.map((p) => `# Page ${p.index + 1}\n\n${p.text}`).join('\n\n');
+    };
+
+    const produceOcrMarkdown = async (): Promise<string> => {
+      // OCR path. rasterizePdf shells out to pdftoppm (poppler-utils).
+      // The standalone Dockerfile installs poppler; on host machines the
+      // operator needs `brew install poppler` (or apt/choco equivalent).
+      const rasters = await rasterizePdf(data.sourcePdfPath, { dpi: 300 });
+      const scopedRasters = rasters.filter((r) => inRange(r.index));
+      const images = await Promise.all(scopedRasters.map(async (r) => readFile(r.pngPath)));
+      // DB-backed URL falls back to GLM_OCR_URL env. Resolved per call so
+      // an admin tweak via /admin/engines doesn't require a restart.
+      const ocrConfig = await getEngineConfig(db, 'glm-ocr');
+      const ocr = await ocrPdfPages(images, {
+        cache: redisOcrCache,
+        ...(ocrConfig.url ? { baseUrl: ocrConfig.url } : {}),
+        ...(ocrConfig.timeoutMs ? { timeoutMs: ocrConfig.timeoutMs } : {}),
+        ...(ocrConfig.concurrency ? { concurrency: ocrConfig.concurrency } : {}),
+        ...(ocrConfig.ocrPath ? { ocrPath: ocrConfig.ocrPath } : {}),
+        ...(ocrConfig.healthPath ? { healthPath: ocrConfig.healthPath } : {}),
+        ...(ocrConfig.versionPath ? { versionPath: ocrConfig.versionPath } : {}),
+        ...(ocrConfig.apiKey ? { apiKey: ocrConfig.apiKey } : {}),
       });
-      return;
-    }
-    chosen = pickBetterAttempt(chosen, textChosen);
-    method = 'hybrid';
-  }
+      lastOcrResponse = ocr;
+      return ocr.pages
+        .map((p, i) => `# Page ${(scopedRasters[i]?.index ?? p.index) + 1}\n\n${p.markdown}`)
+        .join('\n\n');
+    };
 
-  // Hard failure path: neither attempt produced usable data. Re-throw
-  // the chosen error so the worker's outer catch records it via the
-  // diagnostic-capture path (statement.extraction-failed audit row,
-  // user-friendly errorMessage on the statements row).
-  if (chosen.rejection === 'http' || chosen.rejection === 'malformed') {
-    throw chosen.error ?? new Error('extraction failed with no usable result');
-  }
+    currentPhase = method === 'text' ? 'text-markdown' : 'ocr-markdown';
+    markdown = method === 'text' ? await produceTextMarkdown() : await produceOcrMarkdown();
+    timing.markdownMs = Date.now() - phaseStart;
 
-  await checkCancelled(stmtId);
-  await setStatus(stmtId, 'reconciling');
+    await checkCancelled(stmtId);
+    await setStatus(stmtId, 'extracting');
 
-  // Empty-tx fallback path can still land here when no secondary was
-  // available. Treat as an inserted-zero outcome — the operator sees
-  // `review` status with zero transactions and reconciliation=verified
-  // (no movement) or discrepancy if balances mismatch.
-  if (chosen.periodStart === null || chosen.periodEnd === null) {
-    throw new Error('extraction outcome missing period bounds');
-  }
-  if (chosen.openingBalanceCents === null || chosen.closingBalanceCents === null) {
-    throw new Error('extraction outcome missing balance bounds');
-  }
-  if (!chosen.reconciled) {
-    // Empty-txs path with no secondary: synthesize a reconciliation
-    // result so the persistence block below can record status.
-    chosen.reconciled = reconcileGoldenRule({
-      openingBalanceCents: chosen.openingBalanceCents,
-      closingBalanceCents: chosen.closingBalanceCents,
-      transactions: [],
-      periodStart: chosen.periodStart,
-      periodEnd: chosen.periodEnd,
-      transactionDates: [],
-    });
-  }
+    // Two-provider orchestration. Each attempt runs the LLM call + repair
+    // pass in memory without persisting anything; the orchestrator picks
+    // the better outcome and commits it once at the end.
+    currentPhase = 'extracting';
+    policy = await resolveProviderPolicy(db);
+    ({ primary, secondary } = providerOrderFor(policy));
+    let attemptCtx: AttemptContext = {
+      stmtId,
+      markdown,
+      ...(dateFormatOverride ? { dateFormatOverride } : {}),
+    };
 
-  await db
-    .update(statements)
-    .set({
-      llmProvider: chosen.providerId,
-      llmInputTokens: chosen.totalInputTokens,
-      llmOutputTokens: chosen.totalOutputTokens,
-      llmCallCount: chosen.totalCallCount,
-      llmCostMicros: chosen.totalCostMicros,
-      llmModelVersion: chosen.modelVersion,
-      sourceDateFormat: chosen.dateFormat,
-      sourceDateFormatConfidence: chosen.dateFormatConfidence,
-      periodStart: chosen.periodStart,
-      periodEnd: chosen.periodEnd,
-      openingBalanceCents: chosen.openingBalanceCents,
-      closingBalanceCents: chosen.closingBalanceCents,
-      updatedAt: sql`now()`,
-    })
-    .where(eq(statements.id, stmtId));
-
-  const effectiveTxs = chosen.effectiveTxs;
-  const reconciled = chosen.reconciled;
-  const repairApplied = chosen.repairApplied;
-
-  const seqAssigned = assignSeqInDay(
-    effectiveTxs.map((t) => ({
-      postedDate: t.postedDate,
-      amountCents: t.amountCents,
-      description: t.description,
-      sourceLine: t.sourceLine,
-    })),
-  );
-
-  // Atomic finalize. checkCancelled fires immediately before so the
-  // race window between status-check and DB-commit is minimized, then
-  // the transaction inserts and final UPDATE happen in a single DB
-  // transaction guarded by `WHERE status IN ('reconciling',
-  // 'extracting')`. If /cancel, /split, DELETE, or another operator
-  // action has flipped the status off those values (or removed the
-  // row), the UPDATE matches 0 rows and we abort — the transaction
-  // rolls back, undoing any inserts so the row's verdict from /cancel
-  // (or its absence after DELETE) stands.
-  await checkCancelled(stmtId);
-
-  await db.transaction(async (tx) => {
-    for (let i = 0; i < effectiveTxs.length; i += 1) {
-      const txn = effectiveTxs[i]!;
-      const seq = seqAssigned[i]!.seqInDay;
-      const fitid = computeFitid({
-        postedDate: txn.postedDate,
-        amountCents: txn.amountCents,
-        description: txn.description,
-        seqInDay: seq,
-      });
-      const trntype = inferTrntype({
-        description: txn.description,
-        amountCents: txn.amountCents,
-        isCreditCard,
-        ...(txn.checkNumber ? { checkNumber: txn.checkNumber } : {}),
-        ...(txn.trntypeHint ? { llmHint: txn.trntypeHint } : {}),
-      });
-      await tx
-        .insert(transactions)
-        .values({
-          statementId: stmtId,
-          seqInDay: seq,
-          postedDate: txn.postedDate,
-          description: txn.description,
-          normalizedDescription: normalizeDescription(txn.description),
-          amountCents: txn.amountCents,
-          runningBalanceCents: txn.runningBalanceCents,
-          checkNumber: txn.checkNumber,
-          trntype,
-          fitid,
-          sourcePage: txn.sourcePage,
-          sourceBboxJson: null,
-          confidence: txn.confidence,
+    const persistAmbiguousHalt = async (a: AttemptOutcome): Promise<void> => {
+      await db
+        .update(statements)
+        .set({
+          status: 'awaiting-locale-confirmation',
+          sourceDateFormat: 'AMBIGUOUS',
+          sourceDateFormatConfidence: a.dateFormatConfidence,
+          llmProvider: a.providerId,
+          llmInputTokens: a.totalInputTokens,
+          llmOutputTokens: a.totalOutputTokens,
+          llmCallCount: a.totalCallCount,
+          llmCostMicros: a.totalCostMicros,
+          llmModelVersion: a.modelVersion,
+          updatedAt: sql`now()`,
         })
-        .onConflictDoNothing();
+        .where(eq(statements.id, stmtId));
+      logger.info(
+        { stmtId, providerId: a.providerId },
+        'extraction halted: ambiguous source date format — awaiting operator confirmation',
+      );
+    };
+
+    // Provider-fallback orchestration. Returns the better of (primary,
+    // secondary) outcomes, or just the primary when no secondary or no
+    // rejection. AMBIGUOUS short-circuits — the caller persists halt
+    // state and returns. Pure orchestration; no statement-row writes
+    // besides the existing extraction-fallback audit log.
+    const runProviderFallback = async (
+      ctx: AttemptContext,
+      inputMethod: 'text-layer' | 'ocr',
+    ): Promise<AttemptOutcome> => {
+      // primary / secondary are hoisted `let`s populated above before
+      // this closure is ever invoked. Capture them locally so the type
+      // narrows from `ProviderId | undefined` to `ProviderId`.
+      if (primary === undefined || secondary === undefined) {
+        throw new Error('provider order not resolved before runProviderFallback (bug)');
+      }
+      const resolvedPrimary = primary;
+      const resolvedSecondary = secondary;
+      const firstStart = Date.now();
+      const first = await attemptExtraction(resolvedPrimary, ctx);
+      attempts.push(traceEntryFor(first, inputMethod, Date.now() - firstStart));
+      if (first.dateFormat === 'AMBIGUOUS' && !ctx.dateFormatOverride) return first;
+      if (first.rejection === null || resolvedSecondary === null) return first;
+      providerFallbackFired = true;
+      await writeAudit(db, {
+        entityType: 'statement',
+        entityId: stmtId,
+        action: 'statement.extraction-fallback',
+        payload: {
+          from: first.providerId,
+          to: resolvedSecondary,
+          reason: first.rejection,
+          inputMethod,
+          ...(first.error ? { primaryError: first.error.message } : {}),
+        },
+      });
+      logger.info(
+        {
+          stmtId,
+          from: first.providerId,
+          to: resolvedSecondary,
+          reason: first.rejection,
+          inputMethod,
+        },
+        'falling back to secondary provider',
+      );
+      await setStatus(stmtId, 'extracting');
+      const secondStart = Date.now();
+      const second = await attemptExtraction(resolvedSecondary, ctx);
+      attempts.push(traceEntryFor(second, inputMethod, Date.now() - secondStart));
+      if (second.dateFormat === 'AMBIGUOUS' && !ctx.dateFormatOverride) return second;
+      return pickBetterAttempt(first, second);
+    };
+
+    const llmStart = Date.now();
+    let chosen = await runProviderFallback(attemptCtx, method === 'ocr' ? 'ocr' : 'text-layer');
+    timing.llmMs = Date.now() - llmStart;
+
+    if (chosen.dateFormat === 'AMBIGUOUS' && !dateFormatOverride) {
+      await persistAmbiguousHalt(chosen);
+      await writeAudit(db, {
+        entityType: 'statement',
+        entityId: stmtId,
+        action: 'statement.extraction-trace',
+        payload: buildTrace('halted-ambiguous', chosen),
+      });
+      return;
     }
 
-    const updated = await tx
+    // OCR fallback. Only fires when:
+    //   - strategy is `auto-ocr-fallback`, and
+    //   - we tried text-layer first (otherwise there's nothing to fall
+    //     back to), and
+    //   - the provider stack rejected with any of the four triggers.
+    // Provider fallback runs *inside* each input attempt — so the OCR
+    // retry also exercises the secondary provider via runProviderFallback.
+    // Worst case: 4 LLM calls (text×{primary,secondary} → ocr×{primary,secondary}).
+    if (strategy === 'auto-ocr-fallback' && method === 'text' && chosen.rejection !== null) {
+      ocrFallbackFired = true;
+      await writeAudit(db, {
+        entityType: 'statement',
+        entityId: stmtId,
+        action: 'statement.input-fallback',
+        payload: {
+          from: 'text-layer',
+          to: 'ocr',
+          reason: chosen.rejection,
+          ...(chosen.error ? { primaryError: chosen.error.message } : {}),
+        },
+      });
+      logger.info(
+        { stmtId, reason: chosen.rejection },
+        'text-layer extraction rejected — retrying with GLM-OCR',
+      );
+      await setStatus(stmtId, 'ocr', { extractionMethod: 'hybrid' });
+      currentPhase = 'ocr-fallback-markdown';
+      const ocrMarkdownStart = Date.now();
+      markdown = await produceOcrMarkdown();
+      timing.ocrFallbackMarkdownMs = Date.now() - ocrMarkdownStart;
+      attemptCtx = { ...attemptCtx, markdown };
+      currentPhase = 'extracting';
+      await setStatus(stmtId, 'extracting');
+      const ocrLlmStart = Date.now();
+      const ocrChosen = await runProviderFallback(attemptCtx, 'ocr');
+      timing.llmMs += Date.now() - ocrLlmStart;
+      if (ocrChosen.dateFormat === 'AMBIGUOUS' && !dateFormatOverride) {
+        await persistAmbiguousHalt(ocrChosen);
+        await writeAudit(db, {
+          entityType: 'statement',
+          entityId: stmtId,
+          action: 'statement.extraction-trace',
+          payload: buildTrace('halted-ambiguous', ocrChosen),
+        });
+        return;
+      }
+      chosen = pickBetterAttempt(chosen, ocrChosen);
+      method = 'hybrid';
+    }
+
+    // Mirror fallback: auto-text-fallback starts with OCR; if the OCR-fed
+    // LLM call rejected and the PDF has a text layer, retry using the
+    // text layer. Skipped silently when no text layer exists — there's
+    // nothing to fall back to. Worst case mirrors auto-ocr-fallback:
+    // 4 LLM calls (ocr×{primary,secondary} → text×{primary,secondary}).
+    if (
+      strategy === 'auto-text-fallback' &&
+      method === 'ocr' &&
+      chosen.rejection !== null &&
+      analysis.hasTextLayer
+    ) {
+      textFallbackFired = true;
+      await writeAudit(db, {
+        entityType: 'statement',
+        entityId: stmtId,
+        action: 'statement.input-fallback',
+        payload: {
+          from: 'ocr',
+          to: 'text-layer',
+          reason: chosen.rejection,
+          ...(chosen.error ? { primaryError: chosen.error.message } : {}),
+        },
+      });
+      logger.info(
+        { stmtId, reason: chosen.rejection },
+        'OCR extraction rejected — retrying with text-layer',
+      );
+      await setStatus(stmtId, 'extracting', { extractionMethod: 'hybrid' });
+      currentPhase = 'text-fallback-markdown';
+      const textMarkdownStart = Date.now();
+      markdown = await produceTextMarkdown();
+      timing.ocrFallbackMarkdownMs = Date.now() - textMarkdownStart;
+      attemptCtx = { ...attemptCtx, markdown };
+      currentPhase = 'extracting';
+      const textLlmStart = Date.now();
+      const textChosen = await runProviderFallback(attemptCtx, 'text-layer');
+      timing.llmMs += Date.now() - textLlmStart;
+      if (textChosen.dateFormat === 'AMBIGUOUS' && !dateFormatOverride) {
+        await persistAmbiguousHalt(textChosen);
+        await writeAudit(db, {
+          entityType: 'statement',
+          entityId: stmtId,
+          action: 'statement.extraction-trace',
+          payload: buildTrace('halted-ambiguous', textChosen),
+        });
+        return;
+      }
+      chosen = pickBetterAttempt(chosen, textChosen);
+      method = 'hybrid';
+    }
+
+    // Hard failure path: neither attempt produced usable data. Re-throw
+    // the chosen error so the worker's outer catch records it via the
+    // diagnostic-capture path (statement.extraction-failed audit row,
+    // user-friendly errorMessage on the statements row).
+    if (chosen.rejection === 'http' || chosen.rejection === 'malformed') {
+      throw chosen.error ?? new Error('extraction failed with no usable result');
+    }
+
+    await checkCancelled(stmtId);
+    currentPhase = 'reconciling';
+    await setStatus(stmtId, 'reconciling');
+
+    // Empty-tx fallback path can still land here when no secondary was
+    // available. Treat as an inserted-zero outcome — the operator sees
+    // `review` status with zero transactions and reconciliation=verified
+    // (no movement) or discrepancy if balances mismatch.
+    if (chosen.periodStart === null || chosen.periodEnd === null) {
+      throw new Error('extraction outcome missing period bounds');
+    }
+    if (chosen.openingBalanceCents === null || chosen.closingBalanceCents === null) {
+      throw new Error('extraction outcome missing balance bounds');
+    }
+    if (!chosen.reconciled) {
+      // Empty-txs path with no secondary: synthesize a reconciliation
+      // result so the persistence block below can record status.
+      chosen.reconciled = reconcileGoldenRule({
+        openingBalanceCents: chosen.openingBalanceCents,
+        closingBalanceCents: chosen.closingBalanceCents,
+        transactions: [],
+        periodStart: chosen.periodStart,
+        periodEnd: chosen.periodEnd,
+        transactionDates: [],
+      });
+    }
+
+    await db
       .update(statements)
       .set({
-        reconciliationStatus: reconciled.status === 'verified' ? 'verified' : 'discrepancy',
-        periodBoundsViolations: reconciled.periodBoundsViolations,
-        status: 'review',
+        llmProvider: chosen.providerId,
+        llmInputTokens: chosen.totalInputTokens,
+        llmOutputTokens: chosen.totalOutputTokens,
+        llmCallCount: chosen.totalCallCount,
+        llmCostMicros: chosen.totalCostMicros,
+        llmModelVersion: chosen.modelVersion,
+        sourceDateFormat: chosen.dateFormat,
+        sourceDateFormatConfidence: chosen.dateFormatConfidence,
+        periodStart: chosen.periodStart,
+        periodEnd: chosen.periodEnd,
+        openingBalanceCents: chosen.openingBalanceCents,
+        closingBalanceCents: chosen.closingBalanceCents,
         updatedAt: sql`now()`,
       })
-      .where(
-        and(eq(statements.id, stmtId), inArray(statements.status, ['reconciling', 'extracting'])),
-      )
-      .returning({ id: statements.id });
-    if (updated.length === 0) {
-      // /cancel, /split, or DELETE landed first. Roll back so the
-      // transactions we just inserted don't outlive their statement.
-      throw new CancelledError();
-    }
-  });
+      .where(eq(statements.id, stmtId));
 
-  timing.persistMs = Date.now() - phaseStart;
-  await writeAudit(db, {
-    entityType: 'statement',
-    entityId: stmtId,
-    action: 'statement.extracted',
-    payload: {
-      // Existing concise summary (kept stable for any operator
-      // tooling that grepped the old payload shape).
-      method,
-      provider: chosen.providerId,
-      reconciliation: reconciled.status,
-      txCount: effectiveTxs.length,
-      llmEmittedTxCount: chosen.llmEmittedTxCount,
-      policy,
-      strategy,
-      ...(repairApplied ? { repairApplied } : {}),
-      // Full processing trace — operator reads this when a successful
-      // extraction looks suspect (cost surprise, slow run, fallback
-      // fired silently) without having to re-run the job.
-      trace: buildTrace('success', chosen),
-    },
-  });
+    const effectiveTxs = chosen.effectiveTxs;
+    const reconciled = chosen.reconciled;
+    const repairApplied = chosen.repairApplied;
+
+    const seqAssigned = assignSeqInDay(
+      effectiveTxs.map((t) => ({
+        postedDate: t.postedDate,
+        amountCents: t.amountCents,
+        description: t.description,
+        sourceLine: t.sourceLine,
+      })),
+    );
+
+    // Atomic finalize. checkCancelled fires immediately before so the
+    // race window between status-check and DB-commit is minimized, then
+    // the transaction inserts and final UPDATE happen in a single DB
+    // transaction guarded by `WHERE status IN ('reconciling',
+    // 'extracting')`. If /cancel, /split, DELETE, or another operator
+    // action has flipped the status off those values (or removed the
+    // row), the UPDATE matches 0 rows and we abort — the transaction
+    // rolls back, undoing any inserts so the row's verdict from /cancel
+    // (or its absence after DELETE) stands.
+    await checkCancelled(stmtId);
+    currentPhase = 'persisting';
+
+    await db.transaction(async (tx) => {
+      for (let i = 0; i < effectiveTxs.length; i += 1) {
+        const txn = effectiveTxs[i]!;
+        const seq = seqAssigned[i]!.seqInDay;
+        const fitid = computeFitid({
+          postedDate: txn.postedDate,
+          amountCents: txn.amountCents,
+          description: txn.description,
+          seqInDay: seq,
+        });
+        const trntype = inferTrntype({
+          description: txn.description,
+          amountCents: txn.amountCents,
+          isCreditCard,
+          ...(txn.checkNumber ? { checkNumber: txn.checkNumber } : {}),
+          ...(txn.trntypeHint ? { llmHint: txn.trntypeHint } : {}),
+        });
+        await tx
+          .insert(transactions)
+          .values({
+            statementId: stmtId,
+            seqInDay: seq,
+            postedDate: txn.postedDate,
+            description: txn.description,
+            normalizedDescription: normalizeDescription(txn.description),
+            amountCents: txn.amountCents,
+            runningBalanceCents: txn.runningBalanceCents,
+            checkNumber: txn.checkNumber,
+            trntype,
+            fitid,
+            sourcePage: txn.sourcePage,
+            sourceBboxJson: null,
+            confidence: txn.confidence,
+          })
+          .onConflictDoNothing();
+      }
+
+      const updated = await tx
+        .update(statements)
+        .set({
+          reconciliationStatus: reconciled.status === 'verified' ? 'verified' : 'discrepancy',
+          periodBoundsViolations: reconciled.periodBoundsViolations,
+          status: 'review',
+          updatedAt: sql`now()`,
+        })
+        .where(
+          and(eq(statements.id, stmtId), inArray(statements.status, ['reconciling', 'extracting'])),
+        )
+        .returning({ id: statements.id });
+      if (updated.length === 0) {
+        // /cancel, /split, or DELETE landed first. Roll back so the
+        // transactions we just inserted don't outlive their statement.
+        throw new CancelledError();
+      }
+    });
+
+    timing.persistMs = Date.now() - phaseStart;
+    await writeAudit(db, {
+      entityType: 'statement',
+      entityId: stmtId,
+      action: 'statement.extracted',
+      payload: {
+        // Existing concise summary (kept stable for any operator
+        // tooling that grepped the old payload shape).
+        method,
+        provider: chosen.providerId,
+        reconciliation: reconciled.status,
+        txCount: effectiveTxs.length,
+        llmEmittedTxCount: chosen.llmEmittedTxCount,
+        policy,
+        strategy,
+        ...(repairApplied ? { repairApplied } : {}),
+        // Full processing trace — operator reads this when a successful
+        // extraction looks suspect (cost surprise, slow run, fallback
+        // fired silently) without having to re-run the job.
+        trace: buildTrace('success', chosen),
+      },
+    });
+    currentPhase = 'done';
+  } catch (err) {
+    // CancelledError is the operator pulling the plug — the /cancel
+    // route already wrote the reason, and the outer worker catch
+    // swallows it without writing an audit row. Re-throw without
+    // touching audit_log.
+    if (err instanceof CancelledError) throw err;
+    // Rich failure trace — same shape as the success / halted-ambiguous
+    // traces, plus a fully described error (class, name, message,
+    // cause chain, truncated stack). With this in place the operator
+    // sees "phase: ocr-markdown" + "GLM-OCR POST .../v1/chat/completions
+    // timed out after 60000 ms" instead of bare DOMException.
+    const e = err instanceof Error ? err : new Error(String(err));
+    const failureDiagnostic: Record<string, unknown> = {
+      errorClass: e.constructor?.name ?? 'Error',
+      message: e.message,
+      phase: currentPhase,
+      trace: buildTrace('failed', undefined, e),
+      error: describeError(e),
+    };
+    if (e instanceof ExtractionResponseError) {
+      failureDiagnostic.summary = e.summary;
+      if (e.issues !== undefined) failureDiagnostic.issues = e.issues;
+      const RAW_LIMIT = 8000;
+      failureDiagnostic.rawResponseSnippet = e.rawResponse.slice(0, RAW_LIMIT);
+      if (e.rawResponse.length > RAW_LIMIT) {
+        failureDiagnostic.rawResponseTruncated = true;
+        failureDiagnostic.rawResponseLength = e.rawResponse.length;
+      }
+      if (e.missingTopLevelFields.length > 0) {
+        failureDiagnostic.missingTopLevelFields = e.missingTopLevelFields;
+        failureDiagnostic.gatewayEnforcementHint =
+          'LLM emitted JSON missing required top-level field(s) twice in a row ' +
+          '(initial call + reminder retry). The local gateway likely is not ' +
+          'enforcing the JSON schema we sent in `response_format.json_schema`. ' +
+          'Enable guided decoding on the gateway (vLLM ' +
+          '`--guided-decoding-backend xgrammar`, llama.cpp grammars, or the ' +
+          'equivalent for your stack) so the model cannot terminate without ' +
+          'emitting every required field.';
+      }
+    }
+    try {
+      await writeAudit(db, {
+        entityType: 'statement',
+        entityId: stmtId,
+        action: 'statement.extraction-failed',
+        payload: failureDiagnostic,
+      });
+    } catch (auditErr) {
+      // Don't let an audit write failure mask the real error.
+      logger.warn({ auditErr }, 'failed to write extraction-failed audit row');
+    }
+    throw err;
+  }
 };
 
 export const startExtractionWorker = (): Worker<ExtractionJobData> => {
@@ -1105,60 +1246,21 @@ export const startExtractionWorker = (): Worker<ExtractionJobData> => {
           return;
         }
 
-        // Forensic capture: write a `statement.extraction-failed` row to
-        // audit_log carrying the error class, message, and (when the
-        // failure was a malformed LLM response) the raw payload so the
-        // operator can read it back via /api/audit?entityId=<stmtId>.
-        // Truncated to 8KB so a runaway model doesn't blow up the row.
+        // The rich audit row was written by processExtraction's own
+        // try/catch (it has access to the phase + attempts + timing
+        // state we'd otherwise have to thread out here). All this
+        // catch needs to do is log + update the statements row +
+        // rethrow so BullMQ records the failure.
         const e = err as Error;
-        const diagnostic: Record<string, unknown> = {
-          errorClass: e?.constructor?.name ?? 'Error',
-          message: e?.message ?? String(err),
-        };
-        if (err instanceof ExtractionResponseError) {
-          diagnostic.summary = err.summary;
-          if (err.issues !== undefined) diagnostic.issues = err.issues;
-          const RAW_LIMIT = 8000;
-          diagnostic.rawResponseSnippet = err.rawResponse.slice(0, RAW_LIMIT);
-          if (err.rawResponse.length > RAW_LIMIT) {
-            diagnostic.rawResponseTruncated = true;
-            diagnostic.rawResponseLength = err.rawResponse.length;
-          }
-          // The provider already did one reminder retry before reaching
-          // this catch (see LocalGatewayProvider.extract). If the LLM
-          // STILL omitted a required top-level field after that, the
-          // underlying gateway almost certainly isn't enforcing the
-          // json_schema we sent — surface an actionable hint so the
-          // operator knows where to look (the gateway, not the prompt).
-          if (err.missingTopLevelFields.length > 0) {
-            diagnostic.missingTopLevelFields = err.missingTopLevelFields;
-            diagnostic.gatewayEnforcementHint =
-              'LLM emitted JSON missing required top-level field(s) twice in a row ' +
-              '(initial call + reminder retry). The local gateway likely is not ' +
-              'enforcing the JSON schema we sent in `response_format.json_schema`. ' +
-              'Enable guided decoding on the gateway (vLLM ' +
-              '`--guided-decoding-backend xgrammar`, llama.cpp grammars, or the ' +
-              'equivalent for your stack) so the model cannot terminate without ' +
-              'emitting every required field.';
-          }
-        }
-        try {
-          await writeAudit(db, {
-            entityType: 'statement',
-            entityId: job.data.statementId,
-            action: 'statement.extraction-failed',
-            payload: diagnostic,
-          });
-        } catch (auditErr) {
-          // Don't let an audit write failure mask the real error.
-          logger.warn({ auditErr }, 'failed to write extraction-failed audit row');
-        }
-
-        // Don't ship the raw payload through the structured logger — it
-        // may carry PII from the source PDF. The audit_log row is the
-        // forensic store. Keep summary + issues for the on-disk log.
-        const { rawResponseSnippet: _rs, ...logDiagnostic } = diagnostic;
-        logger.error({ err, jobId: job.id, ...logDiagnostic }, 'extraction job failed');
+        logger.error(
+          {
+            err,
+            jobId: job.id,
+            errorClass: e?.constructor?.name ?? 'Error',
+            message: e?.message ?? String(err),
+          },
+          'extraction job failed',
+        );
 
         // User-facing message: ExtractionResponseError carries a clean
         // summary + issue list with no raw payload. Other errors fall
@@ -1183,9 +1285,15 @@ export const startExtractionWorker = (): Worker<ExtractionJobData> => {
       connection: getJobConnection(),
       // lockDuration must comfortably exceed the longest expected job;
       // otherwise BullMQ marks the job as orphaned and re-queues it
-      // while the worker is still processing. OCR + LLM can take
-      // several minutes, so default 30s is too tight.
-      lockDuration: Number(process.env.VIBETC_EXTRACTION_TIMEOUT_MS ?? 600_000) + 60_000,
+      // while the worker is still processing → duplicate work + the
+      // statements row gets stomped. Worst-case scenario:
+      //   * 50-page CPU-bound OCR run
+      //   * 50s per page (per vibe-glm-ocr's CPU benchmark)
+      //   * concurrency=2 → 25 sequential rounds → ~21 min
+      // Default 30 min (with the historical 60s buffer) covers that
+      // and a noisy retry; GPU operators waste nothing because the
+      // job finishes in seconds and releases the lock immediately.
+      lockDuration: Number(process.env.VIBETC_EXTRACTION_TIMEOUT_MS ?? 1_800_000) + 60_000,
       concurrency: Math.max(1, Number(process.env.WORKER_CONCURRENCY ?? 1)),
     },
   );

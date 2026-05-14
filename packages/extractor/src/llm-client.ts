@@ -66,6 +66,23 @@ type ExtractionResult = schemas.extraction.ExtractionResult;
 // is safe to display in toasts and persist to statements.error_message.
 // `.rawResponse` carries the full payload for diagnostic capture and
 // must not be surfaced directly in user-facing UI.
+// Translate `AbortController.abort()` (which surfaces as a DOMException
+// named 'AbortError' with the message "This operation was aborted" on
+// Node's undici fetch, or TimeoutError on some runtimes) into a labelled
+// timeout error. The original DOM error has no URL / no timeout / no
+// context — operators saw `errorClass: 'DOMException'` in audit_log
+// and had to guess which call timed out. Preserves the original as
+// `.cause` so the underlying stack stays recoverable. Pass-through
+// for any non-abort error.
+const asTimeoutError = (err: unknown, label: string, timeoutMs: number): Error => {
+  if (err instanceof Error && (err.name === 'AbortError' || err.name === 'TimeoutError')) {
+    const wrapped = new Error(`${label} timed out after ${timeoutMs} ms`);
+    (wrapped as Error & { cause?: unknown }).cause = err;
+    return wrapped;
+  }
+  return err as Error;
+};
+
 export class ExtractionResponseError extends Error {
   readonly rawResponse: string;
   readonly summary: string;
@@ -321,6 +338,12 @@ export class LocalGatewayProvider implements LlmProvider {
         outputTokens: body.usage?.completion_tokens ?? 0,
         ms: Date.now() - start,
       };
+    } catch (err) {
+      throw asTimeoutError(
+        err,
+        `local gateway POST ${this.baseUrl}/v1/chat/completions`,
+        this.timeoutMs,
+      );
     } finally {
       clearTimeout(t);
     }
@@ -426,6 +449,12 @@ export class LocalGatewayProvider implements LlmProvider {
           costMicros: 0n,
         },
       };
+    } catch (err) {
+      throw asTimeoutError(
+        err,
+        `local gateway POST ${this.baseUrl}/v1/chat/completions (complete)`,
+        this.timeoutMs,
+      );
     } finally {
       clearTimeout(t);
     }
@@ -621,6 +650,8 @@ export class AnthropicProvider implements LlmProvider {
         outputTokens: body.usage?.output_tokens ?? 0,
         ms: Date.now() - start,
       };
+    } catch (err) {
+      throw asTimeoutError(err, `anthropic POST ${this.baseUrl}/v1/messages`, this.timeoutMs);
     } finally {
       clearTimeout(t);
     }
@@ -747,6 +778,12 @@ export class AnthropicProvider implements LlmProvider {
           ),
         },
       };
+    } catch (err) {
+      throw asTimeoutError(
+        err,
+        `anthropic POST ${this.baseUrl}/v1/messages (complete)`,
+        this.timeoutMs,
+      );
     } finally {
       clearTimeout(t);
     }

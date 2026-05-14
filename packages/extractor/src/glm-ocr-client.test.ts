@@ -343,6 +343,54 @@ describe('ocrPdfPages', () => {
     expect(second.pages[0]?.markdown).toBe('hot');
   });
 
+  it('throws GlmOcrError on finish_reason=length so truncated markdown never reaches the LLM', async () => {
+    const fetcher = buildFetcher(async ({ url }) => {
+      if (url.endsWith('/version')) return okResponse({ version: 'glm-ocr/test' });
+      // llama-server response with finish_reason: 'length' — model hit
+      // the output cap before completing the page.
+      return okResponse({
+        choices: [
+          { message: { role: 'assistant', content: 'partial markdown…' }, finish_reason: 'length' },
+        ],
+      });
+    });
+    await expect(
+      ocrPdfPages([Buffer.from('p')], { baseUrl: 'http://x', fetcher, maxAttempts: 1 }),
+    ).rejects.toThrow(/truncated by output-token cap/);
+  });
+
+  it('sends Authorization: Bearer when apiKey is configured', async () => {
+    const captured: { url: string; init: RequestInit }[] = [];
+    const fetcher = buildFetcher(async (args) => {
+      captured.push(args);
+      if (args.url.endsWith('/version')) return okResponse({ version: 'glm-ocr/test' });
+      return chatResponse('with auth');
+    });
+    await ocrPdfPages([Buffer.from('p')], {
+      baseUrl: 'http://x',
+      fetcher,
+      apiKey: 'sk-test-1234',
+    });
+    const ocrCall = captured.find((c) => c.url.endsWith('/v1/chat/completions'));
+    expect((ocrCall?.init.headers as Record<string, string> | undefined)?.authorization).toBe(
+      'Bearer sk-test-1234',
+    );
+  });
+
+  it('omits Authorization header when apiKey is unset', async () => {
+    const captured: { url: string; init: RequestInit }[] = [];
+    const fetcher = buildFetcher(async (args) => {
+      captured.push(args);
+      if (args.url.endsWith('/version')) return okResponse({ version: 'glm-ocr/test' });
+      return chatResponse('no auth');
+    });
+    await ocrPdfPages([Buffer.from('p')], { baseUrl: 'http://x', fetcher });
+    const ocrCall = captured.find((c) => c.url.endsWith('/v1/chat/completions'));
+    expect(
+      (ocrCall?.init.headers as Record<string, string> | undefined)?.authorization,
+    ).toBeUndefined();
+  });
+
   it('degrades engineVersion to "glm-ocr/unknown" when /version 404s (llama-server has no /version)', async () => {
     const fetcher = buildFetcher(async ({ url }) => {
       if (url.endsWith('/version')) return failResponse(404);

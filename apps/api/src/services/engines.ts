@@ -11,6 +11,7 @@ import { eq, sql } from 'drizzle-orm';
 
 import type { Db } from '../db/client.js';
 import { systemSettings } from '../db/schema.js';
+import { unwrapSecret, wrapSecret } from '../lib/secrets.js';
 import { invalidateProviderCache } from './llm-provider.js';
 
 export type EngineKey = 'glm-ocr' | 'llm-gateway';
@@ -26,6 +27,10 @@ interface EngineSettingKeys {
   ocrPath?: string;
   healthPath?: string;
   versionPath?: string;
+  // Optional bearer-auth key. Stored in the encrypted secret column —
+  // see system_settings.value_secret. Only meaningful for engines that
+  // gate access (currently glm-ocr via OCR_API_KEY).
+  apiKey?: string;
 }
 
 const KEYS: Record<EngineKey, EngineSettingKeys> = {
@@ -36,6 +41,7 @@ const KEYS: Record<EngineKey, EngineSettingKeys> = {
     ocrPath: 'engine.glm_ocr.ocr_path',
     healthPath: 'engine.glm_ocr.health_path',
     versionPath: 'engine.glm_ocr.version_path',
+    apiKey: 'engine.glm_ocr.api_key',
   },
   'llm-gateway': {
     url: 'engine.llm_gateway.url',
@@ -58,7 +64,29 @@ export interface EngineConfig {
   ocrPath?: string | null | undefined;
   healthPath?: string | null | undefined;
   versionPath?: string | null | undefined;
+  // Bearer-auth key (plaintext). The worker passes this to the OCR
+  // client; admin responses are scrubbed via maskEngineConfig before
+  // leaving the API. Loaded from the encrypted `value_secret` column
+  // and decrypted in-process — never returned over the wire as-is.
+  apiKey?: string | null | undefined;
 }
+
+// Strip the plaintext apiKey before serialising to admins. Surfaces a
+// `hasApiKey` boolean plus the last 4 characters so an operator can
+// sanity-check which key is loaded without us echoing it back.
+export interface MaskedEngineConfig extends Omit<EngineConfig, 'apiKey'> {
+  hasApiKey: boolean;
+  apiKeyLastFour: string | null;
+}
+
+export const maskEngineConfig = (cfg: EngineConfig): MaskedEngineConfig => {
+  const { apiKey, ...rest } = cfg;
+  return {
+    ...rest,
+    hasApiKey: typeof apiKey === 'string' && apiKey.length > 0,
+    apiKeyLastFour: typeof apiKey === 'string' && apiKey.length >= 4 ? apiKey.slice(-4) : null,
+  };
+};
 
 const TTL_MS = 60_000;
 let cached: { at: number; map: Map<EngineKey, EngineConfig> } | null = null;
@@ -118,6 +146,24 @@ const loadConfig = async (db: Db, engine: EngineKey): Promise<EngineConfig> => {
     const v = await readSetting(db, keys.versionPath);
     if (v !== null && v.length > 0) out.versionPath = v;
   }
+  if (keys.apiKey) {
+    // API keys live in the encrypted secret column, NOT plaintext.
+    // Wrapped blob is decrypted on every load; if decryption fails
+    // (e.g. SESSION_SECRET rotated) we surface as "no key" rather
+    // than crashing — the operator re-saves to recover.
+    const rows = await db
+      .select({ valueEncrypted: systemSettings.valueEncrypted })
+      .from(systemSettings)
+      .where(eq(systemSettings.key, keys.apiKey));
+    const blob = rows[0]?.valueEncrypted;
+    if (blob) {
+      try {
+        out.apiKey = unwrapSecret(blob);
+      } catch {
+        out.apiKey = null;
+      }
+    }
+  }
   return out;
 };
 
@@ -151,6 +197,9 @@ export interface SetEngineInput {
   ocrPath?: string | null;
   healthPath?: string | null;
   versionPath?: string | null;
+  // null clears the stored key; a non-empty string is encrypted and
+  // stored. Not echoed back in admin responses (see maskEngineConfig).
+  apiKey?: string | null;
 }
 
 const normalisePath = (raw: string | null): string | null => {
@@ -224,6 +273,24 @@ export const setEngineConfig = async (
   if (input.versionPath !== undefined && keys.versionPath) {
     await writeSetting(db, keys.versionPath, normalisePath(input.versionPath), actorId);
   }
+  if (input.apiKey !== undefined && keys.apiKey) {
+    if (input.apiKey === null || input.apiKey === '') {
+      await db.delete(systemSettings).where(eq(systemSettings.key, keys.apiKey));
+    } else {
+      const wrapped = wrapSecret(input.apiKey);
+      await db
+        .insert(systemSettings)
+        .values({ key: keys.apiKey, valueEncrypted: wrapped, isSecret: true })
+        .onConflictDoUpdate({
+          target: systemSettings.key,
+          set: {
+            valueEncrypted: wrapped,
+            updatedAt: sql`now()`,
+            updatedByUserId: actorId,
+          },
+        });
+    }
+  }
   // Engine URL is read by the LLM provider (for engine.llm_gateway.url)
   // and the OCR client (for engine.glm_ocr.url); drop both caches.
   invalidateEngineCache();
@@ -252,6 +319,9 @@ export const clearEngineConfig = async (
   }
   if (keys.versionPath) {
     await db.delete(systemSettings).where(eq(systemSettings.key, keys.versionPath));
+  }
+  if (keys.apiKey) {
+    await db.delete(systemSettings).where(eq(systemSettings.key, keys.apiKey));
   }
   void actorId; // audit-logged at the route layer
   invalidateEngineCache();

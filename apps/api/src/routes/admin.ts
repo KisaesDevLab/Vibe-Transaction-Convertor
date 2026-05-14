@@ -16,6 +16,7 @@ import {
   clearEngineConfig,
   getAllEngineConfigs,
   getEngineConfig,
+  maskEngineConfig,
   setEngineConfig,
   type EngineKey,
 } from '../services/engines.js';
@@ -636,7 +637,13 @@ export const adminRouter = (): Router => {
   router.get('/engines', async (_req, res, next) => {
     try {
       const configs = await getAllEngineConfigs(db);
-      res.json({ configs });
+      // Strip the plaintext apiKey before returning — replace with a
+      // `hasApiKey` boolean + last-four mask. Same pattern the LLM
+      // provider page uses for the Anthropic key.
+      const masked = Object.fromEntries(
+        Object.entries(configs).map(([k, v]) => [k, maskEngineConfig(v)]),
+      );
+      res.json({ configs: masked });
     } catch (err) {
       next(err);
     }
@@ -654,6 +661,7 @@ export const adminRouter = (): Router => {
         ocrPath?: string | null;
         healthPath?: string | null;
         versionPath?: string | null;
+        apiKey?: string | null;
       } = {};
       if (body.url !== undefined) {
         input.url = body.url === null || body.url === '' ? null : String(body.url).trim();
@@ -677,19 +685,40 @@ export const adminRouter = (): Router => {
       parsePath('ocrPath');
       parsePath('healthPath');
       parsePath('versionPath');
+      if (body.apiKey !== undefined) {
+        const raw = body.apiKey;
+        input.apiKey = raw === null || raw === '' ? null : String(raw).trim();
+      }
       let nextConfig;
       try {
         nextConfig = await setEngineConfig(db, engine, input, req.user!.id);
       } catch (err) {
         throw new ValidationError((err as Error).message);
       }
-      const next = nextConfig;
+      const next = maskEngineConfig(nextConfig);
+      // Strip the plaintext apiKey from the audit row. The audit_log
+      // is INSERT-only and viewable by admins; the key would otherwise
+      // sit there in cleartext forever. Replace with a
+      // {set:true|cleared:true} marker so the trail still records
+      // that the credential changed and when.
+      const { apiKey: _apiKey, ...auditableInput } = input;
+      const auditPayload: Record<string, unknown> = {
+        engine,
+        input: {
+          ...auditableInput,
+          ...(input.apiKey !== undefined
+            ? input.apiKey === null
+              ? { apiKey: 'cleared' }
+              : { apiKey: `set:${input.apiKey.slice(-4)}` }
+            : {}),
+        },
+      };
       await writeAudit(db, {
         actorUserId: req.user!.id,
         entityType: 'system_settings',
         entityId: `engine.${engine}`,
         action: 'engine.update',
-        payload: { engine, input },
+        payload: auditPayload,
       });
       res.json(next);
     } catch (err) {
@@ -701,14 +730,14 @@ export const adminRouter = (): Router => {
     try {
       const engine = String(req.params.engine);
       if (!isEngineKey(engine)) throw new ValidationError(`unknown engine: ${engine}`);
-      const next = await clearEngineConfig(db, engine, req.user!.id);
+      const cleared = await clearEngineConfig(db, engine, req.user!.id);
       await writeAudit(db, {
         actorUserId: req.user!.id,
         entityType: 'system_settings',
         entityId: `engine.${engine}`,
         action: 'engine.clear',
       });
-      res.json(next);
+      res.json(maskEngineConfig(cleared));
     } catch (err) {
       next(err);
     }
@@ -730,6 +759,7 @@ export const adminRouter = (): Router => {
         const result = await probeGlmOcrHealth({
           baseUrl: cfg.url,
           ...(cfg.healthPath ? { healthPath: cfg.healthPath } : {}),
+          ...(cfg.apiKey ? { apiKey: cfg.apiKey } : {}),
         });
         res.json({ ok: result.ok, source: cfg.source, detail: result.detail ?? null });
         return;

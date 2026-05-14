@@ -32,6 +32,11 @@ interface EngineConfig {
   ocrPath?: string | null;
   healthPath?: string | null;
   versionPath?: string | null;
+  // The plaintext apiKey is never returned over the wire — the API
+  // strips it via maskEngineConfig. We only see the two derived
+  // fields and the input field is write-only.
+  hasApiKey?: boolean;
+  apiKeyLastFour?: string | null;
 }
 
 type EngineKey = 'glm-ocr' | 'llm-gateway';
@@ -121,7 +126,8 @@ export function EnginesAdminPage() {
         config={cfgs?.['glm-ocr'] ?? null}
         showAdvanced
         showPaths
-        notes="Zhipu GLM-OCR served by llama.cpp's llama-server (image: vibe-glm-ocr). OpenAI-compatible chat-completions API; one POST per page. Used only when the PDF lacks a text layer. URL is typically http://vibe-glm-ocr:8090 (appliance) or http://glm-ocr:8090 (standalone). Path defaults — /v1/chat/completions for OCR, /health for liveness — match the upstream image; only override if you're behind a path-rewriting proxy. /version is best-effort: llama-server doesn't actually expose it, so engineVersion logs 'glm-ocr/unknown'."
+        showApiKey
+        notes="Zhipu GLM-OCR served by llama.cpp's llama-server (image: vibe-glm-ocr). OpenAI-compatible chat-completions API; one POST per page. Used only when the PDF lacks a text layer. URL is typically http://vibe-glm-ocr:8090 (appliance) or http://glm-ocr:8090 (standalone). Path defaults — /v1/chat/completions for OCR, /health for liveness — match the upstream image; only override if you're behind a path-rewriting proxy. /version is best-effort: llama-server doesn't actually expose it, so engineVersion logs 'glm-ocr/unknown'. The API key is sent as Authorization: Bearer; only set when the OCR server was started with OCR_API_KEY."
       />
 
       <EditableEngine
@@ -246,6 +252,7 @@ function EditableEngine({
   notes,
   showAdvanced = false,
   showPaths = false,
+  showApiKey = false,
 }: {
   engine: EngineKey;
   name: string;
@@ -260,6 +267,9 @@ function EditableEngine({
   // only relevant for glm-ocr, but the prop keeps the component
   // generic for future engines whose path varies by deployment.
   showPaths?: boolean | undefined;
+  // Exposes the bearer-token field. Write-only — the plaintext key
+  // never round-trips back from the server (see maskEngineConfig).
+  showApiKey?: boolean | undefined;
 }) {
   const qc = useQueryClient();
   const toast = useToast();
@@ -269,6 +279,7 @@ function EditableEngine({
   const [ocrPath, setOcrPath] = useState('');
   const [healthPath, setHealthPath] = useState('');
   const [versionPath, setVersionPath] = useState('');
+  const [apiKey, setApiKey] = useState('');
 
   // Hydrate inputs whenever the loaded config changes (after a save the
   // server returns the new value, which may differ from what was typed
@@ -281,6 +292,10 @@ function EditableEngine({
     setOcrPath(config.ocrPath ?? '');
     setHealthPath(config.healthPath ?? '');
     setVersionPath(config.versionPath ?? '');
+    // apiKey is write-only — the API doesn't echo it back, only
+    // `hasApiKey` + last-4. Reset the input on re-hydration so a
+    // typed-but-unsaved value doesn't survive a refresh.
+    setApiKey('');
   }, [config]);
 
   const save = useMutation({
@@ -291,6 +306,7 @@ function EditableEngine({
       ocrPath?: string | null;
       healthPath?: string | null;
       versionPath?: string | null;
+      apiKey?: string | null;
     }) => api.post<EngineConfig>(`/api/admin/engines/${engine}`, input),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['admin', 'engines'] });
@@ -317,6 +333,7 @@ function EditableEngine({
       ocrPath?: string | null;
       healthPath?: string | null;
       versionPath?: string | null;
+      apiKey?: string | null;
     } = {};
     const trimmed = url.trim();
     if (trimmed.length === 0) input.url = null;
@@ -332,6 +349,13 @@ function EditableEngine({
       input.ocrPath = norm(ocrPath);
       input.healthPath = norm(healthPath);
       input.versionPath = norm(versionPath);
+    }
+    if (showApiKey) {
+      // Only send the apiKey field when the operator actually typed
+      // something. Empty input means "don't touch the stored value" —
+      // otherwise loading the page and clicking Save would clear it.
+      // Clearing is done via the dedicated button below.
+      if (apiKey.trim().length > 0) input.apiKey = apiKey.trim();
     }
     try {
       await save.mutateAsync(input);
@@ -460,6 +484,43 @@ function EditableEngine({
               />
             </label>
           </div>
+        ) : null}
+        {showApiKey ? (
+          <label className="block text-xs text-ink-muted">
+            API key (sent as Authorization: Bearer)
+            <div className="mt-1 flex items-center gap-2">
+              <input
+                type="password"
+                autoComplete="off"
+                placeholder={
+                  config?.hasApiKey
+                    ? `••••••••${config.apiKeyLastFour ?? ''} — leave blank to keep, or type to replace`
+                    : 'No key configured'
+                }
+                value={apiKey}
+                onChange={(e) => setApiKey(e.target.value)}
+                className="flex-1 rounded-md border border-surface-muted px-3 py-1.5 text-sm font-mono"
+              />
+              {config?.hasApiKey ? (
+                <button
+                  type="button"
+                  onClick={async () => {
+                    if (!window.confirm(`Clear ${name} API key?`)) return;
+                    try {
+                      await save.mutateAsync({ apiKey: null });
+                      toast.success(`${name} API key cleared`);
+                    } catch (err) {
+                      toast.error(err instanceof ApiError ? err.message : 'clear failed');
+                    }
+                  }}
+                  disabled={save.isPending}
+                  className="rounded-md border border-danger px-3 py-1 text-xs text-danger hover:bg-danger/5 disabled:opacity-50"
+                >
+                  Clear
+                </button>
+              ) : null}
+            </div>
+          </label>
         ) : null}
         <div className="flex flex-wrap gap-2">
           <button

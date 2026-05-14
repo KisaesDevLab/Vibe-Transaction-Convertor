@@ -110,6 +110,11 @@ export interface GlmOcrClientOptions {
   // statements but strips prose headers).
   model?: string | undefined;
   prompt?: string | undefined;
+  // Optional bearer token. vibe-glm-ocr's entrypoint accepts
+  // `OCR_API_KEY` to gate the server; when set, every request needs
+  // `Authorization: Bearer <key>` or llama-server returns 401. Empty
+  // string is treated as "unset" so dev / standalone keeps working.
+  apiKey?: string | undefined;
 }
 
 export class GlmOcrError extends Error {
@@ -148,6 +153,8 @@ interface InternalConfig {
   versionPath: string;
   model: string;
   prompt: string;
+  // null when no key is configured (skips the Authorization header).
+  apiKey: string | null;
 }
 
 // In-memory fallback. Honors a soft TTL but doesn't cleanly expire — the
@@ -219,7 +226,12 @@ const resolveConfig = (opts: GlmOcrClientOptions = {}): InternalConfig => {
   if (!baseUrl) throw new GlmOcrError('GLM_OCR_URL is not set');
   return {
     baseUrl,
-    timeoutMs: opts.timeoutMs ?? Number(process.env.GLM_OCR_TIMEOUT_MS ?? 60_000),
+    // 120s gives ~2× headroom over the vibe-glm-ocr README's published
+    // CPU inference time (40–60s per page). 60s was right at the edge
+    // and every slow page would time out + retry × 3 = ~3 minutes of
+    // wasted wall time per page. Operators on GPU can drop this back
+    // to 30000 via the env / engines admin field.
+    timeoutMs: opts.timeoutMs ?? Number(process.env.GLM_OCR_TIMEOUT_MS ?? 120_000),
     concurrency: opts.concurrency ?? Number(process.env.GLM_OCR_CONCURRENCY ?? 2),
     maxAttempts: opts.maxAttempts ?? 3,
     fetcher: opts.fetcher ?? fetch,
@@ -235,6 +247,10 @@ const resolveConfig = (opts: GlmOcrClientOptions = {}): InternalConfig => {
     versionPath: resolvePath(opts.versionPath ?? process.env.GLM_OCR_VERSION_PATH, '/version'),
     model: opts.model ?? process.env.GLM_OCR_MODEL ?? 'GLM-OCR',
     prompt: opts.prompt ?? process.env.GLM_OCR_PROMPT ?? 'Text Recognition:',
+    apiKey: ((): string | null => {
+      const raw = opts.apiKey ?? process.env.GLM_OCR_API_KEY ?? '';
+      return raw.length > 0 ? raw : null;
+    })(),
   };
 };
 
@@ -269,6 +285,22 @@ export const parseOpenAiChatResponse = (
   const first = choices[0];
   if (!isPlainObject(first)) {
     throw new GlmOcrError('GLM-OCR response: choices[0] is not an object');
+  }
+  // Truncation guard. llama-server reports finish_reason='length' when
+  // the model hit max_tokens / n_predict before completing. Treating
+  // that as success would silently feed truncated markdown to the LLM
+  // extractor — the operator never sees the discrepancy at the OCR
+  // boundary, only as missing transactions downstream. Fail loud here
+  // so the audit row names the page and the cap. 'stop' and (rare)
+  // 'eos' / 'tool_calls' are fine; anything else is suspect but we
+  // pass it through with the diagnostic for forensics.
+  const finishReason = (first as Record<string, unknown>).finish_reason;
+  if (finishReason === 'length') {
+    throw new GlmOcrError(
+      `GLM-OCR response truncated by output-token cap on page ${pageIndex + 1} ` +
+        `(finish_reason='length'). Raise --n-predict / max_tokens on the OCR ` +
+        `server, or shrink page DPI so each image needs fewer output tokens.`,
+    );
   }
   const message = (first as Record<string, unknown>).message;
   if (!isPlainObject(message)) {
@@ -373,9 +405,11 @@ const ocrPage = async (
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), cfg.timeoutMs);
     try {
+      const headers: Record<string, string> = { 'content-type': 'application/json' };
+      if (cfg.apiKey) headers.authorization = `Bearer ${cfg.apiKey}`;
       const res = await cfg.fetcher(url, {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers,
         body: JSON.stringify(requestBody),
         signal: controller.signal,
       });
@@ -411,9 +445,30 @@ const ocrPage = async (
     }
   }
   onFailure();
+  // Translate a final DOMException("This operation was aborted") into a
+  // GlmOcrError that names the URL, the timeout, and the page — without
+  // this, the worker only sees `errorClass: 'DOMException'` and has to
+  // guess which call timed out. The original is attached as `.cause`
+  // so the underlying stack is still recoverable.
+  if (
+    lastErr instanceof Error &&
+    (lastErr.name === 'AbortError' || lastErr.name === 'TimeoutError')
+  ) {
+    const wrapped = new GlmOcrError(
+      `GLM-OCR POST ${url} timed out after ${cfg.timeoutMs} ms (page ${pageIndex + 1}, ${cfg.maxAttempts} attempt${cfg.maxAttempts === 1 ? '' : 's'} exhausted)`,
+      undefined,
+      url,
+    );
+    (wrapped as Error & { cause?: unknown }).cause = lastErr;
+    throw wrapped;
+  }
   throw lastErr instanceof Error
     ? lastErr
-    : new GlmOcrError(`OCR failed after ${cfg.maxAttempts} attempts`);
+    : new GlmOcrError(
+        `OCR failed after ${cfg.maxAttempts} attempts (page ${pageIndex + 1})`,
+        undefined,
+        url,
+      );
 };
 
 const runWithConcurrency = async <T, R>(
@@ -462,7 +517,10 @@ export const probeGlmOcrVersion = async (opts: GlmOcrClientOptions = {}): Promis
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 1500);
     try {
+      const headers: Record<string, string> = {};
+      if (cfg.apiKey) headers.authorization = `Bearer ${cfg.apiKey}`;
       const res = await cfg.fetcher(`${cfg.baseUrl}${cfg.versionPath}`, {
+        headers,
         signal: controller.signal,
       });
       if (!res.ok) return 'glm-ocr/unknown';
@@ -505,7 +563,10 @@ export const probeGlmOcrHealth = async (
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 1500);
     try {
+      const headers: Record<string, string> = {};
+      if (cfg.apiKey) headers.authorization = `Bearer ${cfg.apiKey}`;
       const res = await cfg.fetcher(`${cfg.baseUrl}${cfg.healthPath}`, {
+        headers,
         signal: controller.signal,
       });
       return res.ok ? { ok: true, status: res.status } : { ok: false, status: res.status };
