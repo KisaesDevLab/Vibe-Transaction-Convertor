@@ -2,7 +2,12 @@ import type { Db } from '../db/client.js';
 import { readSettingPlain, upsertSetting } from './system-settings.js';
 import { writeAudit } from './audit.js';
 
-export type PdfProcessingStrategy = 'auto' | 'force-text' | 'force-ocr' | 'auto-ocr-fallback';
+export type PdfProcessingStrategy =
+  | 'auto'
+  | 'force-text'
+  | 'force-ocr'
+  | 'auto-ocr-fallback'
+  | 'auto-text-fallback';
 
 const KEY = 'pdf.processing.strategy';
 const VALID: readonly PdfProcessingStrategy[] = [
@@ -10,6 +15,7 @@ const VALID: readonly PdfProcessingStrategy[] = [
   'force-text',
   'force-ocr',
   'auto-ocr-fallback',
+  'auto-text-fallback',
 ];
 
 export const isPdfProcessingStrategy = (v: unknown): v is PdfProcessingStrategy =>

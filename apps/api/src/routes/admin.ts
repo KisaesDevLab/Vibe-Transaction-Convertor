@@ -797,7 +797,7 @@ export const adminRouter = (): Router => {
       const v = req.body?.strategy;
       if (!isPdfProcessingStrategy(v)) {
         throw new ValidationError(
-          'strategy must be one of: auto, force-text, force-ocr, auto-ocr-fallback',
+          'strategy must be one of: auto, force-text, force-ocr, auto-ocr-fallback, auto-text-fallback',
         );
       }
       await setFirmDefaultPdfStrategy(db, v, req.user!.id);

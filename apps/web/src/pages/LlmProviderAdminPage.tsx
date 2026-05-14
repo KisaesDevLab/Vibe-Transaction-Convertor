@@ -12,7 +12,12 @@ import { api, ApiError } from '../lib/api';
 
 type LlmProviderPolicy = 'local-only' | 'anthropic-only' | 'local-first' | 'anthropic-first';
 
-type PdfProcessingStrategy = 'auto' | 'force-text' | 'force-ocr' | 'auto-ocr-fallback';
+type PdfProcessingStrategy =
+  | 'auto'
+  | 'force-text'
+  | 'force-ocr'
+  | 'auto-ocr-fallback'
+  | 'auto-text-fallback';
 
 const PDF_STRATEGY_LABELS: Record<PdfProcessingStrategy, { title: string; description: string }> = {
   auto: {
@@ -34,6 +39,11 @@ const PDF_STRATEGY_LABELS: Record<PdfProcessingStrategy, { title: string; descri
     title: 'Text-layer with OCR fallback',
     description:
       'Try the text layer first; if the LLM rejects the result (HTTP error, malformed response, empty transactions, or reconciliation discrepancy), retry with GLM-OCR. Up to twice the LLM cost when triggered.',
+  },
+  'auto-text-fallback': {
+    title: 'GLM-OCR with text-layer fallback',
+    description:
+      'Run GLM-OCR first; if the LLM rejects the result, retry with the embedded text layer (when present). Mirror of the OCR-fallback path — useful when the text layer is unreliable (scrambled / hidden text). Up to twice the LLM cost when triggered.',
   },
 };
 

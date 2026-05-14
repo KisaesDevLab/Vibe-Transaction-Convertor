@@ -11,6 +11,7 @@ const STRATEGY_LABELS: Record<StrategyChoice, string> = {
   'force-text': 'Force text-layer extraction',
   'force-ocr': 'Force GLM-OCR',
   'auto-ocr-fallback': 'Text-layer with OCR fallback',
+  'auto-text-fallback': 'GLM-OCR with text-layer fallback',
 };
 
 interface StagedFile {

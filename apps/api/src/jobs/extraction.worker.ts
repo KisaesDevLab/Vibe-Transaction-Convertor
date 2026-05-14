@@ -12,6 +12,7 @@ import {
   repairPromptFor,
   routePdf,
   type ExtractionMethod,
+  type OcrResponse,
 } from '@vibe-tx-converter/extractor';
 import { findSuspectRows, reconcileGoldenRule, repairPass } from '@vibe-tx-converter/reconciler';
 import {
@@ -521,6 +522,29 @@ const traceEntryFor = (
     : null,
 });
 
+const summarizeOcrDiagnostics = (ocr: OcrResponse): Record<string, unknown> => {
+  const variants: Record<string, number> = {};
+  let assumedConfidencePages = 0;
+  let emptyPages = 0;
+  const keySets = new Set<string>();
+  for (const d of ocr.parseDiagnostics) {
+    variants[d.variant] = (variants[d.variant] ?? 0) + 1;
+    if (d.confidenceSource === 'assumed-default') assumedConfidencePages += 1;
+    if (d.emptyText) emptyPages += 1;
+    if (d.bodyTopLevelKeys.length > 0) {
+      keySets.add([...d.bodyTopLevelKeys].sort().join(','));
+    }
+  }
+  return {
+    engineVersion: ocr.engineVersion,
+    pages: ocr.pages.length,
+    variants,
+    assumedConfidencePages,
+    emptyPages,
+    unknownKeySets: Array.from(keySets).slice(0, 5),
+  };
+};
+
 export const processExtraction = async (data: ExtractionJobData): Promise<void> => {
   const stmtId = data.statementId;
   const workerStartedAt = Date.now();
@@ -540,6 +564,8 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
   };
   let providerFallbackFired = false;
   let ocrFallbackFired = false;
+  let textFallbackFired = false;
+  let lastOcrResponse: OcrResponse | null = null;
   let phaseStart = Date.now();
 
   await setStatus(stmtId, 'preprocessing');
@@ -583,13 +609,16 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
   // LLM stack rejects the text-layer input.
   const strategy = await resolvePdfStrategy(db, stmtRows[0]?.processingStrategyOverride);
   let method: ExtractionMethod;
-  if (strategy === 'force-ocr') {
+  if (strategy === 'force-ocr' || strategy === 'auto-text-fallback') {
+    // auto-text-fallback starts with OCR and only falls back to the
+    // text layer if the OCR-fed LLM call rejects. Treated as OCR-first
+    // here; the fallback branch below handles the retry.
     method = 'ocr';
   } else if (strategy === 'force-text') {
     if (!analysis.hasTextLayer) {
       throw new Error(
         'force-text strategy requested but this PDF has no text layer — ' +
-          'switch to auto / force-ocr / auto-ocr-fallback',
+          'switch to auto / force-ocr / auto-ocr-fallback / auto-text-fallback',
       );
     }
     method = 'text';
@@ -643,6 +672,7 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
       ...(ocrConfig.timeoutMs ? { timeoutMs: ocrConfig.timeoutMs } : {}),
       ...(ocrConfig.concurrency ? { concurrency: ocrConfig.concurrency } : {}),
     });
+    lastOcrResponse = ocr;
     return ocr.pages
       .map((p, i) => `# Page ${(scopedRasters[i]?.index ?? p.index) + 1}\n\n${p.markdown}`)
       .join('\n\n');
@@ -713,6 +743,7 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
       configured: strategy,
       effectiveMethod: method,
       ocrFallbackFired,
+      textFallbackFired,
     },
     providerPolicy: {
       policy,
@@ -723,6 +754,7 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
     markdown: {
       chars: markdown.length,
     },
+    ...(lastOcrResponse ? { ocr: summarizeOcrDiagnostics(lastOcrResponse) } : {}),
     attempts,
     timing: {
       totalMs: Date.now() - workerStartedAt,
@@ -847,6 +879,55 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
       return;
     }
     chosen = pickBetterAttempt(chosen, ocrChosen);
+    method = 'hybrid';
+  }
+
+  // Mirror fallback: auto-text-fallback starts with OCR; if the OCR-fed
+  // LLM call rejected and the PDF has a text layer, retry using the
+  // text layer. Skipped silently when no text layer exists — there's
+  // nothing to fall back to. Worst case mirrors auto-ocr-fallback:
+  // 4 LLM calls (ocr×{primary,secondary} → text×{primary,secondary}).
+  if (
+    strategy === 'auto-text-fallback' &&
+    method === 'ocr' &&
+    chosen.rejection !== null &&
+    analysis.hasTextLayer
+  ) {
+    textFallbackFired = true;
+    await writeAudit(db, {
+      entityType: 'statement',
+      entityId: stmtId,
+      action: 'statement.input-fallback',
+      payload: {
+        from: 'ocr',
+        to: 'text-layer',
+        reason: chosen.rejection,
+        ...(chosen.error ? { primaryError: chosen.error.message } : {}),
+      },
+    });
+    logger.info(
+      { stmtId, reason: chosen.rejection },
+      'OCR extraction rejected — retrying with text-layer',
+    );
+    await setStatus(stmtId, 'extracting', { extractionMethod: 'hybrid' });
+    const textMarkdownStart = Date.now();
+    markdown = await produceTextMarkdown();
+    timing.ocrFallbackMarkdownMs = Date.now() - textMarkdownStart;
+    attemptCtx = { ...attemptCtx, markdown };
+    const textLlmStart = Date.now();
+    const textChosen = await runProviderFallback(attemptCtx, 'text-layer');
+    timing.llmMs += Date.now() - textLlmStart;
+    if (textChosen.dateFormat === 'AMBIGUOUS' && !dateFormatOverride) {
+      await persistAmbiguousHalt(textChosen);
+      await writeAudit(db, {
+        entityType: 'statement',
+        entityId: stmtId,
+        action: 'statement.extraction-trace',
+        payload: buildTrace('halted-ambiguous', textChosen),
+      });
+      return;
+    }
+    chosen = pickBetterAttempt(chosen, textChosen);
     method = 'hybrid';
   }
 
@@ -1039,6 +1120,23 @@ export const startExtractionWorker = (): Worker<ExtractionJobData> => {
           if (err.rawResponse.length > RAW_LIMIT) {
             diagnostic.rawResponseTruncated = true;
             diagnostic.rawResponseLength = err.rawResponse.length;
+          }
+          // The provider already did one reminder retry before reaching
+          // this catch (see LocalGatewayProvider.extract). If the LLM
+          // STILL omitted a required top-level field after that, the
+          // underlying gateway almost certainly isn't enforcing the
+          // json_schema we sent — surface an actionable hint so the
+          // operator knows where to look (the gateway, not the prompt).
+          if (err.missingTopLevelFields.length > 0) {
+            diagnostic.missingTopLevelFields = err.missingTopLevelFields;
+            diagnostic.gatewayEnforcementHint =
+              'LLM emitted JSON missing required top-level field(s) twice in a row ' +
+              '(initial call + reminder retry). The local gateway likely is not ' +
+              'enforcing the JSON schema we sent in `response_format.json_schema`. ' +
+              'Enable guided decoding on the gateway (vLLM ' +
+              '`--guided-decoding-backend xgrammar`, llama.cpp grammars, or the ' +
+              'equivalent for your stack) so the model cannot terminate without ' +
+              'emitting every required field.';
           }
         }
         try {

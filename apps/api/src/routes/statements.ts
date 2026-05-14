@@ -3,8 +3,9 @@ import { and, eq, inArray, ne, sql } from 'drizzle-orm';
 import { unlink } from 'node:fs/promises';
 
 import { db } from '../db/client.js';
-import { exportJobs, statements, transactions } from '../db/schema.js';
+import { accounts, exportJobs, statements, transactions } from '../db/schema.js';
 import { ForbiddenError, NotFoundError, ValidationError } from '../lib/errors.js';
+import { isPdfProcessingStrategy } from '../services/pdf-strategy.js';
 import { logger } from '../lib/logger.js';
 import { requireAdmin } from '../middleware/auth.js';
 import { writeAudit } from '../services/audit.js';
@@ -31,16 +32,58 @@ const serializeBigint = <T extends Record<string, unknown>>(row: T): T => {
   return out as T;
 };
 
+// Re-extract accepts an optional `strategy` body field. 'default' (or
+// the literal string 'null'/'') maps to a NULL override so the worker
+// falls through to the firm-wide default; a recognised enum value
+// updates the override; anything else is rejected so the operator
+// notices the typo. Pulled out of the route handler so the parsing is
+// testable on its own.
+type ResolvedReExtractStrategy =
+  | 'auto'
+  | 'force-text'
+  | 'force-ocr'
+  | 'auto-ocr-fallback'
+  | 'auto-text-fallback'
+  | null;
+type StrategyParseResult = { ok: true; value: ResolvedReExtractStrategy } | { ok: false };
+const normaliseStrategy = (raw: unknown): StrategyParseResult => {
+  if (typeof raw !== 'string') return { ok: false };
+  if (raw === 'default' || raw === 'null' || raw === '') return { ok: true, value: null };
+  if (isPdfProcessingStrategy(raw)) return { ok: true, value: raw };
+  return { ok: false };
+};
+
 export const statementsRouter = (): Router => {
   const router = Router();
 
   router.get('/', async (req, res, next) => {
     try {
       const accountId = req.query.accountId ? String(req.query.accountId) : undefined;
-      const where = accountId ? eq(statements.accountId, accountId) : undefined;
-      const rows = await (where
-        ? db.select().from(statements).where(where).orderBy(statements.createdAt)
-        : db.select().from(statements).orderBy(statements.createdAt));
+      const companyId = req.query.companyId ? String(req.query.companyId) : undefined;
+      // accountId is the narrower filter, so when both are present we
+      // honour accountId and skip the company join — same row set, less
+      // work. companyId requires a join through `accounts` since
+      // statements has no direct company FK.
+      if (accountId) {
+        const rows = await db
+          .select()
+          .from(statements)
+          .where(eq(statements.accountId, accountId))
+          .orderBy(statements.createdAt);
+        res.json(rows.map((r) => serializeBigint(r)));
+        return;
+      }
+      if (companyId) {
+        const joined = await db
+          .select({ stmt: statements })
+          .from(statements)
+          .innerJoin(accounts, eq(accounts.id, statements.accountId))
+          .where(eq(accounts.companyId, companyId))
+          .orderBy(statements.createdAt);
+        res.json(joined.map((r) => serializeBigint(r.stmt)));
+        return;
+      }
+      const rows = await db.select().from(statements).orderBy(statements.createdAt);
       res.json(rows.map((r) => serializeBigint(r)));
     } catch (err) {
       next(err);
@@ -721,6 +764,12 @@ export const statementsRouter = (): Router => {
   // Admin: re-enqueue extraction. Useful when the source PDF was
   // re-uploaded or the LLM provider changed. Idempotent at the queue
   // level by virtue of the (account_id, source_pdf_hash) job ID.
+  //
+  // Optional body: { strategy?: PdfProcessingStrategy | 'default' }
+  //   - omitted / 'default' → keep the statement's existing processing
+  //     strategy override (or NULL → firm default).
+  //   - one of the enum values → update the override on this statement
+  //     before re-enqueueing so the worker uses the chosen strategy.
   router.post('/:id/re-extract', requireAdmin, async (req, res, next) => {
     try {
       const id = String(req.params.id);
@@ -730,12 +779,31 @@ export const statementsRouter = (): Router => {
       if (!process.env.REDIS_URL) {
         throw new ForbiddenError('REDIS_URL not configured — extraction queue unavailable');
       }
+      // Parse the optional strategy override. 'default' (or absent)
+      // means "leave the override column alone"; an explicit value
+      // means update it so the worker reads the new strategy.
+      const requestedStrategy = (req.body as { strategy?: unknown } | undefined)?.strategy;
+      let strategyUpdate: { processingStrategyOverride: ResolvedReExtractStrategy } | null = null;
+      if (requestedStrategy !== undefined && requestedStrategy !== null) {
+        const parsed = normaliseStrategy(requestedStrategy);
+        if (!parsed.ok) {
+          throw new ValidationError(
+            'strategy must be one of: default, auto, force-text, force-ocr, auto-ocr-fallback, auto-text-fallback',
+          );
+        }
+        strategyUpdate = { processingStrategyOverride: parsed.value };
+      }
       // Wipe prior transactions so the new run isn't deduped against the
       // old FITIDs. Keep the source PDF.
       await db.delete(transactions).where(eq(transactions.statementId, id));
       await db
         .update(statements)
-        .set({ status: 'uploaded', errorMessage: null, updatedAt: sql`now()` })
+        .set({
+          status: 'uploaded',
+          errorMessage: null,
+          updatedAt: sql`now()`,
+          ...(strategyUpdate ?? {}),
+        })
         .where(eq(statements.id, id));
       // BullMQ's add() is idempotent on jobId; the prior completed job
       // would silently swallow this enqueue. Remove first.
@@ -751,6 +819,14 @@ export const statementsRouter = (): Router => {
         entityType: 'statement',
         entityId: id,
         action: 'statement.re-extract',
+        ...(strategyUpdate
+          ? {
+              payload: {
+                processingStrategyOverride: strategyUpdate.processingStrategyOverride,
+                previousOverride: stmt.processingStrategyOverride ?? null,
+              },
+            }
+          : {}),
       });
       res.json({ ok: true });
     } catch (err) {

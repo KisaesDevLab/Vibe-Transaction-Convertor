@@ -3,8 +3,14 @@ import { describe, expect, it } from 'vitest';
 import { isPdfProcessingStrategy, type PdfProcessingStrategy } from './pdf-strategy.js';
 
 describe('isPdfProcessingStrategy', () => {
-  it('accepts the four valid values', () => {
-    for (const v of ['auto', 'force-text', 'force-ocr', 'auto-ocr-fallback'] as const) {
+  it('accepts the five valid values', () => {
+    for (const v of [
+      'auto',
+      'force-text',
+      'force-ocr',
+      'auto-ocr-fallback',
+      'auto-text-fallback',
+    ] as const) {
       expect(isPdfProcessingStrategy(v)).toBe(true);
     }
   });

@@ -19,6 +19,13 @@ Output shape (Phase 12 nested):
     "transactions": [ ... ]
   }
 
+CRITICAL — required top-level fields. Every response MUST include the
+"period", "balances", "source_date_format", AND "transactions" keys.
+"transactions" MUST always be an array. If you genuinely identify no
+transactions, emit an EMPTY array (transactions: []) and add a "notes"
+field explaining why — NEVER omit the key. Responses missing any
+required top-level field are REJECTED.
+
 Hard rules:
 1. All amounts are signed integer **cents**. Debits are NEGATIVE.
    Credits are POSITIVE. Refunds are POSITIVE. Fees are NEGATIVE.
@@ -61,6 +68,35 @@ export const userPromptFor = (markdown: string, opts: UserPromptOptions = {}): s
   return (
     `Below is the OCR/text-layer markdown for one statement. Emit JSON\n` +
     `that conforms to the schema. Do not add prose around the JSON.${overrideLine}\n\n` +
+    `=== STATEMENT MARKDOWN ===\n${markdown}\n=== END ===`
+  );
+};
+
+// Retry-after-missing-fields prompt. When the LLM's first response is
+// well-formed JSON but omits a required top-level field (most commonly
+// "transactions"), the provider retries once with this prompt instead
+// of bouncing to provider fallback. The local Vibe Gateway with relaxed
+// json_schema enforcement is the typical culprit — the explicit field
+// list plus "you forgot X" framing reliably recovers the second call.
+export const missingFieldsReminderPromptFor = (
+  markdown: string,
+  missingFields: string[],
+  opts: UserPromptOptions = {},
+): string => {
+  const overrideLine = opts.dateFormatOverride
+    ? `\nOperator override: interpret every date in the markdown using ` +
+      `the **${opts.dateFormatOverride}** format. Set source_date_format ` +
+      `to "${opts.dateFormatOverride}" with confidence 1.0.\n`
+    : '';
+  const fieldList = missingFields.length > 0 ? missingFields.join(', ') : 'a required field';
+  return (
+    `Your previous response was REJECTED — it was missing required ` +
+    `top-level field(s): ${fieldList}.\n\n` +
+    `Re-read the markdown below and emit the FULL extraction JSON with ` +
+    `EVERY required top-level field present: period, balances, ` +
+    `source_date_format, AND transactions. The "transactions" key is ` +
+    `MANDATORY — emit "transactions": [] if you genuinely found no rows, ` +
+    `but do NOT omit the key. Output ONLY the JSON object, no prose.${overrideLine}\n\n` +
     `=== STATEMENT MARKDOWN ===\n${markdown}\n=== END ===`
   );
 };

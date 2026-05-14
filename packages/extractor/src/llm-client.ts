@@ -6,6 +6,7 @@ import {
   SYSTEM_PROMPT,
   cleanupMarkdown,
   estimateTokens,
+  missingFieldsReminderPromptFor,
   userPromptFor,
   type UserPromptOptions,
 } from './prompts/extract.js';
@@ -69,21 +70,46 @@ export class ExtractionResponseError extends Error {
   readonly rawResponse: string;
   readonly summary: string;
   readonly issues?: string;
-  constructor(opts: { summary: string; rawResponse: string; issues?: string }) {
+  // Top-level fields the LLM omitted (e.g. ['transactions']). Populated
+  // when the failure was a Zod "Required" miss at depth 1; empty
+  // otherwise. Providers consult this to decide whether to do a one-
+  // shot reminder retry instead of bouncing to provider fallback.
+  readonly missingTopLevelFields: string[];
+  constructor(opts: {
+    summary: string;
+    rawResponse: string;
+    issues?: string;
+    missingTopLevelFields?: string[];
+  }) {
     super(opts.issues ? `${opts.summary} (${opts.issues})` : opts.summary);
     this.name = 'ExtractionResponseError';
     this.rawResponse = opts.rawResponse;
     this.summary = opts.summary;
     if (opts.issues !== undefined) this.issues = opts.issues;
+    this.missingTopLevelFields = opts.missingTopLevelFields ?? [];
   }
 }
+
+// Carve out the first { to last } and re-parse — recovers when the model
+// wraps its JSON in prose. A false positive is impossible: any extra
+// text inside the slice makes JSON.parse fail.
+const recoverProseWrappedJson = (raw: string): unknown | undefined => {
+  const first = raw.indexOf('{');
+  const last = raw.lastIndexOf('}');
+  if (first < 0 || last <= first) return undefined;
+  try {
+    return JSON.parse(raw.slice(first, last + 1));
+  } catch {
+    return undefined;
+  }
+};
 
 // Wraps JSON.parse + Zod validation in ExtractionResponseError so the
 // worker has a single error type to special-case for diagnostic
 // capture. Pass `alreadyParsed` for providers that hand us an already-
 // parsed object (Anthropic tool_use); we still need rawResponse for
 // the audit log, so callers stringify it for us.
-const parseExtractionResponse = (
+export const parseExtractionResponse = (
   rawResponse: string,
   alreadyParsed?: unknown,
 ): ExtractionResult => {
@@ -92,11 +118,16 @@ const parseExtractionResponse = (
     try {
       parsed = JSON.parse(rawResponse);
     } catch (err) {
-      throw new ExtractionResponseError({
-        summary: 'LLM response was not valid JSON',
-        rawResponse,
-        issues: (err as Error).message,
-      });
+      const recovered = recoverProseWrappedJson(rawResponse);
+      if (recovered !== undefined) {
+        parsed = recovered;
+      } else {
+        throw new ExtractionResponseError({
+          summary: 'LLM response was not valid JSON',
+          rawResponse,
+          issues: `${(err as Error).message}; prose-recovery attempt also failed`,
+        });
+      }
     }
   }
   const result = ExtractionResult.safeParse(parsed);
@@ -108,10 +139,26 @@ const parseExtractionResponse = (
         return `${path}: ${i.message}`;
       })
       .join('; ');
+    // Detect "the LLM emitted JSON but omitted a top-level required
+    // field" — Zod surfaces this as either a "Required" message or
+    // an invalid_type issue with received='undefined' at path depth 1.
+    // Two Zod versions in our dep tree (peer + transitive) use slightly
+    // different shapes, so check both.
+    const missingTopLevelFields: string[] = [];
+    for (const issue of result.error.issues) {
+      if (issue.path.length !== 1) continue;
+      const isLegacyRequired = issue.message === 'Required';
+      const recv = (issue as { received?: unknown }).received;
+      const isUndefinedRecv = issue.code === 'invalid_type' && recv === 'undefined';
+      if (isLegacyRequired || isUndefinedRecv) {
+        missingTopLevelFields.push(String(issue.path[0]));
+      }
+    }
     throw new ExtractionResponseError({
       summary: 'LLM response did not match extraction schema',
       rawResponse,
       issues,
+      missingTopLevelFields,
     });
   }
   return result.data;
@@ -219,18 +266,14 @@ export class LocalGatewayProvider implements LlmProvider {
     }
   }
 
-  async extract(markdown: string, arg?: ExtractOptions | object): Promise<ExtractResult> {
-    if (!this.baseUrl) throw new Error('LLM_GATEWAY_URL not set');
-    const opts = coerceOpts(arg);
-    const { text } = prepareMarkdown(markdown);
-    const promptOpts: UserPromptOptions = {};
-    if (opts.dateFormatOverride) promptOpts.dateFormatOverride = opts.dateFormatOverride;
-    if (opts.accountTypeHint) promptOpts.accountTypeHint = opts.accountTypeHint;
-    const messages = [
-      { role: 'system', content: SYSTEM_PROMPT },
-      ...exemplarsAsMessages(),
-      { role: 'user', content: userPromptFor(text, promptOpts) },
-    ];
+  // Single round-trip to the gateway. Returns raw content + per-call
+  // telemetry; pulled out so `extract` can call it twice (initial +
+  // reminder retry) and accumulate tokens without duplicating the
+  // request-building logic.
+  private async callGateway(
+    messages: Array<{ role: string; content: string }>,
+    schema: object | undefined,
+  ): Promise<{ content: string; inputTokens: number; outputTokens: number; ms: number }> {
     const ctl = new AbortController();
     const t = setTimeout(() => ctl.abort(), this.timeoutMs);
     const start = Date.now();
@@ -241,8 +284,8 @@ export class LocalGatewayProvider implements LlmProvider {
         body: JSON.stringify({
           model: this.modelId,
           messages,
-          response_format: opts.schema
-            ? { type: 'json_schema', json_schema: { name: 'extraction', schema: opts.schema } }
+          response_format: schema
+            ? { type: 'json_schema', json_schema: { name: 'extraction', schema } }
             : { type: 'json_object' },
           temperature: 0,
           max_tokens: Number(process.env.LLM_MAX_COMPLETION_TOKENS ?? 6000),
@@ -272,21 +315,73 @@ export class LocalGatewayProvider implements LlmProvider {
           ...(finish ? { issues: `finish_reason=${finish}` } : {}),
         });
       }
-      const data = parseExtractionResponse(content);
       return {
-        data,
-        rawJson: content,
-        telemetry: {
-          inputTokens: body.usage?.prompt_tokens ?? 0,
-          outputTokens: body.usage?.completion_tokens ?? 0,
-          ms: Date.now() - start,
-          model: this.modelId,
-          costMicros: 0n, // local gateway is free
-        },
+        content,
+        inputTokens: body.usage?.prompt_tokens ?? 0,
+        outputTokens: body.usage?.completion_tokens ?? 0,
+        ms: Date.now() - start,
       };
     } finally {
       clearTimeout(t);
     }
+  }
+
+  async extract(markdown: string, arg?: ExtractOptions | object): Promise<ExtractResult> {
+    if (!this.baseUrl) throw new Error('LLM_GATEWAY_URL not set');
+    const opts = coerceOpts(arg);
+    const { text } = prepareMarkdown(markdown);
+    const promptOpts: UserPromptOptions = {};
+    if (opts.dateFormatOverride) promptOpts.dateFormatOverride = opts.dateFormatOverride;
+    if (opts.accountTypeHint) promptOpts.accountTypeHint = opts.accountTypeHint;
+
+    // One-shot reminder retry. When the gateway returns valid JSON
+    // missing a required top-level field (the Vibe Gateway with
+    // relaxed json_schema enforcement is the typical culprit), retry
+    // once with a prompt that names the missing field(s) explicitly.
+    // Telemetry accumulates across both calls.
+    let userPrompt = userPromptFor(text, promptOpts);
+    let totalInputTokens = 0;
+    let totalOutputTokens = 0;
+    let totalMs = 0;
+
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      const messages = [
+        { role: 'system', content: SYSTEM_PROMPT },
+        ...exemplarsAsMessages(),
+        { role: 'user', content: userPrompt },
+      ];
+      const call = await this.callGateway(messages, opts.schema);
+      totalInputTokens += call.inputTokens;
+      totalOutputTokens += call.outputTokens;
+      totalMs += call.ms;
+      try {
+        const data = parseExtractionResponse(call.content);
+        return {
+          data,
+          rawJson: call.content,
+          telemetry: {
+            inputTokens: totalInputTokens,
+            outputTokens: totalOutputTokens,
+            ms: totalMs,
+            model: this.modelId,
+            costMicros: 0n, // local gateway is free
+          },
+        };
+      } catch (err) {
+        if (
+          attempt < 2 &&
+          err instanceof ExtractionResponseError &&
+          err.missingTopLevelFields.length > 0
+        ) {
+          userPrompt = missingFieldsReminderPromptFor(text, err.missingTopLevelFields, promptOpts);
+          continue;
+        }
+        throw err;
+      }
+    }
+    // Loop body either returns or throws — unreachable, but TypeScript
+    // can't see that without an explicit terminator.
+    throw new Error('local gateway extract: retry loop exhausted unexpectedly');
   }
 
   async complete(opts: CompleteOptions): Promise<CompleteResult> {
@@ -462,17 +557,20 @@ export class AnthropicProvider implements LlmProvider {
     }
   }
 
-  async extract(markdown: string, arg?: ExtractOptions | object): Promise<ExtractResult> {
-    const opts = coerceOpts(arg);
-    const { text } = prepareMarkdown(markdown);
-    const promptOpts: UserPromptOptions = {};
-    if (opts.dateFormatOverride) promptOpts.dateFormatOverride = opts.dateFormatOverride;
-    if (opts.accountTypeHint) promptOpts.accountTypeHint = opts.accountTypeHint;
-    const tool = {
-      name: 'emit_extraction',
-      description: 'Emit the structured statement extraction.',
-      input_schema: opts.schema ?? schemas.extraction.ExtractionJsonSchema,
-    };
+  // Single round-trip to Anthropic /v1/messages. Returns the parsed
+  // tool_use input + per-call telemetry. Pulled out so `extract` can
+  // call it twice (initial + reminder retry) and accumulate tokens
+  // without duplicating the request-building logic.
+  private async callAnthropic(
+    messages: Array<{ role: 'user' | 'assistant'; content: string }>,
+    tool: { name: string; description: string; input_schema: object },
+  ): Promise<{
+    rawJson: string;
+    toolInput: unknown;
+    inputTokens: number;
+    outputTokens: number;
+    ms: number;
+  }> {
     const ctl = new AbortController();
     const t = setTimeout(() => ctl.abort(), this.timeoutMs);
     const start = Date.now();
@@ -489,11 +587,8 @@ export class AnthropicProvider implements LlmProvider {
           system: SYSTEM_PROMPT,
           max_tokens: Number(process.env.LLM_MAX_COMPLETION_TOKENS ?? 6000),
           tools: [tool],
-          tool_choice: { type: 'tool', name: 'emit_extraction' },
-          messages: [
-            ...exemplarsAsMessages(1),
-            { role: 'user', content: userPromptFor(text, promptOpts) },
-          ],
+          tool_choice: { type: 'tool', name: tool.name },
+          messages,
         }),
         signal: ctl.signal,
       });
@@ -519,29 +614,80 @@ export class AnthropicProvider implements LlmProvider {
           rawResponse: JSON.stringify(body).slice(0, 8_000),
         });
       }
-      const rawJson = JSON.stringify(toolUse.input);
-      const data = parseExtractionResponse(rawJson, toolUse.input);
-      const inputTokens = body.usage?.input_tokens ?? 0;
-      const outputTokens = body.usage?.output_tokens ?? 0;
       return {
-        data,
-        rawJson,
-        telemetry: {
-          inputTokens,
-          outputTokens,
-          ms: Date.now() - start,
-          model: this.model,
-          costMicros: computeAnthropicCostMicros(
-            this.model,
-            inputTokens,
-            outputTokens,
-            this.priceTable,
-          ),
-        },
+        rawJson: JSON.stringify(toolUse.input),
+        toolInput: toolUse.input,
+        inputTokens: body.usage?.input_tokens ?? 0,
+        outputTokens: body.usage?.output_tokens ?? 0,
+        ms: Date.now() - start,
       };
     } finally {
       clearTimeout(t);
     }
+  }
+
+  async extract(markdown: string, arg?: ExtractOptions | object): Promise<ExtractResult> {
+    const opts = coerceOpts(arg);
+    const { text } = prepareMarkdown(markdown);
+    const promptOpts: UserPromptOptions = {};
+    if (opts.dateFormatOverride) promptOpts.dateFormatOverride = opts.dateFormatOverride;
+    if (opts.accountTypeHint) promptOpts.accountTypeHint = opts.accountTypeHint;
+    const tool = {
+      name: 'emit_extraction',
+      description: 'Emit the structured statement extraction.',
+      input_schema: opts.schema ?? schemas.extraction.ExtractionJsonSchema,
+    };
+
+    // One-shot reminder retry. Anthropic tool_use almost always honors
+    // input_schema strictly, but the same defensive retry that the
+    // local gateway needs applies here too — if the model returns a
+    // tool_use whose input omits a required top-level field, retry
+    // once with an explicit reminder before bouncing to fallback.
+    let userPrompt = userPromptFor(text, promptOpts);
+    let totalInputTokens = 0;
+    let totalOutputTokens = 0;
+    let totalMs = 0;
+
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      const messages: Array<{ role: 'user' | 'assistant'; content: string }> = [
+        ...exemplarsAsMessages(1),
+        { role: 'user', content: userPrompt },
+      ];
+      const call = await this.callAnthropic(messages, tool);
+      totalInputTokens += call.inputTokens;
+      totalOutputTokens += call.outputTokens;
+      totalMs += call.ms;
+      try {
+        const data = parseExtractionResponse(call.rawJson, call.toolInput);
+        return {
+          data,
+          rawJson: call.rawJson,
+          telemetry: {
+            inputTokens: totalInputTokens,
+            outputTokens: totalOutputTokens,
+            ms: totalMs,
+            model: this.model,
+            costMicros: computeAnthropicCostMicros(
+              this.model,
+              totalInputTokens,
+              totalOutputTokens,
+              this.priceTable,
+            ),
+          },
+        };
+      } catch (err) {
+        if (
+          attempt < 2 &&
+          err instanceof ExtractionResponseError &&
+          err.missingTopLevelFields.length > 0
+        ) {
+          userPrompt = missingFieldsReminderPromptFor(text, err.missingTopLevelFields, promptOpts);
+          continue;
+        }
+        throw err;
+      }
+    }
+    throw new Error('anthropic extract: retry loop exhausted unexpectedly');
   }
 
   async complete(opts: CompleteOptions): Promise<CompleteResult> {

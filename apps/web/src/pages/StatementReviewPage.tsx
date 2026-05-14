@@ -4,6 +4,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom';
 import { DeleteConfirmDialog } from '../components/DeleteConfirmDialog';
 import { EntityAuditLog } from '../components/EntityAuditLog';
 import { LocaleConfirmBanner } from '../components/LocaleConfirmBanner';
+import { ReExtractDialog } from '../components/ReExtractDialog';
 import { ReconciliationBadge, StatusBadge } from '../components/StatusBadge';
 import { ReconciliationWidget } from '../components/ReconciliationWidget';
 import { TransactionGrid } from '../components/TransactionGrid';
@@ -539,18 +540,14 @@ export function StatementReviewPage() {
           Useful when investigating discrepancies / overrides. */}
       <EntityAuditLog entityType="statement" entityId={s.id} />
 
-      <DeleteConfirmDialog
+      <ReExtractDialog
         open={reExtractOpen}
-        title="Re-extract this statement?"
-        description="Existing transactions will be discarded and the LLM will run again from the source PDF. Any user edits and trntype overrides on the current rows are lost. The original PDF and audit trail are preserved."
-        confirmText="RE-EXTRACT"
-        confirmButtonLabel="Re-extract"
-        busyLabel="Enqueueing…"
+        currentOverride={s.processingStrategyOverride}
         busy={reExtract.isPending}
         onClose={() => setReExtractOpen(false)}
-        onConfirm={async () => {
+        onConfirm={async (input) => {
           try {
-            await reExtract.mutateAsync();
+            await reExtract.mutateAsync(input);
             toast.success('Re-extraction enqueued');
             setReExtractOpen(false);
           } catch (err) {

@@ -48,12 +48,20 @@ export function GlobalStatementsPage() {
   const accounts = useAccounts(companyId);
 
   const list = useQuery({
-    queryKey: ['statements', { accountId, since, until, status, page }],
-    // The /api/statements endpoint accepts an optional accountId; broader
-    // filters happen client-side until the API gains them. The page is
-    // realistic for under ~5k statements per firm.
-    queryFn: () =>
-      api.get<StatementListRow[]>('/api/statements', accountId ? { accountId } : undefined),
+    queryKey: ['statements', { companyId, accountId, since, until, status, page }],
+    // The /api/statements endpoint accepts optional accountId / companyId.
+    // accountId is the narrower filter and takes precedence when both are
+    // set. Date/status/sort still apply client-side over whatever the API
+    // returned. Realistic for under ~5k statements per firm.
+    queryFn: () => {
+      const params: Record<string, string> = {};
+      if (accountId) params.accountId = accountId;
+      else if (companyId) params.companyId = companyId;
+      return api.get<StatementListRow[]>(
+        '/api/statements',
+        Object.keys(params).length > 0 ? params : undefined,
+      );
+    },
   });
 
   const filtered = useMemo(() => {

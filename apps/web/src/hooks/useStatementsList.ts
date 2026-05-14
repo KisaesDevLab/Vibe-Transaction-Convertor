@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 
 import { api } from '../lib/api';
+import type { PdfProcessingStrategy } from './useAccounts';
 
 export interface StatementSummary {
   id: string;
@@ -27,6 +28,10 @@ export interface StatementSummary {
     splits: Array<{ last4: string; pageStart: number; pageEnd: number }>;
   } | null;
   multiAccountAcknowledged: boolean;
+  // Per-statement override of the firm-wide PDF processing strategy.
+  // NULL means "use the firm default" at extraction time. Surfaced so
+  // the Re-extract dialog can pre-fill the strategy picker.
+  processingStrategyOverride: PdfProcessingStrategy | null;
   errorMessage: string | null;
   createdAt: string;
   updatedAt: string;
@@ -205,10 +210,21 @@ export const useDeleteTransaction = (statementId: string) => {
   });
 };
 
+// Re-extract accepts an optional strategy override. 'default' means
+// "fall back to the firm-wide default" (clears the per-statement
+// override); a concrete strategy updates the override before the worker
+// picks it up. Omitting the argument keeps whatever override the
+// statement already had.
+export type ReExtractStrategy = PdfProcessingStrategy | 'default';
+
 export const useReExtract = (statementId: string) => {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: () => api.post<{ ok: boolean }>(`/api/statements/${statementId}/re-extract`),
+    mutationFn: (input?: { strategy?: ReExtractStrategy }) =>
+      api.post<{ ok: boolean }>(
+        `/api/statements/${statementId}/re-extract`,
+        input?.strategy ? { strategy: input.strategy } : {},
+      ),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['statement', statementId] }),
   });
 };

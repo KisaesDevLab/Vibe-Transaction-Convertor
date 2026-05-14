@@ -1,14 +1,21 @@
 import { createHash } from 'node:crypto';
 
-// Assumed GLM-OCR HTTP contract (QUESTIONS.md Q-005 — operator must
-// confirm against the actual upstream image before production):
+// GLM-OCR HTTP contract.
 //
+// Request (we always send this exact shape):
 //   POST {GLM_OCR_URL}/ocr
 //     content-type: application/json
 //     body: { pages: [{ image_base64: string }, ...] }
-//   200 OK:
-//     { pages: [{ index: number, markdown: string, confidence: number }, ...],
-//       engine_version: string }
+//
+// Response (we accept any of the variants below — see parseOcrResponse):
+//   1. { pages: [{ markdown|text|content|output|ocr_text|raw, confidence|score|conf }, ...] }
+//   2. { data: { pages: [ ... ] } }
+//   3. { result: { ...page... } }   or   { result: "raw markdown" }
+//   4. { markdown|text|...: ..., confidence|...: ... }            (single-page flat)
+//   5. "raw markdown string"                                       (bare-string body)
+// Confidence is coerced from strings, percent (0..100), missing → defaultConfidence.
+// Unrecognized shapes throw GlmOcrError; the error carries the top-level
+// key names (not values) so operators can adjust without leaking PII.
 //
 //   GET {GLM_OCR_URL}/health   — 200 OK if alive
 //   GET {GLM_OCR_URL}/version  — { version: string }, cached 5 min
@@ -23,9 +30,27 @@ export interface OcrPageResult {
   confidence: number;
 }
 
+export type OcrParseVariant =
+  | 'pages-array'
+  | 'data-pages'
+  | 'result-wrapper'
+  | 'flat-page'
+  | 'output-string'
+  | 'from-cache';
+
+export interface OcrParseDiagnostic {
+  pageIndex: number;
+  variant: OcrParseVariant;
+  textFieldUsed: 'markdown' | 'text' | 'content' | 'output' | 'ocr_text' | 'raw' | 'none';
+  confidenceSource: 'present-number' | 'coerced-string' | 'coerced-percent' | 'assumed-default';
+  emptyText: boolean;
+  bodyTopLevelKeys: string[];
+}
+
 export interface OcrResponse {
   pages: OcrPageResult[];
   engineVersion: string;
+  parseDiagnostics: OcrParseDiagnostic[];
 }
 
 // Phase 11 #5: pluggable cache store. The leaf extractor package can't
@@ -44,6 +69,9 @@ export interface GlmOcrClientOptions {
   fetcher?: typeof fetch | undefined;
   cache?: OcrCacheStore | undefined;
   cacheTtlSeconds?: number | undefined;
+  // Fallback when GLM-OCR omits a confidence value. 0.5 ("unknown")
+  // by default; override via GLM_OCR_DEFAULT_CONFIDENCE.
+  defaultConfidence?: number | undefined;
 }
 
 export class GlmOcrError extends Error {
@@ -76,6 +104,7 @@ interface InternalConfig {
   fetcher: typeof fetch;
   cache: OcrCacheStore;
   cacheTtlSeconds: number;
+  defaultConfidence: number;
 }
 
 // In-memory fallback. Honors a soft TTL but doesn't cleanly expire — the
@@ -146,17 +175,195 @@ const resolveConfig = (opts: GlmOcrClientOptions = {}): InternalConfig => {
     // GLM_OCR_CACHE_TTL_DAYS env or per-call option.
     cacheTtlSeconds:
       opts.cacheTtlSeconds ?? Number(process.env.GLM_OCR_CACHE_TTL_DAYS ?? 7) * 86_400,
+    defaultConfidence:
+      opts.defaultConfidence ?? Number(process.env.GLM_OCR_DEFAULT_CONFIDENCE ?? 0.5),
   };
+};
+
+// First non-null present alias wins; order is significant.
+const TEXT_FIELD_ALIASES = ['markdown', 'text', 'content', 'output', 'ocr_text', 'raw'] as const;
+type TextField = (typeof TEXT_FIELD_ALIASES)[number];
+
+const CONFIDENCE_FIELD_ALIASES = ['confidence', 'score', 'conf'] as const;
+
+const isPlainObject = (v: unknown): v is Record<string, unknown> =>
+  typeof v === 'object' && v !== null && !Array.isArray(v);
+
+const topLevelKeys = (body: unknown): string[] => (isPlainObject(body) ? Object.keys(body) : []);
+
+const resolveText = (
+  candidate: Record<string, unknown>,
+): { text: string; field: TextField | 'none'; empty: boolean } => {
+  for (const alias of TEXT_FIELD_ALIASES) {
+    if (alias in candidate) {
+      const raw = candidate[alias];
+      if (raw === null || raw === undefined) {
+        return { text: '', field: alias, empty: true };
+      }
+      const str = typeof raw === 'string' ? raw : String(raw);
+      return { text: str, field: alias, empty: str.length === 0 };
+    }
+  }
+  return { text: '', field: 'none', empty: true };
+};
+
+const coerceConfidence = (
+  raw: unknown,
+  defaultConfidence: number,
+): { value: number; source: OcrParseDiagnostic['confidenceSource'] } => {
+  if (typeof raw === 'number' && Number.isFinite(raw)) {
+    if (raw >= 0 && raw <= 1) return { value: raw, source: 'present-number' };
+    if (raw > 1 && raw <= 100) return { value: raw / 100, source: 'coerced-percent' };
+    return { value: defaultConfidence, source: 'assumed-default' };
+  }
+  if (typeof raw === 'string' && raw.trim().length > 0) {
+    const n = Number(raw);
+    if (Number.isFinite(n)) {
+      const recursed = coerceConfidence(n, defaultConfidence);
+      // Preserve the "string was parsed" provenance only when the value
+      // was actually accepted from the number it parsed to.
+      if (recursed.source === 'present-number' || recursed.source === 'coerced-percent') {
+        return { value: recursed.value, source: 'coerced-string' };
+      }
+      return recursed;
+    }
+  }
+  return { value: defaultConfidence, source: 'assumed-default' };
+};
+
+const resolveConfidence = (
+  candidate: Record<string, unknown>,
+  defaultConfidence: number,
+): { value: number; source: OcrParseDiagnostic['confidenceSource'] } => {
+  for (const alias of CONFIDENCE_FIELD_ALIASES) {
+    if (alias in candidate) {
+      return coerceConfidence(candidate[alias], defaultConfidence);
+    }
+  }
+  return { value: defaultConfidence, source: 'assumed-default' };
+};
+
+// Pure parser. Walks shape variants in order until one yields a page-like
+// object; never throws on missing fields within a recognized shape (those
+// degrade to defaults). Only throws when no shape matches — that error
+// path counts toward the circuit breaker.
+export const parseOcrResponse = (
+  body: unknown,
+  pageIndex: number,
+  defaultConfidence: number,
+): { result: OcrPageResult; diagnostic: OcrParseDiagnostic } => {
+  const keys = topLevelKeys(body);
+
+  const fromString = (
+    str: string,
+    variant: OcrParseVariant,
+    bodyKeys: string[],
+  ): { result: OcrPageResult; diagnostic: OcrParseDiagnostic } => {
+    const empty = str.length === 0;
+    return {
+      result: { index: pageIndex, markdown: str, confidence: empty ? 0 : defaultConfidence },
+      diagnostic: {
+        pageIndex,
+        variant,
+        textFieldUsed: 'none',
+        confidenceSource: 'assumed-default',
+        emptyText: empty,
+        bodyTopLevelKeys: bodyKeys,
+      },
+    };
+  };
+
+  const fromCandidate = (
+    candidate: Record<string, unknown>,
+    variant: OcrParseVariant,
+    bodyKeys: string[],
+  ): { result: OcrPageResult; diagnostic: OcrParseDiagnostic } => {
+    const { text, field, empty } = resolveText(candidate);
+    const { value: confValue, source: confSource } = resolveConfidence(
+      candidate,
+      defaultConfidence,
+    );
+    // Empty markdown overrides confidence to 0 so the trace
+    // distinguishes "we got nothing" from "we got something but no
+    // quality signal".
+    const confidence = empty ? 0 : confValue;
+    const confidenceSource: OcrParseDiagnostic['confidenceSource'] = empty
+      ? 'assumed-default'
+      : confSource;
+    return {
+      result: { index: pageIndex, markdown: text, confidence },
+      diagnostic: {
+        pageIndex,
+        variant,
+        textFieldUsed: field,
+        confidenceSource,
+        emptyText: empty,
+        bodyTopLevelKeys: bodyKeys,
+      },
+    };
+  };
+
+  if (typeof body === 'string') return fromString(body, 'output-string', []);
+
+  if (!isPlainObject(body)) {
+    throw new GlmOcrError(
+      `GLM-OCR response: unrecognized shape (top-level keys: ${keys.join(',') || '<none>'})`,
+      undefined,
+      undefined,
+    );
+  }
+
+  if (Array.isArray(body.pages) && body.pages.length > 0 && isPlainObject(body.pages[0])) {
+    return fromCandidate(body.pages[0] as Record<string, unknown>, 'pages-array', keys);
+  }
+
+  if (isPlainObject(body.data)) {
+    const inner = body.data as Record<string, unknown>;
+    if (Array.isArray(inner.pages) && inner.pages.length > 0 && isPlainObject(inner.pages[0])) {
+      return fromCandidate(inner.pages[0] as Record<string, unknown>, 'data-pages', keys);
+    }
+  }
+
+  if ('result' in body) {
+    const r = body.result;
+    if (typeof r === 'string') return fromString(r, 'result-wrapper', keys);
+    if (isPlainObject(r)) {
+      return fromCandidate(r as Record<string, unknown>, 'result-wrapper', keys);
+    }
+  }
+
+  const hasTextOrConfAlias =
+    TEXT_FIELD_ALIASES.some((a) => a in body) || CONFIDENCE_FIELD_ALIASES.some((a) => a in body);
+  if (hasTextOrConfAlias) return fromCandidate(body, 'flat-page', keys);
+
+  throw new GlmOcrError(
+    `GLM-OCR response: unrecognized shape (top-level keys: ${keys.join(',') || '<none>'})`,
+    undefined,
+    undefined,
+  );
 };
 
 const ocrPage = async (
   cfg: InternalConfig,
   image: Buffer,
   pageIndex: number,
-): Promise<{ result: OcrPageResult; cached: boolean }> => {
+): Promise<{ result: OcrPageResult; cached: boolean; diagnostic: OcrParseDiagnostic }> => {
   const key = hashImage(image);
   const hit = await cfg.cache.get(key);
-  if (hit) return { result: { ...hit, index: pageIndex }, cached: true };
+  if (hit) {
+    return {
+      result: { ...hit, index: pageIndex },
+      cached: true,
+      diagnostic: {
+        pageIndex,
+        variant: 'from-cache',
+        textFieldUsed: 'markdown',
+        confidenceSource: 'present-number',
+        emptyText: hit.markdown.length === 0,
+        bodyTopLevelKeys: [],
+      },
+    };
+  }
 
   if (circuitState() === 'open') {
     throw new GlmOcrCircuitOpenError(
@@ -179,18 +386,15 @@ const ocrPage = async (
       if (!res.ok) {
         throw new GlmOcrError(`GLM-OCR POST ${url} → HTTP ${res.status}`, res.status, url);
       }
-      const body = (await res.json()) as { pages?: OcrPageResult[] };
-      const page = body.pages?.[0];
-      if (!page)
-        throw new GlmOcrError(`GLM-OCR POST ${url} → response missing page`, undefined, url);
-      const normalized: OcrPageResult = {
-        index: pageIndex,
-        markdown: page.markdown,
-        confidence: page.confidence,
-      };
+      const body = (await res.json()) as unknown;
+      const { result: normalized, diagnostic } = parseOcrResponse(
+        body,
+        pageIndex,
+        cfg.defaultConfidence,
+      );
       await cfg.cache.set(key, normalized, cfg.cacheTtlSeconds);
       onSuccess();
-      return { result: normalized, cached: false };
+      return { result: normalized, cached: false, diagnostic };
     } catch (err) {
       lastErr = err;
       // 4xx is a config/contract bug (wrong URL, bad auth, malformed
@@ -275,12 +479,18 @@ export const ocrPdfPages = async (
   opts: GlmOcrClientOptions = {},
 ): Promise<OcrResponse> => {
   const cfg = resolveConfig(opts);
-  const pages = await runWithConcurrency(images, cfg.concurrency, async (img, i) => {
-    const { result } = await ocrPage(cfg, img, i);
-    return result;
+  const perPage = await runWithConcurrency(images, cfg.concurrency, async (img, i) => {
+    const { result, diagnostic } = await ocrPage(cfg, img, i);
+    return { result, diagnostic };
   });
   const engineVersion = await probeGlmOcrVersion(opts);
-  return { pages, engineVersion };
+  const pages: OcrPageResult[] = new Array(perPage.length);
+  const parseDiagnostics: OcrParseDiagnostic[] = new Array(perPage.length);
+  for (let i = 0; i < perPage.length; i += 1) {
+    pages[i] = perPage[i]!.result;
+    parseDiagnostics[i] = perPage[i]!.diagnostic;
+  }
+  return { pages, engineVersion, parseDiagnostics };
 };
 
 export const probeGlmOcrHealth = async (

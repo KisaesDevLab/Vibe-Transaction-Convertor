@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 
 import { api, withBase } from '../lib/api';
+import { companiesKey } from './useCompanies';
 
 export type AccountType = 'CHECKING' | 'SAVINGS' | 'MONEYMRKT' | 'CREDITLINE' | 'CREDITCARD';
 export type CsvTemplate = 'qbo3' | 'qbo4' | 'xero' | 'generic';
@@ -52,7 +53,12 @@ export const useCreateAccount = (companyId: string) => {
   return useMutation({
     mutationFn: (input: CreateAccountInput) =>
       api.post<Account>(`/api/companies/${companyId}/accounts`, input),
-    onSuccess: () => qc.invalidateQueries({ queryKey: accountsKey(companyId) }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: accountsKey(companyId) });
+      // Companies list shows `accountCount` per row; without this the
+      // count stays stale until a hard refresh.
+      qc.invalidateQueries({ queryKey: companiesKey });
+    },
   });
 };
 
@@ -61,7 +67,10 @@ export const useDeleteAccount = (companyId: string) => {
   return useMutation({
     mutationFn: ({ id, force }: { id: string; force?: boolean }) =>
       api.delete<void>(`/api/accounts/${id}${force ? '?force=true' : ''}`),
-    onSuccess: () => qc.invalidateQueries({ queryKey: accountsKey(companyId) }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: accountsKey(companyId) });
+      qc.invalidateQueries({ queryKey: companiesKey });
+    },
   });
 };
 
@@ -103,7 +112,12 @@ const readCsrfFromCookie = (): string =>
     .find((c) => c.startsWith('vibetc_csrf='))
     ?.split('=')[1] ?? '';
 
-export type PdfProcessingStrategy = 'auto' | 'force-text' | 'force-ocr' | 'auto-ocr-fallback';
+export type PdfProcessingStrategy =
+  | 'auto'
+  | 'force-text'
+  | 'force-ocr'
+  | 'auto-ocr-fallback'
+  | 'auto-text-fallback';
 
 export interface UploadInput {
   files: File[];
