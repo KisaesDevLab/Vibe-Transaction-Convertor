@@ -229,6 +229,11 @@ export const statements = vibetc.table(
       .references(() => accounts.id, { onDelete: 'cascade' }),
     sourcePdfHash: text('source_pdf_hash').notNull(),
     sourcePdfPath: text('source_pdf_path').notNull(),
+    // Flips true when the file at sourcePdfPath is intentionally removed
+    // (admin Delete-PDF, statement delete, or retention sweep). The row
+    // and its transactions stay; only the bytes on disk are gone. The
+    // statement.delete-pdf audit row carries the "why".
+    sourcePdfDeleted: boolean('source_pdf_deleted').notNull().default(false),
     sourcePdfPages: integer('source_pdf_pages').notNull(),
     periodStart: date('period_start'),
     periodEnd: date('period_end'),

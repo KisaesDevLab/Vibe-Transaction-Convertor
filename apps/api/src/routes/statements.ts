@@ -5,6 +5,7 @@ import { unlink } from 'node:fs/promises';
 import { db } from '../db/client.js';
 import { accounts, exportJobs, statements, transactions } from '../db/schema.js';
 import { ForbiddenError, NotFoundError, ValidationError } from '../lib/errors.js';
+import { deletePdfForStatement } from '../services/pdf-retention.js';
 import { isPdfProcessingStrategy } from '../services/pdf-strategy.js';
 import { logger } from '../lib/logger.js';
 import { requireAdmin } from '../middleware/auth.js';
@@ -776,6 +777,11 @@ export const statementsRouter = (): Router => {
       const rows = await db.select().from(statements).where(eq(statements.id, id));
       const stmt = rows[0];
       if (!stmt) throw new NotFoundError(`statement ${id}`);
+      if (stmt.sourcePdfDeleted) {
+        throw new ValidationError(
+          'source PDF has been removed for this statement — re-upload to enable re-extraction',
+        );
+      }
       if (!process.env.REDIS_URL) {
         throw new ForbiddenError('REDIS_URL not configured — extraction queue unavailable');
       }
@@ -957,6 +963,38 @@ export const statementsRouter = (): Router => {
   //
   // Disk: rendered export files are unlinked best-effort before the row
   // delete (the FK cascade only drops DB rows, not files). The source
+  // Admin: delete just the source PDF and keep the statement +
+  // transactions. Used when the firm wants to free disk / satisfy a
+  // retention policy without losing the extracted data. Cascades the
+  // sourcePdfDeleted flag to every sibling statement sharing the same
+  // hash so the UI on those rows shows "PDF gone" instead of pointing
+  // at a missing file. Idempotent: a second call on an already-
+  // deleted PDF is a no-op (returns fileRemoved=false).
+  router.post('/:id/delete-pdf', requireAdmin, async (req, res, next) => {
+    try {
+      const id = String(req.params.id);
+      const rows = await db.select().from(statements).where(eq(statements.id, id));
+      const stmt = rows[0];
+      if (!stmt) throw new NotFoundError(`statement ${id}`);
+      const result = await deletePdfForStatement(db, id, stmt);
+      await writeAudit(db, {
+        actorUserId: req.user!.id,
+        entityType: 'statement',
+        entityId: id,
+        action: 'statement.delete-pdf',
+        payload: {
+          sourcePdfHash: stmt.sourcePdfHash,
+          fileRemoved: result.fileRemoved,
+          cascadedSiblings: result.cascadedSiblings,
+          alreadyDeleted: stmt.sourcePdfDeleted,
+        },
+      });
+      res.json({ ok: true, ...result, alreadyDeleted: stmt.sourcePdfDeleted });
+    } catch (err) {
+      next(err);
+    }
+  });
+
   // PDF is unlinked only if no other statement still references the
   // same content hash (hash is shared across re-uploads to multiple
   // accounts and across split children).
@@ -1000,17 +1038,14 @@ export const statementsRouter = (): Router => {
 
       await db.delete(statements).where(eq(statements.id, id));
 
-      // Source-PDF retention check. Different statements (e.g. a
-      // re-upload to a different account, or a multi-account split
-      // child) can share the same source_pdf_hash. Only unlink when
-      // no row remains.
+      // Source PDF: always unlink the file (unless it's already gone, or
+      // already marked deleted on this row). Different statements can
+      // share the same source_pdf_hash via dedupe / split children — we
+      // cascade the source_pdf_deleted flag onto those siblings so they
+      // surface as "PDF gone" in the UI rather than carrying a stale
+      // path to a missing file.
       let sourcePdfRemoved = false;
-      const otherRefs = await db
-        .select({ id: statements.id })
-        .from(statements)
-        .where(and(eq(statements.sourcePdfHash, stmt.sourcePdfHash), ne(statements.id, id)))
-        .limit(1);
-      if (otherRefs.length === 0) {
+      if (!stmt.sourcePdfDeleted) {
         try {
           await unlink(stmt.sourcePdfPath);
           sourcePdfRemoved = true;
@@ -1018,6 +1053,18 @@ export const statementsRouter = (): Router => {
           // Already gone or missing — non-fatal.
         }
       }
+      const cascadedRows = await db
+        .update(statements)
+        .set({ sourcePdfDeleted: true, updatedAt: sql`now()` })
+        .where(
+          and(
+            eq(statements.sourcePdfHash, stmt.sourcePdfHash),
+            ne(statements.id, id),
+            eq(statements.sourcePdfDeleted, false),
+          ),
+        )
+        .returning({ id: statements.id });
+      const cascadedSiblings = cascadedRows.length;
 
       await writeAudit(db, {
         actorUserId: req.user!.id,
@@ -1031,10 +1078,11 @@ export const statementsRouter = (): Router => {
           txCount,
           exportFilesRemoved,
           sourcePdfRemoved,
+          cascadedSiblings,
         },
       });
 
-      res.json({ ok: true, txCount, exportFilesRemoved, sourcePdfRemoved });
+      res.json({ ok: true, txCount, exportFilesRemoved, sourcePdfRemoved, cascadedSiblings });
     } catch (err) {
       next(err);
     }

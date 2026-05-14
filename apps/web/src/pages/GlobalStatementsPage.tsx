@@ -3,14 +3,18 @@
 // with a global lens that filters by company → account, period range,
 // status, and search. Default sort: newest first.
 
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Link, useSearchParams } from 'react-router-dom';
 
+import { DeleteConfirmDialog } from '../components/DeleteConfirmDialog';
 import { ReconciliationBadge, StatusBadge } from '../components/StatusBadge';
+import { useToast } from '../components/Toast';
 import { useCompanies } from '../hooks/useCompanies';
 import { useAccounts } from '../hooks/useAccounts';
-import { api } from '../lib/api';
+import { useDeleteStatement } from '../hooks/useStatementsList';
+import { useMe } from '../hooks/useAuth';
+import { ApiError, api } from '../lib/api';
 
 interface StatementListRow {
   id: string;
@@ -29,6 +33,13 @@ const PAGE_SIZE = 50;
 
 export function GlobalStatementsPage() {
   const [params, setParams] = useSearchParams();
+  const me = useMe();
+  const isAdmin = me.data?.role === 'admin';
+  const toast = useToast();
+  const deleteStmt = useDeleteStatement();
+  // Holds the row pending delete-confirm. Single-row at a time keeps
+  // the dialog logic simple — admins do this rarely and serially.
+  const [pendingDelete, setPendingDelete] = useState<StatementListRow | null>(null);
   const companyId = params.get('companyId') ?? '';
   const accountId = params.get('accountId') ?? '';
   const since = params.get('since') ?? '';
@@ -264,12 +275,26 @@ export function GlobalStatementsPage() {
                     {new Date(s.createdAt).toLocaleString()}
                   </td>
                   <td className="px-3 py-2 text-right">
-                    <Link
-                      to={`/statements/${s.id}`}
-                      className="text-sm text-accent hover:underline"
-                    >
-                      Review →
-                    </Link>
+                    <div className="flex items-center justify-end gap-3">
+                      {isAdmin ? (
+                        <button
+                          type="button"
+                          onClick={() => setPendingDelete(s)}
+                          disabled={deleteStmt.isPending && pendingDelete?.id === s.id}
+                          className="text-sm text-danger hover:underline disabled:opacity-50"
+                        >
+                          {deleteStmt.isPending && pendingDelete?.id === s.id
+                            ? 'Deleting…'
+                            : 'Delete'}
+                        </button>
+                      ) : null}
+                      <Link
+                        to={`/statements/${s.id}`}
+                        className="text-sm text-accent hover:underline"
+                      >
+                        Review →
+                      </Link>
+                    </div>
                   </td>
                 </tr>
               ))}
@@ -316,6 +341,51 @@ export function GlobalStatementsPage() {
           </button>
         </div>
       ) : null}
+
+      <DeleteConfirmDialog
+        open={pendingDelete !== null}
+        title="Delete this statement?"
+        description={
+          pendingDelete ? (
+            <div className="space-y-2 text-sm text-ink-muted">
+              <p>
+                Statement{' '}
+                <code className="rounded bg-surface-subtle px-1 font-mono text-xs">
+                  {pendingDelete.id.slice(0, 8)}
+                </code>{' '}
+                — period{' '}
+                {pendingDelete.periodStart && pendingDelete.periodEnd
+                  ? `${pendingDelete.periodStart} → ${pendingDelete.periodEnd}`
+                  : 'pending'}
+                , {pendingDelete.sourcePdfPages} page
+                {pendingDelete.sourcePdfPages === 1 ? '' : 's'}.
+              </p>
+              <p>
+                The statement row, all extracted transactions, and any rendered export files will be
+                removed. The source PDF is unlinked unless another statement still references it.
+                The audit log entry survives. Re-upload the same PDF to start over.
+              </p>
+            </div>
+          ) : (
+            ''
+          )
+        }
+        confirmText="DELETE"
+        confirmButtonLabel="Delete"
+        busyLabel="Deleting…"
+        busy={deleteStmt.isPending}
+        onClose={() => setPendingDelete(null)}
+        onConfirm={async () => {
+          if (!pendingDelete) return;
+          try {
+            const r = await deleteStmt.mutateAsync({ id: pendingDelete.id });
+            toast.success(`Statement deleted${r.sourcePdfRemoved ? ' (source PDF removed)' : ''}.`);
+            setPendingDelete(null);
+          } catch (err) {
+            toast.error(err instanceof ApiError ? err.message : 'delete failed');
+          }
+        }}
+      />
     </section>
   );
 }

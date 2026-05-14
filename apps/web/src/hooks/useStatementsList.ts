@@ -32,6 +32,10 @@ export interface StatementSummary {
   // NULL means "use the firm default" at extraction time. Surfaced so
   // the Re-extract dialog can pre-fill the strategy picker.
   processingStrategyOverride: PdfProcessingStrategy | null;
+  // true when the source PDF has been removed from disk (admin Delete-
+  // PDF, statement delete on a sibling, or retention sweep). The row
+  // and its transactions remain; the viewer and re-extract are blocked.
+  sourcePdfDeleted: boolean;
   errorMessage: string | null;
   createdAt: string;
   updatedAt: string;
@@ -236,17 +240,49 @@ export interface DeleteStatementResult {
   sourcePdfRemoved: boolean;
 }
 
-// Admin-only hard delete of a `failed` or `awaiting-locale-confirmation`
-// statement. Cascades transactions + export_jobs at the DB level and
-// (when no other statement references the same content hash) unlinks
-// the source PDF — so re-uploading the same file is then a fresh ingest
-// rather than a dedupe hit on the broken row.
-export const useDeleteStatement = (statementId: string) => {
+// Admin-only delete of just the source PDF, leaving the statement row
+// and transactions intact. Cascades the sourcePdfDeleted flag to every
+// sibling statement that shared the same source_pdf_hash so the UI on
+// those rows stops promising a viewable PDF. Idempotent — calling it
+// twice returns { fileRemoved: false, alreadyDeleted: true } the
+// second time.
+export interface DeletePdfResult {
+  ok: boolean;
+  fileRemoved: boolean;
+  cascadedSiblings: number;
+  alreadyDeleted: boolean;
+}
+
+export const useDeleteStatementPdf = () => {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: () => api.delete<DeleteStatementResult>(`/api/statements/${statementId}`),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['statement', statementId] });
+    mutationFn: ({ id }: { id: string }) =>
+      api.post<DeletePdfResult>(`/api/statements/${id}/delete-pdf`),
+    onSuccess: (_data, { id }) => {
+      // Invalidate this statement (so sourcePdfDeleted flips in the
+      // detail view) plus the list (so any other row that just got
+      // cascaded shows up as deleted).
+      qc.invalidateQueries({ queryKey: ['statement', id] });
+      qc.invalidateQueries({ queryKey: ['statements'] });
+    },
+  });
+};
+
+// Admin-only hard delete of a statement. Cascades transactions +
+// export_jobs at the DB level, unconditionally unlinks the source PDF,
+// and flips sourcePdfDeleted=true on every sibling statement sharing
+// the same content hash so dedupe siblings don't hold a stale path.
+//
+// Takes the id at mutation time so the same hook instance can be shared
+// across a list view (one hook, N rows). Both the review page and the
+// statements list call it as `deleteStmt.mutateAsync({ id })`.
+export const useDeleteStatement = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id }: { id: string }) =>
+      api.delete<DeleteStatementResult>(`/api/statements/${id}`),
+    onSuccess: (_data, { id }) => {
+      qc.invalidateQueries({ queryKey: ['statement', id] });
       qc.invalidateQueries({ queryKey: ['statements'] });
     },
   });

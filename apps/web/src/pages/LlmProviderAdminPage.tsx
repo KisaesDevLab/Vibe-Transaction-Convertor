@@ -3,7 +3,7 @@
 // this page is the deep-config surface (model picker, monthly cap,
 // test-connection, cost dashboard, key rotation).
 
-import { type FormEvent, useState } from 'react';
+import { type FormEvent, useEffect, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 
@@ -126,6 +126,31 @@ export function LlmProviderAdminPage() {
     mutationFn: (s: PdfProcessingStrategy) =>
       api.post<{ strategy: PdfProcessingStrategy }>('/api/admin/pdf-strategy', { strategy: s }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'pdf-strategy'] }),
+  });
+  // PDF retention: days = null/0 → disabled, positive int → auto-purge
+  // PDFs older than N days. The daily cron honors this; the "Run now"
+  // button below triggers the same sweep on demand.
+  const pdfRetention = useQuery({
+    queryKey: ['admin', 'pdf-retention'],
+    queryFn: () =>
+      api.get<{ days: number | null; lastSweepAt: string | null }>('/api/admin/pdf-retention'),
+  });
+  const setRetention = useMutation({
+    mutationFn: (days: number | null) =>
+      api.post<{ days: number | null }>('/api/admin/pdf-retention', { days }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'pdf-retention'] }),
+  });
+  const runRetentionNow = useMutation({
+    mutationFn: () =>
+      api.post<{
+        ranAt: string;
+        retentionDays: number | null;
+        candidates: number;
+        filesRemoved: number;
+        rowsFlipped: number;
+        skipped: 'disabled' | null;
+      }>('/api/admin/pdf-retention/sweep'),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'pdf-retention'] }),
   });
   const setKey = useMutation({
     mutationFn: (apiKey: string) => api.post('/api/admin/llm-provider/anthropic-key', { apiKey }),
@@ -306,6 +331,28 @@ export function LlmProviderAdminPage() {
               </label>
             ))}
           </fieldset>
+        ) : (
+          <p className="mt-2 text-sm text-ink-muted">Loading…</p>
+        )}
+      </section>
+
+      <section className="rounded-lg border border-surface-muted bg-white p-4">
+        <h2 className="text-base font-medium">PDF retention</h2>
+        <p className="mt-1 text-xs text-ink-muted">
+          Auto-purge source PDFs older than N days. Statements and transactions are kept; only the
+          file on disk is removed. Leave the field blank (or zero) to disable. The sweep also runs
+          daily at 04:00 UTC.
+        </p>
+        {pdfRetention.data !== undefined ? (
+          <RetentionEditor
+            days={pdfRetention.data.days}
+            lastSweepAt={pdfRetention.data.lastSweepAt}
+            saving={setRetention.isPending}
+            sweeping={runRetentionNow.isPending}
+            sweepResult={runRetentionNow.data}
+            onSave={(d) => setRetention.mutate(d)}
+            onSweep={() => runRetentionNow.mutate()}
+          />
         ) : (
           <p className="mt-2 text-sm text-ink-muted">Loading…</p>
         )}
@@ -821,5 +868,93 @@ function CapForm({
         {disabled ? 'Saving…' : 'Save cap'}
       </button>
     </form>
+  );
+}
+
+function RetentionEditor({
+  days,
+  lastSweepAt,
+  saving,
+  sweeping,
+  sweepResult,
+  onSave,
+  onSweep,
+}: {
+  days: number | null;
+  lastSweepAt: string | null;
+  saving: boolean;
+  sweeping: boolean;
+  sweepResult:
+    | {
+        ranAt: string;
+        retentionDays: number | null;
+        candidates: number;
+        filesRemoved: number;
+        rowsFlipped: number;
+        skipped: 'disabled' | null;
+      }
+    | undefined;
+  onSave: (days: number | null) => void;
+  onSweep: () => void;
+}) {
+  // Local input state lets the admin edit freely; server only sees the
+  // final value when "Save" lands. Empty string == null (disabled).
+  const [input, setInput] = useState(days === null ? '' : String(days));
+  useEffect(() => {
+    setInput(days === null ? '' : String(days));
+  }, [days]);
+  const parsed = input.trim() === '' ? null : Number.parseInt(input.trim(), 10);
+  const invalid = parsed !== null && (!Number.isFinite(parsed) || parsed < 1);
+  return (
+    <div className="mt-3 space-y-3 text-sm">
+      <div className="flex flex-wrap items-end gap-3">
+        <label className="flex flex-col gap-1">
+          <span className="text-xs text-ink-muted">Days to retain</span>
+          <input
+            type="number"
+            min={1}
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            disabled={saving}
+            placeholder="disabled"
+            className="w-28 rounded-md border border-surface-muted px-2 py-1"
+          />
+        </label>
+        <button
+          type="button"
+          onClick={() => !invalid && onSave(parsed)}
+          disabled={saving || invalid}
+          className="rounded-md border border-surface-muted px-3 py-1.5 text-sm disabled:opacity-50"
+        >
+          {saving ? 'Saving…' : 'Save'}
+        </button>
+        <button
+          type="button"
+          onClick={onSweep}
+          disabled={sweeping || days === null}
+          title={
+            days === null ? 'Set a retention period first' : 'Run the retention sweep immediately'
+          }
+          className="rounded-md border border-accent px-3 py-1.5 text-sm text-accent hover:bg-accent/5 disabled:opacity-50"
+        >
+          {sweeping ? 'Sweeping…' : 'Run sweep now'}
+        </button>
+      </div>
+      {invalid ? (
+        <p className="text-xs text-danger">days must be a positive integer (or empty to disable)</p>
+      ) : null}
+      <p className="text-xs text-ink-muted">
+        Current: {days === null ? <em>disabled</em> : `purge PDFs older than ${days} day(s)`}
+        {lastSweepAt ? ` · last sweep ${new Date(lastSweepAt).toLocaleString()}` : ' · never run'}
+      </p>
+      {sweepResult ? (
+        <p className="text-xs text-ink-muted">
+          Last run:{' '}
+          {sweepResult.skipped === 'disabled'
+            ? 'skipped (disabled)'
+            : `${sweepResult.candidates} candidate(s), ${sweepResult.filesRemoved} file(s) unlinked, ${sweepResult.rowsFlipped} row(s) flagged.`}
+        </p>
+      ) : null}
+    </div>
   );
 }

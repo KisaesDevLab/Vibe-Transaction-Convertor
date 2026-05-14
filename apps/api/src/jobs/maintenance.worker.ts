@@ -8,11 +8,18 @@ import { auditLog, sessions } from '../db/schema.js';
 import { logger } from '../lib/logger.js';
 import { cleanupExpiredBackups } from '../services/backup.js';
 import { cleanupExpiredExports } from '../services/exports.js';
+import { runRetentionSweep } from '../services/pdf-retention.js';
 
 import { QUEUE_MAINTENANCE, getJobConnection, maintenanceQueue } from './queues.js';
 
 interface MaintenanceJobData {
-  task: 'prune-sessions' | 'prune-audit' | 'clean-tmp' | 'expire-exports' | 'expire-backups';
+  task:
+    | 'prune-sessions'
+    | 'prune-audit'
+    | 'clean-tmp'
+    | 'expire-exports'
+    | 'expire-backups'
+    | 'purge-pdfs';
 }
 
 const pruneSessions = async (): Promise<{ deleted: number }> => {
@@ -114,6 +121,12 @@ const processMaintenance = async (data: MaintenanceJobData): Promise<unknown> =>
       return cleanupExpiredExports(db);
     case 'expire-backups':
       return cleanupExpiredBackups();
+    case 'purge-pdfs':
+      // Reads pdf.retention.days from system_settings each tick so an
+      // admin can dial retention up/down without a worker restart.
+      // Returns skipped='disabled' when the setting is unset, which the
+      // audit log surfaces so operators see why nothing happened.
+      return runRetentionSweep(db, null);
     default:
       throw new Error(`unknown maintenance task: ${(data as { task: string }).task}`);
   }
@@ -168,5 +181,12 @@ const scheduleRecurring = async (): Promise<void> => {
     'expire-backups',
     { task: 'expire-backups' },
     { repeat: { pattern: '45 3 * * *' }, removeOnComplete: 50 },
+  );
+  // PDF retention sweep — runs daily after the other 03:xx housekeeping.
+  // Reads pdf.retention.days from system_settings; no-op when unset.
+  await q.add(
+    'purge-pdfs',
+    { task: 'purge-pdfs' },
+    { repeat: { pattern: '0 4 * * *' }, removeOnComplete: 50 },
   );
 };

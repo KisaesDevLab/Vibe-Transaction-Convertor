@@ -15,6 +15,13 @@ export interface PdfViewerProps {
   pdfHash: string;
   highlight: { page: number; bbox: [number, number, number, number] } | null;
   onPdfClick?: (loc: { page: number; x: number; y: number }) => void;
+  // When provided, renders a destructive "Delete PDF" button in the
+  // viewer header. Parent is responsible for the confirm dialog and
+  // for hiding the viewer entirely once the PDF is actually gone.
+  onDeletePdf?: () => void;
+  // Disables the Delete-PDF button while the parent's mutation is
+  // pending. Has no effect when onDeletePdf is not supplied.
+  deletePdfBusy?: boolean;
 }
 
 const ZOOM_STEPS = [0.5, 0.75, 1, 1.25, 1.5, 2];
@@ -24,7 +31,13 @@ const FIT_KEY = 'vibetc:pdfviewer:fit';
 
 type FitMode = 'manual' | 'width' | 'page';
 
-export function PdfViewer({ pdfHash, highlight, onPdfClick }: PdfViewerProps) {
+export function PdfViewer({
+  pdfHash,
+  highlight,
+  onPdfClick,
+  onDeletePdf,
+  deletePdfBusy,
+}: PdfViewerProps) {
   // We feed pdf.js the raw bytes (Uint8Array) instead of a blob: URL.
   // Wrapping the API response in URL.createObjectURL and handing that
   // string to <Document file={...}/> makes pdf.js's worker do its own
@@ -261,6 +274,17 @@ export function PdfViewer({ pdfHash, highlight, onPdfClick }: PdfViewerProps) {
           >
             ↓ Download
           </button>
+          {onDeletePdf ? (
+            <button
+              type="button"
+              onClick={onDeletePdf}
+              disabled={deletePdfBusy}
+              title="Remove the source PDF from disk. The statement and transactions are kept."
+              className="rounded border border-danger px-2 py-0.5 text-danger hover:bg-danger/5 disabled:opacity-50"
+            >
+              {deletePdfBusy ? 'Deleting…' : 'Delete PDF'}
+            </button>
+          ) : null}
         </div>
       </div>
 

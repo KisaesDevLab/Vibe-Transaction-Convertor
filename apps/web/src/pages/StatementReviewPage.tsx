@@ -15,6 +15,7 @@ import {
   useAddTransaction,
   useConfirmDateFormat,
   useDeleteStatement,
+  useDeleteStatementPdf,
   useDeleteTransaction,
   useEnrichStatement,
   useReExtract,
@@ -66,7 +67,8 @@ export function StatementReviewPage() {
   const addTx = useAddTransaction(statementId);
   const deleteTx = useDeleteTransaction(statementId);
   const reExtract = useReExtract(statementId);
-  const deleteStmt = useDeleteStatement(statementId);
+  const deleteStmt = useDeleteStatement();
+  const deletePdf = useDeleteStatementPdf();
   const recompute = useRecomputeReconciliation(statementId);
   const confirmFormat = useConfirmDateFormat(statementId);
   const ackMultiAccount = useAcknowledgeMultiAccount(statementId);
@@ -81,6 +83,7 @@ export function StatementReviewPage() {
   const [splitOpen, setSplitOpen] = useState(false);
   const [reExtractOpen, setReExtractOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const [deletePdfOpen, setDeletePdfOpen] = useState(false);
   // Pull the parent account → company so the split modal can show only
   // accounts under the same company in the per-segment dropdowns.
   const parentAccount = useAccount(stmt.data?.statement.accountId ?? '');
@@ -202,7 +205,12 @@ export function StatementReviewPage() {
             <button
               type="button"
               onClick={() => setReExtractOpen(true)}
-              disabled={reExtract.isPending}
+              disabled={reExtract.isPending || s.sourcePdfDeleted}
+              title={
+                s.sourcePdfDeleted
+                  ? 'Source PDF has been deleted — re-upload to re-extract'
+                  : undefined
+              }
               className="rounded-md border border-surface-muted px-3 py-1.5 text-sm hover:bg-surface-subtle disabled:opacity-50"
             >
               {reExtract.isPending ? 'Enqueueing…' : 'Re-extract'}
@@ -485,52 +493,69 @@ export function StatementReviewPage() {
               isn't usable on small screens, and rendering pdf.js there is
               expensive for no benefit. Phase 19 item 14. */}
           <div className="hidden lg:block">
-            <PdfViewer
-              pdfHash={s.sourcePdfHash}
-              highlight={
-                selectedTx?.sourceBboxJson
+            {s.sourcePdfDeleted ? (
+              <div className="rounded-lg border border-surface-muted bg-surface-subtle p-6 text-sm text-ink-muted">
+                <p className="font-medium text-ink">Source PDF has been deleted.</p>
+                <p className="mt-1">
+                  The extracted transactions, period bounds, and export files are still here. The
+                  original PDF was removed from disk by an admin action or the retention sweep.
+                  Re-extract is unavailable; re-upload the same PDF to start over.
+                </p>
+              </div>
+            ) : (
+              <PdfViewer
+                pdfHash={s.sourcePdfHash}
+                {...(isAdmin
                   ? {
-                      page: selectedTx.sourcePage,
-                      bbox: selectedTx.sourceBboxJson,
+                      onDeletePdf: () => setDeletePdfOpen(true),
+                      deletePdfBusy: deletePdf.isPending,
                     }
-                  : null
-              }
-              onPdfClick={(loc) => {
-                // Phase 19 #7: PDF→txn click selection. Find the row whose
-                // source_page matches and whose bbox contains the click;
-                // when no exact hit, fall back to the closest center on
-                // the same page (Euclidean distance in PDF user-space).
-                const onPage = txs.filter((t) => t.sourcePage === loc.page);
-                if (onPage.length === 0) return;
-                const inBbox = onPage.find(
-                  (t) =>
-                    t.sourceBboxJson &&
-                    loc.x >= t.sourceBboxJson[0] &&
-                    loc.x <= t.sourceBboxJson[2] &&
-                    loc.y >= t.sourceBboxJson[1] &&
-                    loc.y <= t.sourceBboxJson[3],
-                );
-                if (inBbox) {
-                  setSelectedTx(inBbox);
-                  return;
+                  : {})}
+                highlight={
+                  selectedTx?.sourceBboxJson
+                    ? {
+                        page: selectedTx.sourcePage,
+                        bbox: selectedTx.sourceBboxJson,
+                      }
+                    : null
                 }
-                let best: TransactionRow | null = null;
-                let bestDist = Infinity;
-                for (const t of onPage) {
-                  if (!t.sourceBboxJson) continue;
-                  const cx = (t.sourceBboxJson[0] + t.sourceBboxJson[2]) / 2;
-                  const cy = (t.sourceBboxJson[1] + t.sourceBboxJson[3]) / 2;
-                  const dx = cx - loc.x;
-                  const dy = cy - loc.y;
-                  const d = dx * dx + dy * dy;
-                  if (d < bestDist) {
-                    bestDist = d;
-                    best = t;
+                onPdfClick={(loc) => {
+                  // Phase 19 #7: PDF→txn click selection. Find the row whose
+                  // source_page matches and whose bbox contains the click;
+                  // when no exact hit, fall back to the closest center on
+                  // the same page (Euclidean distance in PDF user-space).
+                  const onPage = txs.filter((t) => t.sourcePage === loc.page);
+                  if (onPage.length === 0) return;
+                  const inBbox = onPage.find(
+                    (t) =>
+                      t.sourceBboxJson &&
+                      loc.x >= t.sourceBboxJson[0] &&
+                      loc.x <= t.sourceBboxJson[2] &&
+                      loc.y >= t.sourceBboxJson[1] &&
+                      loc.y <= t.sourceBboxJson[3],
+                  );
+                  if (inBbox) {
+                    setSelectedTx(inBbox);
+                    return;
                   }
-                }
-                if (best) setSelectedTx(best);
-              }}
-            />
+                  let best: TransactionRow | null = null;
+                  let bestDist = Infinity;
+                  for (const t of onPage) {
+                    if (!t.sourceBboxJson) continue;
+                    const cx = (t.sourceBboxJson[0] + t.sourceBboxJson[2]) / 2;
+                    const cy = (t.sourceBboxJson[1] + t.sourceBboxJson[3]) / 2;
+                    const dx = cx - loc.x;
+                    const dy = cy - loc.y;
+                    const d = dx * dx + dy * dy;
+                    if (d < bestDist) {
+                      bestDist = d;
+                      best = t;
+                    }
+                  }
+                  if (best) setSelectedTx(best);
+                }}
+              />
+            )}
           </div>
         </div>
         <ReconciliationWidget stmt={s} txCount={txs.length} txSumCents={txSumCents} />
@@ -539,6 +564,31 @@ export function StatementReviewPage() {
       {/* Embedded audit panel — admin-only, scoped to this statement.
           Useful when investigating discrepancies / overrides. */}
       <EntityAuditLog entityType="statement" entityId={s.id} />
+
+      <DeleteConfirmDialog
+        open={deletePdfOpen}
+        title="Delete the source PDF?"
+        description="The original PDF file is removed from disk. The statement row, all extracted transactions, and any rendered export files stay. Re-extract will be unavailable until the PDF is re-uploaded. Any other statement that referenced the same PDF (dedupe siblings, split children) will also show 'PDF gone'."
+        confirmText="DELETE"
+        confirmButtonLabel="Delete PDF"
+        busyLabel="Deleting…"
+        busy={deletePdf.isPending}
+        onClose={() => setDeletePdfOpen(false)}
+        onConfirm={async () => {
+          try {
+            const r = await deletePdf.mutateAsync({ id: statementId });
+            const siblings = r.cascadedSiblings;
+            toast.success(
+              siblings > 0
+                ? `PDF removed (also flagged ${siblings} sibling${siblings === 1 ? '' : 's'}).`
+                : 'PDF removed.',
+            );
+            setDeletePdfOpen(false);
+          } catch (err) {
+            toast.error(err instanceof ApiError ? err.message : 'delete-pdf failed');
+          }
+        }}
+      />
 
       <ReExtractDialog
         open={reExtractOpen}
@@ -567,7 +617,7 @@ export function StatementReviewPage() {
         onClose={() => setDeleteOpen(false)}
         onConfirm={async () => {
           try {
-            const r = await deleteStmt.mutateAsync();
+            const r = await deleteStmt.mutateAsync({ id: statementId });
             toast.success(`Statement deleted${r.sourcePdfRemoved ? ' (source PDF removed)' : ''}.`);
             setDeleteOpen(false);
             navigate(`/accounts/${s.accountId}/statements`);

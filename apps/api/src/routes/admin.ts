@@ -37,6 +37,12 @@ import {
   isPdfProcessingStrategy,
   setFirmDefaultPdfStrategy,
 } from '../services/pdf-strategy.js';
+import {
+  getLastSweepAt,
+  getRetentionDays,
+  runRetentionSweep,
+  setRetentionDays,
+} from '../services/pdf-retention.js';
 import { clearPricing, listPricings, setPricing } from '../services/pricing.js';
 import {
   AnthropicProvider,
@@ -802,6 +808,65 @@ export const adminRouter = (): Router => {
       }
       await setFirmDefaultPdfStrategy(db, v, req.user!.id);
       res.json({ strategy: v });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // PDF retention configuration. `days` is a positive integer or null
+  // (null disables the sweep). lastSweepAt is updated by both the daily
+  // BullMQ cron and the manual "Run now" trigger below.
+  router.get('/pdf-retention', async (_req, res, next) => {
+    try {
+      const [days, lastSweepAt] = await Promise.all([getRetentionDays(db), getLastSweepAt(db)]);
+      res.json({ days, lastSweepAt });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.post('/pdf-retention', async (req, res, next) => {
+    try {
+      const raw = req.body?.days;
+      let days: number | null;
+      if (raw === null || raw === undefined || raw === '') {
+        days = null;
+      } else {
+        const n = Number.parseInt(String(raw), 10);
+        if (!Number.isFinite(n) || n < 1) {
+          throw new ValidationError('days must be a positive integer, or null to disable');
+        }
+        days = n;
+      }
+      await setRetentionDays(db, days, req.user!.id);
+      await writeAudit(db, {
+        actorUserId: req.user!.id,
+        entityType: 'system_settings',
+        entityId: 'pdf.retention.days',
+        action: 'pdf-retention.set',
+        payload: { days },
+      });
+      res.json({ days });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // Manual sweep trigger — runs synchronously and returns the result.
+  // The daily cron also calls runRetentionSweep with actor=null; this
+  // endpoint stamps the calling admin so the audit row attributes the
+  // run correctly.
+  router.post('/pdf-retention/sweep', async (req, res, next) => {
+    try {
+      const result = await runRetentionSweep(db, req.user!.id);
+      await writeAudit(db, {
+        actorUserId: req.user!.id,
+        entityType: 'system_settings',
+        entityId: 'pdf.retention.days',
+        action: 'pdf-retention.sweep',
+        payload: result as unknown as Record<string, unknown>,
+      });
+      res.json(result);
     } catch (err) {
       next(err);
     }

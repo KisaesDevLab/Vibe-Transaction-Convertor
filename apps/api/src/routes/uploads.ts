@@ -233,6 +233,17 @@ export const uploadsRawRouter = (): Router => {
       const rows = await db.select().from(statements).where(eq(statements.sourcePdfHash, hash));
       const row = rows[0];
       if (!row) throw new NotFoundError(`no statement with hash ${hash}`);
+      // 410 Gone — the row exists but the file was intentionally
+      // removed (admin Delete-PDF or retention sweep). Distinguishes
+      // "never existed" (404) from "existed, deliberately purged".
+      // Skip the audit row in this case — no PDF actually moved.
+      if (row.sourcePdfDeleted) {
+        res.status(410).json({
+          code: 'PDF_DELETED',
+          message: 'source PDF has been deleted for this statement',
+        });
+        return;
+      }
       // Source PDFs are the most sensitive artifact ("never leave the
       // firm's database"); admins downloading them should leave a
       // forensic trail just like account-number reveal does.

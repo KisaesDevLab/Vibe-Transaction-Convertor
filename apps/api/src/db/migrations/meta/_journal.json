@@ -71,6 +71,13 @@
       "when": 1779100000000,
       "tag": "0009_auto_text_fallback_strategy",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1779200000000,
+      "tag": "0010_source_pdf_deleted",
+      "breakpoints": true
     }
   ]
 }
