@@ -197,6 +197,31 @@ export const useEnrichStatement = (statementId: string) => {
   });
 };
 
+// Vision pass that reads cancelled-check images out of the source PDF
+// and writes "Check #N → PAYEE" back into cleansedDescription. Only
+// works when the Anthropic provider is configured — the local Qwen
+// has no vision input. Result counts let the UI toast something like
+// "8 of 12 checks matched, 4 unmatched check numbers".
+export interface CheckResolveResult {
+  txCount: number;
+  candidateCount: number;
+  llmExtractedCount: number;
+  matchedCount: number;
+  unmatchedCheckNumbers: string[];
+  pageCount: number;
+  costMicros: string;
+  model: string | null;
+}
+
+export const useResolveCheckPayees = (statementId: string) => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () =>
+      api.post<CheckResolveResult>(`/api/statements/${statementId}/resolve-check-payees`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['statement', statementId] }),
+  });
+};
+
 export const useAddTransaction = (statementId: string) => {
   const qc = useQueryClient();
   return useMutation({

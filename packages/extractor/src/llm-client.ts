@@ -215,6 +215,18 @@ export interface CompleteOptions {
   // in audit/logs.
   schemaName?: string | undefined;
   maxOutputTokens?: number | undefined;
+  // Optional image attachments for vision-capable providers. Each
+  // becomes an Anthropic `{type:'image', source:{type:'base64',...}}`
+  // content part placed BEFORE the text prompt in the user message,
+  // matching Anthropic's recommended ordering. Local Qwen3-8B has no
+  // vision support; LocalGatewayProvider.complete() throws if any
+  // image is passed so callers don't silently lose data.
+  images?:
+    | Array<{
+        data: Buffer;
+        mediaType: 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp';
+      }>
+    | undefined;
 }
 
 export interface CompleteResult {
@@ -409,6 +421,14 @@ export class LocalGatewayProvider implements LlmProvider {
 
   async complete(opts: CompleteOptions): Promise<CompleteResult> {
     if (!this.baseUrl) throw new Error('LLM_GATEWAY_URL not set');
+    if (opts.images && opts.images.length > 0) {
+      // Qwen3-8B has no vision input. Fail loud so the caller routes
+      // image-bearing requests to Anthropic instead of silently losing
+      // the attachments.
+      throw new Error(
+        'local gateway (Qwen3-8B) does not support image inputs — route vision calls to Anthropic',
+      );
+    }
     const messages = [
       { role: 'system', content: opts.systemPrompt },
       { role: 'user', content: opts.userPrompt },
@@ -728,6 +748,25 @@ export class AnthropicProvider implements LlmProvider {
       description: 'Emit the requested structured output.',
       input_schema: opts.schema,
     };
+    // Build the user-message content. When images are supplied, the
+    // recommended Anthropic ordering is images first, text last — the
+    // text instructs the model on what to do with the preceding
+    // images. Without images, the content is just the bare text
+    // string (kept that way to match the older transcript shape).
+    const userContent: unknown =
+      opts.images && opts.images.length > 0
+        ? [
+            ...opts.images.map((img) => ({
+              type: 'image',
+              source: {
+                type: 'base64',
+                media_type: img.mediaType,
+                data: img.data.toString('base64'),
+              },
+            })),
+            { type: 'text', text: opts.userPrompt },
+          ]
+        : opts.userPrompt;
     const ctl = new AbortController();
     const t = setTimeout(() => ctl.abort(), this.timeoutMs);
     const start = Date.now();
@@ -745,7 +784,7 @@ export class AnthropicProvider implements LlmProvider {
           max_tokens: opts.maxOutputTokens ?? Number(process.env.LLM_MAX_COMPLETION_TOKENS ?? 6000),
           tools: [tool],
           tool_choice: { type: 'tool', name: toolName },
-          messages: [{ role: 'user', content: opts.userPrompt }],
+          messages: [{ role: 'user', content: userContent }],
         }),
         signal: ctl.signal,
       });

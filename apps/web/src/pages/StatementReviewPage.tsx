@@ -18,6 +18,7 @@ import {
   useDeleteStatementPdf,
   useDeleteTransaction,
   useEnrichStatement,
+  useResolveCheckPayees,
   useReExtract,
   useRecomputeReconciliation,
   useSplitStatement,
@@ -74,6 +75,7 @@ export function StatementReviewPage() {
   const ackMultiAccount = useAcknowledgeMultiAccount(statementId);
   const splitStmt = useSplitStatement(statementId);
   const enrich = useEnrichStatement(statementId);
+  const resolveChecks = useResolveCheckPayees(statementId);
   const enrichmentToggles = useEnrichmentToggles();
   const categoriesQuery = useCategories();
   const me = useMe();
@@ -418,7 +420,40 @@ export function StatementReviewPage() {
                   Assign categories
                 </button>
               ) : null}
-              {enrich.isPending ? <span className="text-xs text-ink-subtle">running…</span> : null}
+              {isAdmin && txs.some((t) => t.checkNumber !== null && t.checkNumber.length > 0) ? (
+                <button
+                  type="button"
+                  disabled={resolveChecks.isPending || s.sourcePdfDeleted}
+                  title={
+                    s.sourcePdfDeleted
+                      ? 'Source PDF has been deleted — re-upload to resolve check payees'
+                      : 'Read cancelled-check images via Anthropic vision and replace "CHECK" with the payee name'
+                  }
+                  onClick={async () => {
+                    try {
+                      const r = await resolveChecks.mutateAsync();
+                      const cost = (Number(r.costMicros) / 1_000_000).toFixed(3);
+                      toast.success(
+                        `Matched ${r.matchedCount} of ${r.candidateCount} checks` +
+                          (r.unmatchedCheckNumbers.length > 0
+                            ? ` (${r.unmatchedCheckNumbers.length} unmatched)`
+                            : '') +
+                          ` · ${r.pageCount} pages · $${cost}`,
+                      );
+                    } catch (err) {
+                      toast.error(
+                        err instanceof ApiError ? err.message : 'check resolution failed',
+                      );
+                    }
+                  }}
+                  className="rounded-md border border-surface-muted px-3 py-1.5 text-xs hover:bg-surface-subtle disabled:opacity-50"
+                >
+                  Resolve check payees
+                </button>
+              ) : null}
+              {enrich.isPending || resolveChecks.isPending ? (
+                <span className="text-xs text-ink-subtle">running…</span>
+              ) : null}
             </div>
           )}
           <TransactionGrid

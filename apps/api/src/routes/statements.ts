@@ -16,6 +16,11 @@ import {
   MonthlyCapReachedError,
   enrichStatement,
 } from '../services/enrichment.js';
+import {
+  CheckResolveUnavailableError,
+  NoCheckTransactionsError,
+  resolveCheckPayees,
+} from '../services/check-resolver.js';
 import { overrideReconciliation } from '../services/exports.js';
 import { recomputeReconciliation } from '../services/reconciliation.js';
 import { computeFitid, inferTrntype, normalizeDescription } from '@vibe-tx-converter/exporters';
@@ -754,6 +759,49 @@ export const statementsRouter = (): Router => {
         }
         if (err instanceof MonthlyCapReachedError) {
           throw new ForbiddenError(err.message);
+        }
+        throw err;
+      }
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // Operator-triggered "resolve check payees" pass. Rasterizes the
+  // source PDF pages and asks an Anthropic vision model to read any
+  // cancelled-check images, matching each to a transaction by
+  // check_number and writing a friendlier `cleansedDescription`
+  // ("Check #1234 → JOHN DOE"). Requires the Anthropic provider —
+  // the local Qwen3-8B can't see images. Audit row records the model
+  // used and the per-call cost.
+  router.post('/:id/resolve-check-payees', requireAdmin, async (req, res, next) => {
+    try {
+      const id = String(req.params.id);
+      try {
+        const result = await resolveCheckPayees(db, id);
+        await writeAudit(db, {
+          actorUserId: req.user!.id,
+          entityType: 'statement',
+          entityId: id,
+          action: 'statement.resolve-check-payees',
+          payload: {
+            txCount: result.txCount,
+            candidateCount: result.candidateCount,
+            llmExtractedCount: result.llmExtractedCount,
+            matchedCount: result.matchedCount,
+            unmatchedCheckNumbers: result.unmatchedCheckNumbers,
+            pageCount: result.pageCount,
+            costMicros: result.costMicros.toString(),
+            model: result.model,
+          },
+        });
+        res.json({ ...result, costMicros: result.costMicros.toString() });
+      } catch (err) {
+        if (err instanceof CheckResolveUnavailableError) {
+          throw new ForbiddenError(err.message);
+        }
+        if (err instanceof NoCheckTransactionsError) {
+          throw new ValidationError(err.message);
         }
         throw err;
       }
