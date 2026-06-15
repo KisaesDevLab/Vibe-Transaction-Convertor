@@ -10,6 +10,7 @@ import {
   integer,
   jsonb,
   pgSchema,
+  primaryKey,
   real,
   text,
   timestamp,
@@ -168,6 +169,28 @@ export const users = vibetc.table('users', {
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
 });
+
+// Per-user, per-feature access overrides. A missing row means the
+// feature is ENABLED (default-on) for that user — only explicit denials
+// (and re-enables) are stored. feature_key is validated against the
+// app-side registry (lib/feature-registry.ts), not a DB enum, so adding
+// a feature needs no migration. updated_by/updated_at give the audit a
+// "who/when" beyond the append-only audit_log row.
+export const userFeatureAccess = vibetc.table(
+  'user_feature_access',
+  {
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    featureKey: text('feature_key').notNull(),
+    enabled: boolean('enabled').notNull().default(true),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+    updatedBy: uuid('updated_by').references(() => users.id, { onDelete: 'set null' }),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.userId, t.featureKey] }),
+  }),
+);
 
 export const sessions = vibetc.table('sessions', {
   id: text('id').primaryKey(),

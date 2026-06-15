@@ -31,7 +31,8 @@ import { useCategories, useEnrichmentToggles } from '../hooks/useCategories';
 import { useAccount } from '../hooks/useStatements';
 import { useAccounts } from '../hooks/useAccounts';
 import { useCompany } from '../hooks/useCompanies';
-import { useMe } from '../hooks/useAuth';
+import { hasFeature, useMe } from '../hooks/useAuth';
+import { FEATURE } from '../lib/features';
 import { ApiError, downloadFile } from '../lib/api';
 import { SplitStatementModal } from '../components/SplitStatementModal';
 
@@ -80,6 +81,10 @@ export function StatementReviewPage() {
   const categoriesQuery = useCategories();
   const me = useMe();
   const isAdmin = me.data?.role === 'admin';
+  const canReextract = hasFeature(me.data?.features, FEATURE.reextract);
+  const canExports = hasFeature(me.data?.features, FEATURE.exports);
+  const canEnrich = hasFeature(me.data?.features, FEATURE.enrich);
+  const canCheckResolve = hasFeature(me.data?.features, FEATURE.checkResolve);
   const toast = useToast();
   const [selectedTx, setSelectedTx] = useState<TransactionRow | null>(null);
   const [splitOpen, setSplitOpen] = useState(false);
@@ -203,7 +208,7 @@ export function StatementReviewPage() {
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          {isAdmin ? (
+          {isAdmin && canReextract ? (
             <button
               type="button"
               onClick={() => setReExtractOpen(true)}
@@ -228,48 +233,52 @@ export function StatementReviewPage() {
               {deleteStmt.isPending ? 'Deleting…' : 'Delete'}
             </button>
           ) : null}
-          <Link
-            to={`/statements/${statementId}/export`}
-            className="rounded-md border border-surface-muted px-3 py-1.5 text-sm hover:bg-surface-subtle"
-          >
-            Export…
-          </Link>
-          <button
-            type="button"
-            disabled={exportBlocked}
-            title={
-              exportBlocked
-                ? 'Reconciliation is not verified — fix discrepancies or override before export'
-                : 'Download all 7 formats as a single zip'
-            }
-            onClick={async () => {
-              try {
-                await downloadBundle(statementId, s.reconciliationStatus === 'overridden');
-                toast.success('Downloaded all formats');
-              } catch (err) {
-                toast.error(err instanceof ApiError ? err.message : 'export failed');
-              }
-            }}
-            className="rounded-md border border-accent bg-accent px-3 py-1.5 text-sm font-medium text-accent-fg hover:bg-accent/90 disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            Download all (.zip)
-          </button>
-          {FORMATS.map((f) => (
-            <button
-              key={f.value}
-              type="button"
-              disabled={exportBlocked}
-              title={
-                exportBlocked
-                  ? 'Reconciliation is not verified — fix discrepancies or override before export'
-                  : ''
-              }
-              onClick={() => void onExport(f.value)}
-              className="rounded-md border border-surface-muted px-3 py-1.5 text-sm hover:bg-surface-subtle disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              {f.label}
-            </button>
-          ))}
+          {canExports ? (
+            <>
+              <Link
+                to={`/statements/${statementId}/export`}
+                className="rounded-md border border-surface-muted px-3 py-1.5 text-sm hover:bg-surface-subtle"
+              >
+                Export…
+              </Link>
+              <button
+                type="button"
+                disabled={exportBlocked}
+                title={
+                  exportBlocked
+                    ? 'Reconciliation is not verified — fix discrepancies or override before export'
+                    : 'Download all 7 formats as a single zip'
+                }
+                onClick={async () => {
+                  try {
+                    await downloadBundle(statementId, s.reconciliationStatus === 'overridden');
+                    toast.success('Downloaded all formats');
+                  } catch (err) {
+                    toast.error(err instanceof ApiError ? err.message : 'export failed');
+                  }
+                }}
+                className="rounded-md border border-accent bg-accent px-3 py-1.5 text-sm font-medium text-accent-fg hover:bg-accent/90 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Download all (.zip)
+              </button>
+              {FORMATS.map((f) => (
+                <button
+                  key={f.value}
+                  type="button"
+                  disabled={exportBlocked}
+                  title={
+                    exportBlocked
+                      ? 'Reconciliation is not verified — fix discrepancies or override before export'
+                      : ''
+                  }
+                  onClick={() => void onExport(f.value)}
+                  className="rounded-md border border-surface-muted px-3 py-1.5 text-sm hover:bg-surface-subtle disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {f.label}
+                </button>
+              ))}
+            </>
+          ) : null}
         </div>
       </header>
 
@@ -368,7 +377,7 @@ export function StatementReviewPage() {
           {(enrichmentToggles.data?.cleanseEnabled || enrichmentToggles.data?.categoryEnabled) && (
             <div className="flex flex-wrap items-center gap-2 rounded-lg border border-surface-muted bg-white p-3 text-sm">
               <span className="text-ink-muted">AI enrichment:</span>
-              {enrichmentToggles.data?.cleanseEnabled ? (
+              {enrichmentToggles.data?.cleanseEnabled && canEnrich ? (
                 <button
                   type="button"
                   disabled={enrich.isPending}
@@ -394,7 +403,7 @@ export function StatementReviewPage() {
                   Cleanse descriptions
                 </button>
               ) : null}
-              {enrichmentToggles.data?.categoryEnabled ? (
+              {enrichmentToggles.data?.categoryEnabled && canEnrich ? (
                 <button
                   type="button"
                   disabled={enrich.isPending}
@@ -420,7 +429,9 @@ export function StatementReviewPage() {
                   Assign categories
                 </button>
               ) : null}
-              {isAdmin && txs.some((t) => t.checkNumber !== null && t.checkNumber.length > 0) ? (
+              {isAdmin &&
+              canCheckResolve &&
+              txs.some((t) => t.checkNumber !== null && t.checkNumber.length > 0) ? (
                 <button
                   type="button"
                   disabled={resolveChecks.isPending || s.sourcePdfDeleted}

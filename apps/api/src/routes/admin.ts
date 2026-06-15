@@ -9,6 +9,7 @@ import { businessCategories, statements, sessions, systemSettings } from '../db/
 import { ConflictError, NotFoundError, ValidationError } from '../lib/errors.js';
 import { unwrapSecret, wrapSecret } from '../lib/secrets.js';
 import { requireAdmin } from '../middleware/auth.js';
+import { requireFeature } from '../middleware/feature-access.js';
 import { writeAudit } from '../services/audit.js';
 import { backupFilePath, createBackup, deleteBackup, listBackups } from '../services/backup.js';
 import { getFidirStatus, seedFidir } from '../services/fidir-seeder.js';
@@ -74,6 +75,24 @@ const CLAUDE_PATTERN = /^claude-[a-z0-9-]+$/i;
 export const adminRouter = (): Router => {
   const router = Router();
   router.use(requireAdmin);
+
+  // Per-feature gates for each admin sub-area. Mounted as path-prefix
+  // middleware so every verb under the prefix is covered. Access is
+  // default-on, so these only bite once an admin disables the feature for
+  // a user. The dashboard hub (admin.home) has no dedicated endpoints —
+  // it's gated at the SPA route; its widgets fetch these same sub-area
+  // endpoints and honor the gates individually.
+  router.use('/llm-provider', requireFeature('admin.llmProvider'));
+  router.use('/engines', requireFeature('admin.engines'));
+  router.use(['/backup', '/backups'], requireFeature('admin.backup'));
+  router.use('/maintenance', requireFeature('admin.maintenance'));
+  router.use('/fidir', requireFeature('admin.maintenance'));
+  router.use('/pdf-strategy', requireFeature('admin.maintenance'));
+  router.use('/pdf-retention', requireFeature('admin.maintenance'));
+  router.use('/diagnostics', requireFeature('admin.diagnostics'));
+  router.use('/enrichment', requireFeature('admin.enrichmentPrompt'));
+  router.use('/enrichment-prompt', requireFeature('admin.enrichmentPrompt'));
+  router.use('/categories', requireFeature('admin.categories'));
 
   router.get('/llm-provider', async (_req, res, next) => {
     try {

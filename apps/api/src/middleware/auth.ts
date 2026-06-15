@@ -5,12 +5,17 @@ import type { Session, User } from '../db/types.js';
 import { cookieSecure } from '../lib/cookie-flags.js';
 import { AuthError, ForbiddenError } from '../lib/errors.js';
 import { getSession, maybeRollSession } from '../services/auth.js';
+import { loadFeatureAccess } from '../services/feature-access.js';
 
 declare global {
   namespace Express {
     interface Request {
       user?: User;
       session?: Session;
+      // Effective per-feature access for req.user, default-on with the
+      // user's explicit denials applied. Set by loadSession; read by
+      // requireFeature (middleware/feature-access.ts).
+      featureAccess?: Record<string, boolean>;
     }
   }
 }
@@ -46,6 +51,7 @@ export const loadSession: RequestHandler = async (req, res, next) => {
     }
     req.user = ctx.user;
     req.session = session;
+    req.featureAccess = await loadFeatureAccess(db, ctx.user.id);
     next();
   } catch (err) {
     next(err);

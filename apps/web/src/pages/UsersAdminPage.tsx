@@ -58,7 +58,15 @@ export function UsersAdminPage() {
       <Link to="/admin" className="text-sm text-ink-muted hover:text-ink">
         ← Admin
       </Link>
-      <h1 className="text-2xl font-semibold">Users</h1>
+      <div className="flex items-center justify-between gap-3">
+        <h1 className="text-2xl font-semibold">Users</h1>
+        <Link
+          to="/admin/access"
+          className="rounded-md border border-surface-muted px-3 py-1.5 text-sm hover:bg-surface-subtle"
+        >
+          Manage access →
+        </Link>
+      </div>
 
       <form
         onSubmit={onCreate}

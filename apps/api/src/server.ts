@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { logger } from './lib/logger.js';
 import { errorHandler, notFoundHandler } from './middleware/error-handler.js';
 import { loadSession, requireAuth } from './middleware/auth.js';
+import { requireFeature } from './middleware/feature-access.js';
 import { stripBasePath } from './middleware/base-path.js';
 import { csrf, csrfTokenHandler } from './middleware/csrf.js';
 import { requireInternalNetwork } from './middleware/internal-network.js';
@@ -22,6 +23,7 @@ import { authRouter, usersRouter } from './routes/auth.js';
 import { companiesRouter } from './routes/companies.js';
 import { adminRouter } from './routes/admin.js';
 import { auditRouter } from './routes/audit.js';
+import { featureAccessRouter } from './routes/feature-access.js';
 import { exportJobsRouter, exportsRouter } from './routes/exports.js';
 import { fidirRouter } from './routes/fidir.js';
 import { healthRouter } from './routes/health.js';
@@ -104,18 +106,33 @@ export const createApp = (): Express => {
   app.use('/api', versionRouter());
   app.use('/api/auth', authRouter());
 
-  // Authenticated routes.
-  app.use('/api/users', requireAuth, usersRouter());
-  app.use('/api/fidir', requireAuth, fidirRouter());
-  app.use('/api/companies', requireAuth, companiesRouter());
-  app.use('/api/companies/:companyId/accounts', requireAuth, accountsByCompanyRouter());
-  app.use('/api/accounts', requireAuth, accountsRouter());
-  app.use('/api/accounts/:accountId/uploads', requireAuth, uploadsByAccountRouter());
-  app.use('/api/uploads', requireAuth, uploadsRawRouter());
-  app.use('/api/statements', requireAuth, statementsRouter());
-  app.use('/api/statements', requireAuth, exportsRouter());
-  app.use('/api/exports', requireAuth, exportJobsRouter());
-  app.use('/api/audit', requireAuth, auditRouter());
+  // Authenticated routes. Per-feature gates (requireFeature) sit after
+  // requireAuth and 403 when a user has the feature disabled; access is
+  // default-on, so an unconfigured user passes every gate. The statements
+  // mount is gated by 'statements' (view); the AI sub-actions and exports
+  // carry their own finer-grained gates (in-router / second mount).
+  app.use('/api/users', requireAuth, requireFeature('admin.users'), usersRouter());
+  app.use('/api/fidir', requireAuth, requireFeature('companies'), fidirRouter());
+  app.use('/api/companies', requireAuth, requireFeature('companies'), companiesRouter());
+  app.use(
+    '/api/companies/:companyId/accounts',
+    requireAuth,
+    requireFeature('companies'),
+    accountsByCompanyRouter(),
+  );
+  app.use('/api/accounts', requireAuth, requireFeature('companies'), accountsRouter());
+  app.use(
+    '/api/accounts/:accountId/uploads',
+    requireAuth,
+    requireFeature('uploads'),
+    uploadsByAccountRouter(),
+  );
+  app.use('/api/uploads', requireAuth, requireFeature('uploads'), uploadsRawRouter());
+  app.use('/api/statements', requireAuth, requireFeature('statements'), statementsRouter());
+  app.use('/api/statements', requireAuth, requireFeature('exports'), exportsRouter());
+  app.use('/api/exports', requireAuth, requireFeature('exports'), exportJobsRouter());
+  app.use('/api/audit', requireAuth, requireFeature('admin.audit'), auditRouter());
+  app.use('/api/admin/feature-access', requireAuth, featureAccessRouter());
   app.use('/api/admin', requireAuth, adminRouter());
   // Phase 29 #10 — admin-only "Update available" surfacing for the SPA.
   app.use('/api/admin/appliance', requireAuth, applianceAdminRouter());

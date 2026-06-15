@@ -8,6 +8,7 @@ import type {
   statements,
   systemSettings,
   transactions,
+  userFeatureAccess,
   users,
 } from './schema.js';
 
@@ -16,6 +17,9 @@ export type NewUser = typeof users.$inferInsert;
 
 export type Session = typeof sessions.$inferSelect;
 export type NewSession = typeof sessions.$inferInsert;
+
+export type UserFeatureAccess = typeof userFeatureAccess.$inferSelect;
+export type NewUserFeatureAccess = typeof userFeatureAccess.$inferInsert;
 
 export type Company = typeof companies.$inferSelect;
 export type NewCompany = typeof companies.$inferInsert;

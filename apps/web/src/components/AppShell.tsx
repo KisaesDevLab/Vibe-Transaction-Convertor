@@ -1,23 +1,26 @@
 import { type ReactNode } from 'react';
 import { Link, NavLink } from 'react-router-dom';
 
-import { useLogout, useMe } from '../hooks/useAuth';
+import { hasFeature, useLogout, useMe } from '../hooks/useAuth';
 import { withBase } from '../lib/api';
 import { cn } from '../lib/cn';
+import { FEATURE } from '../lib/features';
 import { ErrorBoundary } from './ErrorBoundary';
 import { ShortcutOverlay } from './ShortcutOverlay';
 
-const NAV: Array<{ to: string; label: string; adminOnly?: boolean }> = [
-  { to: '/companies', label: 'Companies' },
-  { to: '/statements', label: 'Statements' },
-  { to: '/admin', label: 'Admin', adminOnly: true },
+const NAV: Array<{ to: string; label: string; feature: string; adminOnly?: boolean }> = [
+  { to: '/companies', label: 'Companies', feature: FEATURE.companies },
+  { to: '/statements', label: 'Statements', feature: FEATURE.statements },
+  { to: '/admin', label: 'Admin', feature: FEATURE.adminHome, adminOnly: true },
 ];
 
 export function AppShell({ children }: { children: ReactNode }) {
   const me = useMe();
   const logout = useLogout();
   const isAdmin = me.data?.role === 'admin';
-  const visibleNav = NAV.filter((item) => !item.adminOnly || isAdmin);
+  const visibleNav = NAV.filter(
+    (item) => (!item.adminOnly || isAdmin) && hasFeature(me.data?.features, item.feature),
+  );
 
   return (
     <div className="grid min-h-screen grid-cols-[16rem_1fr] bg-surface text-ink">
@@ -78,7 +81,9 @@ export function AppShell({ children }: { children: ReactNode }) {
               type="button"
               className="rounded-md border border-surface-muted px-3 py-1 text-sm hover:bg-surface-subtle"
               onClick={() =>
-                logout.mutate(undefined, { onSuccess: () => window.location.assign(withBase('/login')) })
+                logout.mutate(undefined, {
+                  onSuccess: () => window.location.assign(withBase('/login')),
+                })
               }
             >
               Sign out

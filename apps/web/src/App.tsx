@@ -3,6 +3,9 @@ import { Navigate, Route, Routes } from 'react-router-dom';
 import { AdminGate } from './components/AdminGate';
 import { AppShell } from './components/AppShell';
 import { AuthGate } from './components/AuthGate';
+import { FeatureGate } from './components/FeatureGate';
+import { FEATURE } from './lib/features';
+import { AccessAdminPage } from './pages/AccessAdminPage';
 import { AccountDetailPage } from './pages/AccountDetailPage';
 import { AccountProfilePage } from './pages/AccountProfilePage';
 import { CompaniesPage } from './pages/CompaniesPage';
@@ -38,20 +41,71 @@ export function App() {
               <Routes>
                 <Route path="/" element={<Navigate to="/companies" replace />} />
                 <Route path="/account" element={<AccountProfilePage />} />
-                <Route path="/companies" element={<CompaniesPage />} />
-                <Route path="/companies/:companyId" element={<CompanyDetailPage />} />
-                <Route path="/accounts/:accountId" element={<AccountDetailPage />} />
-                <Route path="/accounts/:accountId/statements" element={<StatementsListPage />} />
-                <Route path="/statements/:statementId" element={<StatementReviewPage />} />
-                <Route path="/statements/:statementId/export" element={<ExportPage />} />
-                <Route path="/statements" element={<GlobalStatementsPage />} />
+                <Route
+                  path="/companies"
+                  element={
+                    <FeatureGate feature={FEATURE.companies}>
+                      <CompaniesPage />
+                    </FeatureGate>
+                  }
+                />
+                <Route
+                  path="/companies/:companyId"
+                  element={
+                    <FeatureGate feature={FEATURE.companies}>
+                      <CompanyDetailPage />
+                    </FeatureGate>
+                  }
+                />
+                <Route
+                  path="/accounts/:accountId"
+                  element={
+                    <FeatureGate feature={FEATURE.companies}>
+                      <AccountDetailPage />
+                    </FeatureGate>
+                  }
+                />
+                <Route
+                  path="/accounts/:accountId/statements"
+                  element={
+                    <FeatureGate feature={FEATURE.statements}>
+                      <StatementsListPage />
+                    </FeatureGate>
+                  }
+                />
+                <Route
+                  path="/statements/:statementId"
+                  element={
+                    <FeatureGate feature={FEATURE.statements}>
+                      <StatementReviewPage />
+                    </FeatureGate>
+                  }
+                />
+                <Route
+                  path="/statements/:statementId/export"
+                  element={
+                    <FeatureGate feature={FEATURE.exports}>
+                      <ExportPage />
+                    </FeatureGate>
+                  }
+                />
+                <Route
+                  path="/statements"
+                  element={
+                    <FeatureGate feature={FEATURE.statements}>
+                      <GlobalStatementsPage />
+                    </FeatureGate>
+                  }
+                />
                 <Route path="/help" element={<HelpPage />} />
                 <Route path="/help/:slug" element={<HelpPage />} />
                 <Route
                   path="/admin"
                   element={
                     <AdminGate>
-                      <AdminHomePage />
+                      <FeatureGate feature={FEATURE.adminHome}>
+                        <AdminHomePage />
+                      </FeatureGate>
                     </AdminGate>
                   }
                 />
@@ -59,7 +113,9 @@ export function App() {
                   path="/admin/llm-provider"
                   element={
                     <AdminGate>
-                      <LlmProviderAdminPage />
+                      <FeatureGate feature={FEATURE.adminLlmProvider}>
+                        <LlmProviderAdminPage />
+                      </FeatureGate>
                     </AdminGate>
                   }
                 />
@@ -67,7 +123,9 @@ export function App() {
                   path="/admin/audit"
                   element={
                     <AdminGate>
-                      <AuditLogPage />
+                      <FeatureGate feature={FEATURE.adminAudit}>
+                        <AuditLogPage />
+                      </FeatureGate>
                     </AdminGate>
                   }
                 />
@@ -75,7 +133,19 @@ export function App() {
                   path="/admin/users"
                   element={
                     <AdminGate>
-                      <UsersAdminPage />
+                      <FeatureGate feature={FEATURE.adminUsers}>
+                        <UsersAdminPage />
+                      </FeatureGate>
+                    </AdminGate>
+                  }
+                />
+                <Route
+                  path="/admin/access"
+                  element={
+                    <AdminGate>
+                      <FeatureGate feature={FEATURE.adminAccessControl}>
+                        <AccessAdminPage />
+                      </FeatureGate>
                     </AdminGate>
                   }
                 />
@@ -83,7 +153,9 @@ export function App() {
                   path="/admin/diagnostics"
                   element={
                     <AdminGate>
-                      <DiagnosticsPage />
+                      <FeatureGate feature={FEATURE.adminDiagnostics}>
+                        <DiagnosticsPage />
+                      </FeatureGate>
                     </AdminGate>
                   }
                 />
@@ -91,7 +163,9 @@ export function App() {
                   path="/admin/maintenance"
                   element={
                     <AdminGate>
-                      <MaintenanceAdminPage />
+                      <FeatureGate feature={FEATURE.adminMaintenance}>
+                        <MaintenanceAdminPage />
+                      </FeatureGate>
                     </AdminGate>
                   }
                 />
@@ -99,7 +173,9 @@ export function App() {
                   path="/admin/engines"
                   element={
                     <AdminGate>
-                      <EnginesAdminPage />
+                      <FeatureGate feature={FEATURE.adminEngines}>
+                        <EnginesAdminPage />
+                      </FeatureGate>
                     </AdminGate>
                   }
                 />
@@ -107,7 +183,9 @@ export function App() {
                   path="/admin/backup"
                   element={
                     <AdminGate>
-                      <BackupAdminPage />
+                      <FeatureGate feature={FEATURE.adminBackup}>
+                        <BackupAdminPage />
+                      </FeatureGate>
                     </AdminGate>
                   }
                 />
@@ -115,7 +193,9 @@ export function App() {
                   path="/admin/categories"
                   element={
                     <AdminGate>
-                      <CategoryAdminPage />
+                      <FeatureGate feature={FEATURE.adminCategories}>
+                        <CategoryAdminPage />
+                      </FeatureGate>
                     </AdminGate>
                   }
                 />
@@ -123,7 +203,9 @@ export function App() {
                   path="/admin/enrichment-prompt"
                   element={
                     <AdminGate>
-                      <EnrichmentPromptAdminPage />
+                      <FeatureGate feature={FEATURE.adminEnrichmentPrompt}>
+                        <EnrichmentPromptAdminPage />
+                      </FeatureGate>
                     </AdminGate>
                   }
                 />

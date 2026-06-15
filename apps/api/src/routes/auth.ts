@@ -5,6 +5,7 @@ import { db } from '../db/client.js';
 import { sessions, users } from '../db/schema.js';
 import { cookieDomain, cookiePath, cookieSecure } from '../lib/cookie-flags.js';
 import { AuthError, ValidationError } from '../lib/errors.js';
+import { defaultFeatureAccess } from '../lib/feature-registry.js';
 import { csrfTokenHandler } from '../middleware/csrf.js';
 import { loginRateLimit } from '../middleware/login-rate-limit.js';
 import { SESSION_COOKIE, requireAdmin, requireAuth } from '../middleware/auth.js';
@@ -107,7 +108,9 @@ export const authRouter = (): Router => {
   router.get('/me', (req, res, next) => {
     try {
       if (!req.user) throw new AuthError();
-      res.json({ user: safeUser(req.user) });
+      // featureAccess is set by loadSession; fall back to fully-enabled
+      // so the SPA never hides everything if it's somehow absent.
+      res.json({ user: safeUser(req.user), features: req.featureAccess ?? defaultFeatureAccess() });
     } catch (err) {
       next(err);
     }

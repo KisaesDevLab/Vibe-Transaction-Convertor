@@ -14,7 +14,8 @@ import {
   useUpdateAccount,
   type CsvTemplate,
 } from '../hooks/useAccounts';
-import { useMe } from '../hooks/useAuth';
+import { hasFeature, useMe } from '../hooks/useAuth';
+import { FEATURE } from '../lib/features';
 import { useAccount } from '../hooks/useStatements';
 import { useStatementsByAccount } from '../hooks/useStatementsList';
 import { ApiError } from '../lib/api';
@@ -67,6 +68,7 @@ export function AccountDetailPage() {
 
   const a = account.data;
   const isAdmin = me.data?.role === 'admin';
+  const canUpload = hasFeature(me.data?.features, FEATURE.uploads);
 
   const openEdit = (): void => {
     setEditNickname(a.nickname);
@@ -307,8 +309,12 @@ export function AccountDetailPage() {
         </form>
       </dialog>
 
-      <h2 className="mb-2 text-lg font-medium">Upload statements</h2>
-      <UploadDropzone accountId={a.id} />
+      {canUpload ? (
+        <>
+          <h2 className="mb-2 text-lg font-medium">Upload statements</h2>
+          <UploadDropzone accountId={a.id} />
+        </>
+      ) : null}
 
       <section className="mt-8">
         <div className="mb-2 flex items-baseline justify-between">

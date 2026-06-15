@@ -9,6 +9,7 @@ import { deletePdfForStatement } from '../services/pdf-retention.js';
 import { isPdfProcessingStrategy } from '../services/pdf-strategy.js';
 import { logger } from '../lib/logger.js';
 import { requireAdmin } from '../middleware/auth.js';
+import { requireFeature } from '../middleware/feature-access.js';
 import { writeAudit } from '../services/audit.js';
 import {
   CategoriesEmptyError,
@@ -729,7 +730,7 @@ export const statementsRouter = (): Router => {
   // the statement. Both transforms can be requested in the same call;
   // each requires its own admin toggle to be on. User-edited rows are
   // skipped so a click never overwrites manual review work.
-  router.post('/:id/enrich', async (req, res, next) => {
+  router.post('/:id/enrich', requireFeature('enrich'), async (req, res, next) => {
     try {
       const id = String(req.params.id);
       const body = req.body ?? {};
@@ -774,41 +775,46 @@ export const statementsRouter = (): Router => {
   // ("Check #1234 → JOHN DOE"). Requires the Anthropic provider —
   // the local Qwen3-8B can't see images. Audit row records the model
   // used and the per-call cost.
-  router.post('/:id/resolve-check-payees', requireAdmin, async (req, res, next) => {
-    try {
-      const id = String(req.params.id);
+  router.post(
+    '/:id/resolve-check-payees',
+    requireAdmin,
+    requireFeature('checkResolve'),
+    async (req, res, next) => {
       try {
-        const result = await resolveCheckPayees(db, id);
-        await writeAudit(db, {
-          actorUserId: req.user!.id,
-          entityType: 'statement',
-          entityId: id,
-          action: 'statement.resolve-check-payees',
-          payload: {
-            txCount: result.txCount,
-            candidateCount: result.candidateCount,
-            llmExtractedCount: result.llmExtractedCount,
-            matchedCount: result.matchedCount,
-            unmatchedCheckNumbers: result.unmatchedCheckNumbers,
-            pageCount: result.pageCount,
-            costMicros: result.costMicros.toString(),
-            model: result.model,
-          },
-        });
-        res.json({ ...result, costMicros: result.costMicros.toString() });
+        const id = String(req.params.id);
+        try {
+          const result = await resolveCheckPayees(db, id);
+          await writeAudit(db, {
+            actorUserId: req.user!.id,
+            entityType: 'statement',
+            entityId: id,
+            action: 'statement.resolve-check-payees',
+            payload: {
+              txCount: result.txCount,
+              candidateCount: result.candidateCount,
+              llmExtractedCount: result.llmExtractedCount,
+              matchedCount: result.matchedCount,
+              unmatchedCheckNumbers: result.unmatchedCheckNumbers,
+              pageCount: result.pageCount,
+              costMicros: result.costMicros.toString(),
+              model: result.model,
+            },
+          });
+          res.json({ ...result, costMicros: result.costMicros.toString() });
+        } catch (err) {
+          if (err instanceof CheckResolveUnavailableError) {
+            throw new ForbiddenError(err.message);
+          }
+          if (err instanceof NoCheckTransactionsError) {
+            throw new ValidationError(err.message);
+          }
+          throw err;
+        }
       } catch (err) {
-        if (err instanceof CheckResolveUnavailableError) {
-          throw new ForbiddenError(err.message);
-        }
-        if (err instanceof NoCheckTransactionsError) {
-          throw new ValidationError(err.message);
-        }
-        throw err;
+        next(err);
       }
-    } catch (err) {
-      next(err);
-    }
-  });
+    },
+  );
 
   // Admin: re-enqueue extraction. Useful when the source PDF was
   // re-uploaded or the LLM provider changed. Idempotent at the queue
@@ -819,74 +825,79 @@ export const statementsRouter = (): Router => {
   //     strategy override (or NULL → firm default).
   //   - one of the enum values → update the override on this statement
   //     before re-enqueueing so the worker uses the chosen strategy.
-  router.post('/:id/re-extract', requireAdmin, async (req, res, next) => {
-    try {
-      const id = String(req.params.id);
-      const rows = await db.select().from(statements).where(eq(statements.id, id));
-      const stmt = rows[0];
-      if (!stmt) throw new NotFoundError(`statement ${id}`);
-      if (stmt.sourcePdfDeleted) {
-        throw new ValidationError(
-          'source PDF has been removed for this statement — re-upload to enable re-extraction',
-        );
-      }
-      if (!process.env.REDIS_URL) {
-        throw new ForbiddenError('REDIS_URL not configured — extraction queue unavailable');
-      }
-      // Parse the optional strategy override. 'default' (or absent)
-      // means "leave the override column alone"; an explicit value
-      // means update it so the worker reads the new strategy.
-      const requestedStrategy = (req.body as { strategy?: unknown } | undefined)?.strategy;
-      let strategyUpdate: { processingStrategyOverride: ResolvedReExtractStrategy } | null = null;
-      if (requestedStrategy !== undefined && requestedStrategy !== null) {
-        const parsed = normaliseStrategy(requestedStrategy);
-        if (!parsed.ok) {
+  router.post(
+    '/:id/re-extract',
+    requireAdmin,
+    requireFeature('reextract'),
+    async (req, res, next) => {
+      try {
+        const id = String(req.params.id);
+        const rows = await db.select().from(statements).where(eq(statements.id, id));
+        const stmt = rows[0];
+        if (!stmt) throw new NotFoundError(`statement ${id}`);
+        if (stmt.sourcePdfDeleted) {
           throw new ValidationError(
-            'strategy must be one of: default, auto, force-text, force-ocr, auto-ocr-fallback, auto-text-fallback',
+            'source PDF has been removed for this statement — re-upload to enable re-extraction',
           );
         }
-        strategyUpdate = { processingStrategyOverride: parsed.value };
+        if (!process.env.REDIS_URL) {
+          throw new ForbiddenError('REDIS_URL not configured — extraction queue unavailable');
+        }
+        // Parse the optional strategy override. 'default' (or absent)
+        // means "leave the override column alone"; an explicit value
+        // means update it so the worker reads the new strategy.
+        const requestedStrategy = (req.body as { strategy?: unknown } | undefined)?.strategy;
+        let strategyUpdate: { processingStrategyOverride: ResolvedReExtractStrategy } | null = null;
+        if (requestedStrategy !== undefined && requestedStrategy !== null) {
+          const parsed = normaliseStrategy(requestedStrategy);
+          if (!parsed.ok) {
+            throw new ValidationError(
+              'strategy must be one of: default, auto, force-text, force-ocr, auto-ocr-fallback, auto-text-fallback',
+            );
+          }
+          strategyUpdate = { processingStrategyOverride: parsed.value };
+        }
+        // Wipe prior transactions so the new run isn't deduped against the
+        // old FITIDs. Keep the source PDF.
+        await db.delete(transactions).where(eq(transactions.statementId, id));
+        await db
+          .update(statements)
+          .set({
+            status: 'uploaded',
+            errorMessage: null,
+            updatedAt: sql`now()`,
+            ...(strategyUpdate ?? {}),
+          })
+          .where(eq(statements.id, id));
+        // BullMQ's add() is idempotent on jobId; the prior completed job
+        // would silently swallow this enqueue. Remove first.
+        await removeExtractionJob(id);
+        await enqueueExtraction({
+          statementId: id,
+          accountId: stmt.accountId,
+          sourcePdfHash: stmt.sourcePdfHash,
+          sourcePdfPath: stmt.sourcePdfPath,
+        });
+        await writeAudit(db, {
+          actorUserId: req.user!.id,
+          entityType: 'statement',
+          entityId: id,
+          action: 'statement.re-extract',
+          ...(strategyUpdate
+            ? {
+                payload: {
+                  processingStrategyOverride: strategyUpdate.processingStrategyOverride,
+                  previousOverride: stmt.processingStrategyOverride ?? null,
+                },
+              }
+            : {}),
+        });
+        res.json({ ok: true });
+      } catch (err) {
+        next(err);
       }
-      // Wipe prior transactions so the new run isn't deduped against the
-      // old FITIDs. Keep the source PDF.
-      await db.delete(transactions).where(eq(transactions.statementId, id));
-      await db
-        .update(statements)
-        .set({
-          status: 'uploaded',
-          errorMessage: null,
-          updatedAt: sql`now()`,
-          ...(strategyUpdate ?? {}),
-        })
-        .where(eq(statements.id, id));
-      // BullMQ's add() is idempotent on jobId; the prior completed job
-      // would silently swallow this enqueue. Remove first.
-      await removeExtractionJob(id);
-      await enqueueExtraction({
-        statementId: id,
-        accountId: stmt.accountId,
-        sourcePdfHash: stmt.sourcePdfHash,
-        sourcePdfPath: stmt.sourcePdfPath,
-      });
-      await writeAudit(db, {
-        actorUserId: req.user!.id,
-        entityType: 'statement',
-        entityId: id,
-        action: 'statement.re-extract',
-        ...(strategyUpdate
-          ? {
-              payload: {
-                processingStrategyOverride: strategyUpdate.processingStrategyOverride,
-                previousOverride: stmt.processingStrategyOverride ?? null,
-              },
-            }
-          : {}),
-      });
-      res.json({ ok: true });
-    } catch (err) {
-      next(err);
-    }
-  });
+    },
+  );
 
   // Phase 15 #7: SSE progress stream. Browser opens this and receives a
   // status snapshot every 1.5s until the statement reaches a terminal
