@@ -49,8 +49,14 @@ const SAMPLE = {
 // Per-test override of what the mock LLM returns. Discrepancy tests
 // reassign this before invoking processExtraction.
 let mockExtractedData: typeof SAMPLE = SAMPLE;
+// The worker resolves the provider policy, derives the primary/secondary
+// order, then builds providers by id. Mock all three: force a local-only
+// policy (no fallback) and hand back a stub provider whose extract()
+// returns the per-test mockExtractedData.
 vi.mock('../services/llm-provider.js', () => ({
-  buildProvider: vi.fn(async () => ({
+  resolveProviderPolicy: vi.fn(async () => 'local-only' as const),
+  providerOrderFor: vi.fn(() => ({ primary: 'local' as const, secondary: null })),
+  buildProviderForId: vi.fn(async () => ({
     id: 'local' as const,
     extract: vi.fn(async () => ({
       data: mockExtractedData,
