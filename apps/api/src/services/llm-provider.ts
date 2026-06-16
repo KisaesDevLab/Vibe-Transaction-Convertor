@@ -14,8 +14,10 @@ const KEY_ANTHROPIC_KEY = 'llm.anthropic.api_key';
 const KEY_ANTHROPIC_MODEL = 'llm.anthropic.model';
 const KEY_ANTHROPIC_BASE_URL = 'llm.anthropic.base_url';
 const KEY_LLM_TIMEOUT = 'llm.timeout_ms';
+const KEY_LLM_MAX_TOKENS = 'llm.max_tokens';
 
 export const DEFAULT_LLM_TIMEOUT_MS = 60_000;
+export const DEFAULT_LLM_MAX_TOKENS = 32_000;
 
 // Per-call timeout (ms) for extraction + enrichment LLM requests, applied
 // to both the local gateway and the Anthropic/Shield provider. Operator-set
@@ -28,6 +30,20 @@ export const resolveLlmTimeoutMs = async (db: Db): Promise<number> => {
   const fromEnv = Number.parseInt(process.env.LLM_TIMEOUT_MS ?? '', 10);
   if (Number.isFinite(fromEnv) && fromEnv > 0) return fromEnv;
   return DEFAULT_LLM_TIMEOUT_MS;
+};
+
+// Hard ceiling on output tokens per extraction call. Operator-set
+// (system_settings) wins, then the LLM_MAX_COMPLETION_TOKENS env, then
+// 32000. The old 6000 cap truncated multi-page statements mid-array and
+// dropped `transactions`. A larger statement needs a larger cap and a
+// proportionally larger timeout (more tokens take longer to generate).
+export const resolveLlmMaxTokens = async (db: Db): Promise<number> => {
+  const row = await readSetting(db, KEY_LLM_MAX_TOKENS);
+  const fromDb = row?.valuePlaintext ? Number.parseInt(row.valuePlaintext, 10) : NaN;
+  if (Number.isFinite(fromDb) && fromDb > 0) return fromDb;
+  const fromEnv = Number.parseInt(process.env.LLM_MAX_COMPLETION_TOKENS ?? '', 10);
+  if (Number.isFinite(fromEnv) && fromEnv > 0) return fromEnv;
+  return DEFAULT_LLM_MAX_TOKENS;
 };
 
 const DIRECT_ANTHROPIC = 'https://api.anthropic.com';
@@ -143,7 +159,8 @@ const constructAnthropic = async (db: Db): Promise<LlmProvider> => {
   // instead of an env-only ANTHROPIC_BASE_URL.
   const baseUrl = await resolveAnthropicBaseUrl(db);
   const timeoutMs = await resolveLlmTimeoutMs(db);
-  return new AnthropicProvider({ apiKey, model, priceTable, baseUrl, timeoutMs });
+  const maxTokens = await resolveLlmMaxTokens(db);
+  return new AnthropicProvider({ apiKey, model, priceTable, baseUrl, timeoutMs, maxTokens });
 };
 
 export const buildProviderForId = async (db: Db, id: ProviderId): Promise<LlmProvider> => {

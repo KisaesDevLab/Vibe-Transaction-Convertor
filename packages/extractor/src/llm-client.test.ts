@@ -182,6 +182,37 @@ describe('AnthropicProvider', () => {
     expect(r.telemetry.outputTokens).toBe(20);
   });
 
+  it('reports truncation (not a schema miss) and does not retry when stop_reason=max_tokens', async () => {
+    // A multi-page statement whose transaction list overflows the output
+    // cap: Anthropic returns the partial tool_use input (header fields, no
+    // transactions) with stop_reason='max_tokens'. The guard must surface
+    // truncation rather than letting Zod blame `transactions: Required`,
+    // and must NOT burn a reminder retry (same cap → same truncation).
+    const partial = {
+      period: { start: '2026-03-01', end: '2026-03-31' },
+      balances: { opening_cents: 100, closing_cents: 0 },
+      source_date_format: { format: 'MDY', confidence: 0.9 },
+    };
+    let callCount = 0;
+    const provider = new AnthropicProvider({
+      apiKey: 'k',
+      maxTokens: 6000,
+      fetcher: async () => {
+        callCount += 1;
+        return okJsonResponse({
+          content: [{ type: 'tool_use', name: 'emit_extraction', input: partial }],
+          stop_reason: 'max_tokens',
+          usage: { input_tokens: 20, output_tokens: 6000 },
+        });
+      },
+    });
+    await expect(provider.extract('md')).rejects.toMatchObject({
+      name: 'ExtractionResponseError',
+      summary: 'LLM output truncated at max_tokens (6000)',
+    });
+    expect(callCount).toBe(1);
+  });
+
   it('wraps missing-tool_use as ExtractionResponseError so the audit log captures the raw body', async () => {
     const provider = new AnthropicProvider({
       apiKey: 'k',

@@ -66,6 +66,9 @@ interface ProviderStatus {
   // Per-call extraction/enrichment timeout (ms). DB-backed; falls back to
   // LLM_TIMEOUT_MS env, then 60000.
   llmTimeoutMs: number;
+  // Per-call output-token ceiling (Anthropic/Shield path). DB-backed; falls
+  // back to LLM_MAX_COMPLETION_TOKENS env, then 32000.
+  llmMaxTokens: number;
   monthlyCapUsd: number | null;
 }
 
@@ -113,6 +116,8 @@ const CONFIRM_PHRASE = 'I AUTHORIZE OCR EGRESS';
 
 // Mirrors the server default (resolveLlmTimeoutMs / DEFAULT_LLM_TIMEOUT_MS).
 const DEFAULT_TIMEOUT_MS = 60000;
+// Mirrors the server default (resolveLlmMaxTokens / DEFAULT_LLM_MAX_TOKENS).
+const DEFAULT_MAX_TOKENS = 32000;
 
 export function LlmProviderAdminPage() {
   const qc = useQueryClient();
@@ -190,6 +195,11 @@ export function LlmProviderAdminPage() {
       api.post('/api/admin/llm-provider/timeout', { timeoutMs }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'llm-provider'] }),
   });
+  const setLlmMaxTokens = useMutation({
+    mutationFn: (maxTokens: number | '') =>
+      api.post('/api/admin/llm-provider/max-tokens', { maxTokens }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'llm-provider'] }),
+  });
   const test = useMutation({
     mutationFn: () => api.post<TestResult>('/api/admin/llm-provider/test'),
   });
@@ -262,6 +272,20 @@ export function LlmProviderAdminPage() {
       await setLlmTimeout.mutateAsync(v === '' ? '' : Number.parseInt(v, 10));
       toast.success(
         v === '' ? 'LLM timeout reset to default (60s).' : `LLM timeout set to ${v} ms.`,
+      );
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : 'failed');
+    }
+  };
+
+  const onSaveMaxTokens = async (raw: string): Promise<void> => {
+    const v = raw.trim();
+    try {
+      await setLlmMaxTokens.mutateAsync(v === '' ? '' : Number.parseInt(v, 10));
+      toast.success(
+        v === ''
+          ? `Max output tokens reset to default (${DEFAULT_MAX_TOKENS}).`
+          : `Max output tokens set to ${v}.`,
       );
     } catch (err) {
       toast.error(err instanceof ApiError ? err.message : 'failed');
@@ -529,6 +553,24 @@ export function LlmProviderAdminPage() {
             current={provider.data.llmTimeoutMs}
             disabled={setLlmTimeout.isPending}
             onSubmit={onSaveTimeout}
+          />
+        </section>
+      ) : null}
+
+      {provider.data ? (
+        <section className="rounded-lg border border-surface-muted bg-white p-4">
+          <h2 className="text-base font-medium">Max output tokens</h2>
+          <p className="mt-1 text-xs text-ink-subtle">
+            Output-token ceiling per extraction call. A multi-page statement&apos;s transaction list
+            will not fit in a small cap — if it&apos;s too low, the model is cut off mid-array and
+            the extraction fails with a truncation error. Raising this also needs a larger timeout
+            (more tokens take longer to generate) and costs more per statement. Range 1000–64000.
+            Blank = default ({DEFAULT_MAX_TOKENS}).
+          </p>
+          <MaxTokensForm
+            current={provider.data.llmMaxTokens}
+            disabled={setLlmMaxTokens.isPending}
+            onSubmit={onSaveMaxTokens}
           />
         </section>
       ) : null}
@@ -1067,6 +1109,49 @@ function TimeoutForm({
         className="w-32 rounded-md border border-surface-muted px-3 py-1.5 text-sm tabular-nums"
       />
       <span className="text-sm text-ink-muted">ms</span>
+      <button
+        type="submit"
+        disabled={disabled}
+        className="rounded-md border border-surface-muted px-3 py-1.5 text-sm"
+      >
+        {disabled ? 'Saving…' : 'Save'}
+      </button>
+    </form>
+  );
+}
+
+function MaxTokensForm({
+  current,
+  disabled,
+  onSubmit,
+}: {
+  current: number;
+  disabled: boolean;
+  onSubmit: (raw: string) => Promise<void>;
+}) {
+  const [val, setVal] = useState<string>(String(current));
+  useEffect(() => {
+    setVal(String(current));
+  }, [current]);
+  return (
+    <form
+      className="mt-2 flex flex-wrap items-center gap-2"
+      onSubmit={(e) => {
+        e.preventDefault();
+        void onSubmit(val);
+      }}
+    >
+      <input
+        type="number"
+        min="1000"
+        max="64000"
+        step="1000"
+        placeholder={String(DEFAULT_MAX_TOKENS)}
+        value={val}
+        onChange={(e) => setVal(e.target.value)}
+        className="w-32 rounded-md border border-surface-muted px-3 py-1.5 text-sm tabular-nums"
+      />
+      <span className="text-sm text-ink-muted">tokens</span>
       <button
         type="submit"
         disabled={disabled}

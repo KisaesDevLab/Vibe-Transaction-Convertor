@@ -28,6 +28,7 @@ import {
   providerOrderFor,
   resolveAnthropicBaseUrl,
   resolveLlmTimeoutMs,
+  resolveLlmMaxTokens,
   resolveProviderPolicy,
   type LlmProviderPolicy,
 } from '../services/llm-provider.js';
@@ -62,6 +63,7 @@ const ANTHROPIC_KEY = 'llm.anthropic.api_key';
 const ANTHROPIC_MODEL = 'llm.anthropic.model';
 const ANTHROPIC_BASE_URL_KEY = 'llm.anthropic.base_url';
 const LLM_TIMEOUT_KEY = 'llm.timeout_ms';
+const LLM_MAX_TOKENS_KEY = 'llm.max_tokens';
 const MONTHLY_CAP_KEY = 'llm.anthropic.monthly_cap_usd';
 
 // Phase 26 #29: curated Claude family with known pricing in the
@@ -146,6 +148,7 @@ export const adminRouter = (): Router => {
         anthropicBaseUrl,
         anthropicViaShield: isAnthropicViaGateway(anthropicBaseUrl),
         llmTimeoutMs: await resolveLlmTimeoutMs(db),
+        llmMaxTokens: await resolveLlmMaxTokens(db),
         monthlyCapUsd: capRows[0]?.valuePlaintext
           ? Number.parseFloat(capRows[0].valuePlaintext)
           : null,
@@ -332,6 +335,49 @@ export const adminRouter = (): Router => {
         payload: { timeoutMs: llmTimeoutMs },
       });
       res.json({ ok: true, llmTimeoutMs });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // Per-call output-token ceiling for extraction (Anthropic/Shield path).
+  // Empty/0 clears the override (back to LLM_MAX_COMPLETION_TOKENS env /
+  // 32000 default). The old 6000 cap truncated multi-page statements; a
+  // larger statement needs a larger cap *and* a larger timeout.
+  router.post('/llm-provider/max-tokens', async (req, res, next) => {
+    try {
+      const raw = req.body?.maxTokens;
+      let value: string | null;
+      if (raw === null || raw === undefined || raw === '') {
+        value = null;
+      } else {
+        const n = Number.parseInt(String(raw), 10);
+        if (!Number.isFinite(n) || n < 1000 || n > 64_000) {
+          throw new ValidationError('maxTokens must be between 1000 and 64000');
+        }
+        value = String(n);
+      }
+      if (value === null) {
+        await db.delete(systemSettings).where(eq(systemSettings.key, LLM_MAX_TOKENS_KEY));
+      } else {
+        await db
+          .insert(systemSettings)
+          .values({ key: LLM_MAX_TOKENS_KEY, valuePlaintext: value, isSecret: false })
+          .onConflictDoUpdate({
+            target: systemSettings.key,
+            set: { valuePlaintext: value, updatedAt: sql`now()`, updatedByUserId: req.user!.id },
+          });
+      }
+      invalidateProviderCache();
+      const llmMaxTokens = await resolveLlmMaxTokens(db);
+      await writeAudit(db, {
+        actorUserId: req.user!.id,
+        entityType: 'system_settings',
+        entityId: LLM_MAX_TOKENS_KEY,
+        action: 'llm-max-tokens.change',
+        payload: { maxTokens: llmMaxTokens },
+      });
+      res.json({ ok: true, llmMaxTokens });
     } catch (err) {
       next(err);
     }

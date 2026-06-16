@@ -529,6 +529,12 @@ export interface AnthropicProviderOptions {
   baseUrl?: string | undefined;
   model?: string | undefined;
   timeoutMs?: number | undefined;
+  // Hard ceiling on output tokens per /v1/messages call. Defaults to
+  // LLM_MAX_COMPLETION_TOKENS or 32000 — a multi-page statement's
+  // transaction list does not fit in the old 6000 cap, so the model
+  // truncated mid-array and dropped `transactions`. Operator-tunable
+  // from the LLM-provider admin page.
+  maxTokens?: number | undefined;
   fetcher?: typeof fetch | undefined;
   // Operator-mergeable price table. When set, replaces the curated
   // defaults. Used by buildProvider to pass DB-backed pricing through
@@ -549,6 +555,7 @@ export class AnthropicProvider implements LlmProvider {
   private baseUrl: string;
   private model: string;
   private timeoutMs: number;
+  private maxTokens: number;
   private fetcher: typeof fetch;
   private priceTable: AnthropicPriceTable;
   private sessionId: string | null;
@@ -564,6 +571,7 @@ export class AnthropicProvider implements LlmProvider {
     ).replace(/\/$/, '');
     this.model = opts.model ?? process.env.ANTHROPIC_MODEL ?? 'claude-sonnet-4-6';
     this.timeoutMs = opts.timeoutMs ?? Number(process.env.LLM_TIMEOUT_MS ?? 60_000);
+    this.maxTokens = opts.maxTokens ?? Number(process.env.LLM_MAX_COMPLETION_TOKENS ?? 32_000);
     this.fetcher = opts.fetcher ?? fetch;
     this.priceTable = opts.priceTable ?? ANTHROPIC_PRICE_TABLE_DEFAULT;
     this.sessionId = opts.sessionId && opts.sessionId.length > 0 ? opts.sessionId : null;
@@ -724,7 +732,7 @@ export class AnthropicProvider implements LlmProvider {
         body: JSON.stringify({
           model: this.model,
           system: SYSTEM_PROMPT,
-          max_tokens: Number(process.env.LLM_MAX_COMPLETION_TOKENS ?? 6000),
+          max_tokens: this.maxTokens,
           tools: [tool],
           tool_choice: { type: 'tool', name: tool.name },
           messages,
@@ -743,8 +751,24 @@ export class AnthropicProvider implements LlmProvider {
         content?: Array<
           { type: 'tool_use'; name: string; input: unknown } | { type: 'text'; text: string }
         >;
+        stop_reason?: string;
         usage?: { input_tokens?: number; output_tokens?: number };
       };
+      // Truncation guard. When generation hits the output ceiling,
+      // Anthropic returns the partial tool_use input parsed up to the
+      // cut — for a long statement that's the header fields with the
+      // `transactions` array never started, so Zod would (misleadingly)
+      // report `transactions: Required`. Catch it here and tell the
+      // operator the real cause: the cap is too low. A reminder retry
+      // with the same cap would truncate identically, so this error
+      // carries no missingTopLevelFields and the retry loop skips it.
+      if (body.stop_reason === 'max_tokens') {
+        throw new ExtractionResponseError({
+          summary: `LLM output truncated at max_tokens (${this.maxTokens})`,
+          rawResponse: JSON.stringify(body).slice(0, 8_000),
+          issues: `stop_reason=max_tokens; raise the admin "Max output tokens" knob (or LLM_MAX_COMPLETION_TOKENS) — statement too large for ${this.maxTokens} output tokens`,
+        });
+      }
       const toolUse = body.content?.find(
         (c): c is { type: 'tool_use'; name: string; input: unknown } => c.type === 'tool_use',
       );
@@ -877,7 +901,7 @@ export class AnthropicProvider implements LlmProvider {
         body: JSON.stringify({
           model: this.model,
           system: opts.systemPrompt,
-          max_tokens: opts.maxOutputTokens ?? Number(process.env.LLM_MAX_COMPLETION_TOKENS ?? 6000),
+          max_tokens: opts.maxOutputTokens ?? this.maxTokens,
           tools: [tool],
           tool_choice: { type: 'tool', name: toolName },
           messages: [{ role: 'user', content: userContent }],
@@ -896,8 +920,14 @@ export class AnthropicProvider implements LlmProvider {
         content?: Array<
           { type: 'tool_use'; name: string; input: unknown } | { type: 'text'; text: string }
         >;
+        stop_reason?: string;
         usage?: { input_tokens?: number; output_tokens?: number };
       };
+      if (body.stop_reason === 'max_tokens') {
+        throw new Error(
+          `anthropic complete: output truncated at max_tokens (${opts.maxOutputTokens ?? this.maxTokens})`,
+        );
+      }
       const toolUse = body.content?.find(
         (c): c is { type: 'tool_use'; name: string; input: unknown } => c.type === 'tool_use',
       );
