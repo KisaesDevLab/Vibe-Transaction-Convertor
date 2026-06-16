@@ -732,7 +732,13 @@ export class AnthropicProvider implements LlmProvider {
         }),
         signal: ctl.signal,
       });
-      if (!res.ok) throw new Error(`anthropic HTTP ${res.status}`);
+      if (!res.ok) {
+        // Surface the gateway/API error body — a bare status hides the
+        // reason (e.g. Shield's {"error":{"type","message"}} for a wrong
+        // policy, ZDR-off, model-not-allowed, or bad session_id).
+        const detail = await res.text().catch(() => '');
+        throw new Error(`anthropic HTTP ${res.status}${detail ? `: ${detail.slice(0, 500)}` : ''}`);
+      }
       const body = (await res.json()) as {
         content?: Array<
           { type: 'tool_use'; name: string; input: unknown } | { type: 'text'; text: string }
@@ -879,7 +885,13 @@ export class AnthropicProvider implements LlmProvider {
         }),
         signal: ctl.signal,
       });
-      if (!res.ok) throw new Error(`anthropic HTTP ${res.status}`);
+      if (!res.ok) {
+        // Surface the gateway/API error body — a bare status hides the
+        // reason (e.g. Shield's {"error":{"type","message"}} for a wrong
+        // policy, ZDR-off, model-not-allowed, or bad session_id).
+        const detail = await res.text().catch(() => '');
+        throw new Error(`anthropic HTTP ${res.status}${detail ? `: ${detail.slice(0, 500)}` : ''}`);
+      }
       const body = (await res.json()) as {
         content?: Array<
           { type: 'tool_use'; name: string; input: unknown } | { type: 'text'; text: string }
