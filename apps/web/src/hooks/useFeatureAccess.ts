@@ -44,8 +44,18 @@ export const useSetFeatureAccess = () => {
       api.patch<{ ok: true }>(`/api/admin/feature-access/${input.userId}/${input.featureKey}`, {
         enabled: input.enabled,
       }),
-    onSuccess: () => {
-      void qc.invalidateQueries({ queryKey: matrixKey });
+    // Patch the single changed cell into the cached matrix instead of
+    // refetching the whole users × features grid on every toggle — bulk
+    // edits would otherwise fan out into many GETs and trip the rate
+    // limiter.
+    onSuccess: (_data, vars) => {
+      qc.setQueryData<FeatureAccessUser[]>(matrixKey, (prev) =>
+        prev?.map((u) =>
+          u.id === vars.userId
+            ? { ...u, features: { ...u.features, [vars.featureKey]: vars.enabled } }
+            : u,
+        ),
+      );
       // The acting admin may have changed their own access — refresh /me
       // so nav/route gates update without a reload.
       void qc.invalidateQueries({ queryKey: meKey });

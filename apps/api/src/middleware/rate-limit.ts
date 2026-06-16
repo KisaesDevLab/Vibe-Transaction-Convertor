@@ -1,3 +1,4 @@
+import type { Request, RequestHandler } from 'express';
 import { rateLimit, type RateLimitRequestHandler, type Store } from 'express-rate-limit';
 import RedisStore from 'rate-limit-redis';
 import Redis from 'ioredis';
@@ -35,4 +36,26 @@ const buildLimiter = (prefix: string, limit: number): RateLimitRequestHandler =>
 
 export const unauthRateLimiter = (): RateLimitRequestHandler => buildLimiter('rl:unauth:', 100);
 
-export const authRateLimiter = (): RateLimitRequestHandler => buildLimiter('rl:auth:', 1000);
+// Authenticated limiter: a generous cap keyed per-user (not per-IP) so a
+// single admin doing legitimate bulk work — e.g. toggling many feature-
+// access rows — isn't throttled by a shared-IP budget.
+const buildAuthLimiter = (): RateLimitRequestHandler => {
+  const store = buildStore('rl:auth:');
+  const opts = {
+    ...baseOpts,
+    limit: 1000,
+    // Only ever invoked for authenticated requests (see apiRateLimiter),
+    // so req.user is always present; the fallback is belt-and-suspenders.
+    keyGenerator: (req: Request) => req.user?.id ?? 'anon',
+  };
+  return store ? rateLimit({ ...opts, store }) : rateLimit({ ...opts });
+};
+
+// Single global limiter for the API. Authenticated requests get the high
+// per-user limit; anonymous traffic keeps the tight per-IP limit. MUST be
+// mounted after loadSession so req.user is populated.
+export const apiRateLimiter = (): RequestHandler => {
+  const auth = buildAuthLimiter();
+  const unauth = buildLimiter('rl:unauth:', 100);
+  return (req, res, next) => (req.user ? auth : unauth)(req, res, next);
+};

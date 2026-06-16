@@ -15,7 +15,7 @@ import { requireFeature } from './middleware/feature-access.js';
 import { stripBasePath } from './middleware/base-path.js';
 import { csrf, csrfTokenHandler } from './middleware/csrf.js';
 import { requireInternalNetwork } from './middleware/internal-network.js';
-import { unauthRateLimiter } from './middleware/rate-limit.js';
+import { apiRateLimiter } from './middleware/rate-limit.js';
 import { requestId } from './middleware/request-id.js';
 import { accountsByCompanyRouter, accountsRouter } from './routes/accounts.js';
 import { applianceAdminRouter, internalApplianceRouter } from './routes/appliance.js';
@@ -96,9 +96,12 @@ export const createApp = (): Express => {
     }),
   );
 
-  app.use(unauthRateLimiter());
-  app.use(csrf());
+  // loadSession runs first so the rate limiter can tell authenticated
+  // requests (high per-user limit) from anonymous ones (tight per-IP
+  // limit). cookieParser (above) is the only dependency loadSession has.
   app.use(loadSession);
+  app.use(apiRateLimiter());
+  app.use(csrf());
 
   // Public routes — no requireAuth.
   app.get('/api/auth/csrf', csrfTokenHandler);
