@@ -1,5 +1,5 @@
 # Appliance overlay — Phase 29.
-# Reuses shared Postgres / Redis / GLM-OCR / LLM gateway from the
+# Reuses shared Postgres / Redis / Vibe Shield / LLM gateway from the
 # vibe appliance. Operators run:
 #   docker compose -f docker-compose.appliance.yml up -d
 # alongside the appliance's own compose file.
@@ -9,7 +9,9 @@ x-api-env: &api-env
   PORT: 4000
   DATABASE_URL: ${VIBETC_DATABASE_URL:?DATABASE_URL must be set in appliance env}
   REDIS_URL: ${VIBETC_REDIS_URL:?REDIS_URL must be set}
-  GLM_OCR_URL: ${VIBE_APPLIANCE_GLM_OCR_URL:?shared GLM-OCR URL required}
+  VIBE_SHIELD_URL: ${VIBE_APPLIANCE_VIBE_SHIELD_URL:?shared Vibe Shield gateway URL required}
+  VIBE_SHIELD_API_KEY: ${VIBETC_VIBE_SHIELD_API_KEY:?Vibe Shield tenant key (vs_live_…) required}
+  VIBE_SHIELD_POLICY: ${VIBE_SHIELD_POLICY:-cpa-converter-output}
   LLM_GATEWAY_URL: ${VIBE_APPLIANCE_LLM_GATEWAY_URL:?shared LLM gateway URL required}
   LLM_PROVIDER: local
   LLM_MODEL_ID: qwen3-8b

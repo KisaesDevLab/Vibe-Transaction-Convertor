@@ -70,7 +70,7 @@ interface ApplianceHealth {
       configured: boolean;
       counts?: { waiting: number; active: number; delayed: number; failed: number };
     };
-    glmOcr: { configured: boolean };
+    vibeShield: { configured: boolean };
     llmGateway: { configured: boolean };
   };
 }
@@ -84,7 +84,7 @@ const buildHealth = async (appName: string, appVersion: string): Promise<Applian
       configured: Boolean(process.env.REDIS_URL),
       ...(queueCounts ? { counts: queueCounts } : {}),
     },
-    glmOcr: { configured: Boolean(process.env.GLM_OCR_URL) },
+    vibeShield: { configured: Boolean(process.env.VIBE_SHIELD_URL) },
     llmGateway: { configured: Boolean(process.env.LLM_GATEWAY_URL) },
   };
   const status: 'ok' | 'degraded' = deps.database.ok ? 'ok' : 'degraded';

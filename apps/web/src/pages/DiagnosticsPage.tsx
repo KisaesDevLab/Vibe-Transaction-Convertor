@@ -16,7 +16,7 @@ interface Diagnostics {
   services: {
     databaseUrl: 'configured' | 'unconfigured';
     redisUrl: 'configured' | 'unconfigured';
-    glmOcrUrl: 'configured' | 'unconfigured';
+    vibeShieldUrl: 'configured' | 'unconfigured';
     llmGatewayUrl: 'configured' | 'unconfigured';
     anthropicBaseUrl: string;
   };
@@ -214,8 +214,8 @@ export function DiagnosticsPage() {
               <Pill ok={diag.data.services.redisUrl} text={diag.data.services.redisUrl} />
             </li>
             <li className="flex items-center justify-between">
-              <span>GLM_OCR_URL</span>
-              <Pill ok={diag.data.services.glmOcrUrl} text={diag.data.services.glmOcrUrl} />
+              <span>VIBE_SHIELD_URL</span>
+              <Pill ok={diag.data.services.vibeShieldUrl} text={diag.data.services.vibeShieldUrl} />
             </li>
             <li className="flex items-center justify-between">
               <span>LLM_GATEWAY_URL</span>

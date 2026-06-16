@@ -2,7 +2,9 @@
 
 ## Status
 
-Accepted.
+**Superseded by ADR-022** (OCR via Vibe Shield / Claude vision). GLM-OCR
+has been removed; the "OCR engine over HTTP, never in-process" principle
+carries forward, but the engine is now the Vibe Shield gateway.
 
 ## Context
 

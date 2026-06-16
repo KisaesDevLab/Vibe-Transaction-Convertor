@@ -179,7 +179,7 @@ const main = async (): Promise<void> => {
     deps: {
       database: await checkDb(),
       redis: await checkRedis(),
-      glmOcr: await checkHttpHealth(process.env.GLM_OCR_URL, ['/health', '/version']),
+      vibeShield: await checkHttpHealth(process.env.VIBE_SHIELD_URL, ['/health']),
       llmGateway: await checkHttpHealth(process.env.LLM_GATEWAY_URL, ['/health', '/v1/models']),
     },
     storage: {

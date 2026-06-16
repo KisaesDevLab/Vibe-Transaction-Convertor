@@ -1,6 +1,8 @@
 # Standalone deployment — Phase 28.
-# Brings up Postgres + Redis + GLM-OCR + LLM Gateway + Caddy + a separate
-# worker container alongside the API. Operators run
+# Brings up Postgres + Redis + LLM Gateway + Caddy + a separate worker
+# container alongside the API. OCR now runs through Vibe Shield (Claude
+# vision); bring up the Shield gateway+engine via its own compose fragment
+# (see the Vibe-Shield repo) and point VIBE_SHIELD_URL at it. Operators run
 #   docker compose --profile standalone up -d
 
 x-api-env: &api-env
@@ -8,7 +10,11 @@ x-api-env: &api-env
   PORT: 4000
   DATABASE_URL: postgres://vibetc:vibetc@postgres:5432/vibetc?schema=vibetc
   REDIS_URL: redis://redis:6379
-  GLM_OCR_URL: http://glm-ocr:8090
+  # OCR via Vibe Shield (Claude vision, PII-redacted). Point at the Shield
+  # gateway; supply the tenant key (vs_live_…) via VIBE_SHIELD_API_KEY.
+  VIBE_SHIELD_URL: ${VIBE_SHIELD_URL:-http://vibe-shield-gateway:8080}
+  VIBE_SHIELD_API_KEY: ${VIBE_SHIELD_API_KEY:-}
+  VIBE_SHIELD_POLICY: ${VIBE_SHIELD_POLICY:-cpa-converter-output}
   LLM_GATEWAY_URL: http://llm-gateway:8000
   LLM_PROVIDER: local
   LLM_MODEL_ID: qwen3-8b
@@ -51,14 +57,11 @@ services:
       timeout: 3s
       retries: 30
 
-  glm-ocr:
-    image: vibe/glm-ocr-server:latest
-    profiles: ['standalone']
-    healthcheck:
-      test: ['CMD-SHELL', 'wget -q -O - http://localhost:8090/health || exit 1']
-      interval: 5s
-      timeout: 5s
-      retries: 30
+  # OCR is provided by Vibe Shield (Claude vision through the Shield
+  # gateway), which is a separate multi-container service (engine +
+  # gateway + its own Postgres schema). Bring it up from the Vibe-Shield
+  # repo's compose fragment and set VIBE_SHIELD_URL / VIBE_SHIELD_API_KEY
+  # above. It is intentionally NOT embedded here.
 
   llm-gateway:
     image: vibe/llm-gateway:latest

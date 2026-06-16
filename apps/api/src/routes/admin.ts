@@ -49,7 +49,7 @@ import { clearPricing, listPricings, setPricing } from '../services/pricing.js';
 import {
   AnthropicProvider,
   type EnrichmentPromptMode,
-  probeGlmOcrHealth,
+  probeShieldHealth,
 } from '@vibe-tx-converter/extractor';
 import { extractionQueue } from '../jobs/queues.js';
 import { logger } from '../lib/logger.js';
@@ -650,7 +650,7 @@ export const adminRouter = (): Router => {
   // DB-backed engine configuration (GLM-OCR + LLM Gateway). Reads
   // system_settings → falls back to env. Editable from the
   // /admin/engines UI without a worker restart.
-  const ENGINE_KEYS: readonly EngineKey[] = ['glm-ocr', 'llm-gateway'];
+  const ENGINE_KEYS: readonly EngineKey[] = ['vibe-shield', 'llm-gateway'];
   const isEngineKey = (s: string): s is EngineKey => (ENGINE_KEYS as readonly string[]).includes(s);
 
   router.get('/engines', async (_req, res, next) => {
@@ -677,9 +677,9 @@ export const adminRouter = (): Router => {
         url?: string | null;
         timeoutMs?: number | null;
         concurrency?: number | null;
-        ocrPath?: string | null;
         healthPath?: string | null;
-        versionPath?: string | null;
+        model?: string | null;
+        prompt?: string | null;
         apiKey?: string | null;
       } = {};
       if (body.url !== undefined) {
@@ -693,17 +693,22 @@ export const adminRouter = (): Router => {
         input.concurrency =
           body.concurrency === null ? null : Number.parseInt(String(body.concurrency), 10) || null;
       }
-      // Path overrides — glm-ocr only. Service-layer normalisation
-      // throws on bad shapes (must start with "/"); surface that as a
-      // ValidationError so the admin UI gets a clean toast.
-      const parsePath = (field: 'ocrPath' | 'healthPath' | 'versionPath'): void => {
-        const raw = body[field];
-        if (raw === undefined) return;
-        input[field] = raw === null || raw === '' ? null : String(raw).trim();
-      };
-      parsePath('ocrPath');
-      parsePath('healthPath');
-      parsePath('versionPath');
+      // Health-path override — vibe-shield only. Service-layer
+      // normalisation throws on bad shapes (must start with "/"); surface
+      // that as a ValidationError so the admin UI gets a clean toast.
+      if (body.healthPath !== undefined) {
+        input.healthPath =
+          body.healthPath === null || body.healthPath === ''
+            ? null
+            : String(body.healthPath).trim();
+      }
+      // Claude model + per-page OCR prompt (plain strings).
+      if (body.model !== undefined) {
+        input.model = body.model === null || body.model === '' ? null : String(body.model).trim();
+      }
+      if (body.prompt !== undefined) {
+        input.prompt = body.prompt === null || body.prompt === '' ? null : String(body.prompt);
+      }
       if (body.apiKey !== undefined) {
         const raw = body.apiKey;
         input.apiKey = raw === null || raw === '' ? null : String(raw).trim();
@@ -774,8 +779,8 @@ export const adminRouter = (): Router => {
         res.json({ ok: false, source: cfg.source, detail: 'no URL configured' });
         return;
       }
-      if (engine === 'glm-ocr') {
-        const result = await probeGlmOcrHealth({
+      if (engine === 'vibe-shield') {
+        const result = await probeShieldHealth({
           baseUrl: cfg.url,
           ...(cfg.healthPath ? { healthPath: cfg.healthPath } : {}),
           ...(cfg.apiKey ? { apiKey: cfg.apiKey } : {}),
@@ -842,7 +847,7 @@ export const adminRouter = (): Router => {
         services: {
           databaseUrl: process.env.DATABASE_URL ? 'configured' : 'unconfigured',
           redisUrl: process.env.REDIS_URL ? 'configured' : 'unconfigured',
-          glmOcrUrl: process.env.GLM_OCR_URL ? 'configured' : 'unconfigured',
+          vibeShieldUrl: process.env.VIBE_SHIELD_URL ? 'configured' : 'unconfigured',
           llmGatewayUrl: process.env.LLM_GATEWAY_URL ? 'configured' : 'unconfigured',
           anthropicBaseUrl: process.env.ANTHROPIC_BASE_URL ?? 'https://api.anthropic.com',
         },

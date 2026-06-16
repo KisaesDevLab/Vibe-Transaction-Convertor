@@ -275,6 +275,12 @@ export const statements = vibetc.table(
       .notNull()
       .default(false),
     periodBoundsViolations: integer('period_bounds_violations').notNull().default(0),
+    // Phase: Vibe Shield. The per-conversion Shield session opened at
+    // upload. OCR + extraction calls quote it so their PII tokens share
+    // one vault; the export path materializes those tokens back to
+    // cleartext against this session. NULL for statements created before
+    // the Shield integration (and when Shield is unconfigured).
+    shieldSessionId: text('shield_session_id'),
     llmProvider: llmProvider('llm_provider'),
     llmInputTokens: integer('llm_input_tokens').notNull().default(0),
     llmOutputTokens: integer('llm_output_tokens').notNull().default(0),

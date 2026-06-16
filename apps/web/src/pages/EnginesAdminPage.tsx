@@ -26,12 +26,11 @@ interface EngineConfig {
   source: 'db' | 'env' | 'unset';
   timeoutMs?: number;
   concurrency?: number;
-  // Optional sub-path overrides (currently only meaningful for
-  // glm-ocr). null / undefined means "use the client default" — the
-  // edit form treats both as "unset".
-  ocrPath?: string | null;
+  // Optional overrides (Vibe Shield only). null / undefined means "use
+  // the client default" — the edit form treats both as "unset".
   healthPath?: string | null;
-  versionPath?: string | null;
+  model?: string | null;
+  prompt?: string | null;
   // The plaintext apiKey is never returned over the wire — the API
   // strips it via maskEngineConfig. We only see the two derived
   // fields and the input field is write-only.
@@ -39,7 +38,7 @@ interface EngineConfig {
   apiKeyLastFour?: string | null;
 }
 
-type EngineKey = 'glm-ocr' | 'llm-gateway';
+type EngineKey = 'vibe-shield' | 'llm-gateway';
 
 interface EnginesResponse {
   configs: Record<EngineKey, EngineConfig>;
@@ -119,15 +118,15 @@ export function EnginesAdminPage() {
       />
 
       <EditableEngine
-        engine="glm-ocr"
-        name="GLM-OCR"
-        envVar="GLM_OCR_URL"
-        status={deps.glmOcr}
-        config={cfgs?.['glm-ocr'] ?? null}
+        engine="vibe-shield"
+        name="Vibe Shield (OCR via Claude)"
+        envVar="VIBE_SHIELD_URL"
+        status={deps.vibeShield}
+        config={cfgs?.['vibe-shield'] ?? null}
         showAdvanced
-        showPaths
+        showShieldFields
         showApiKey
-        notes="Zhipu GLM-OCR served by llama.cpp's llama-server (image: vibe-glm-ocr). OpenAI-compatible chat-completions API; one POST per page. Used only when the PDF lacks a text layer. URL is typically http://vibe-glm-ocr:8090 (appliance) or http://glm-ocr:8090 (standalone). Path defaults — /v1/chat/completions for OCR, /health for liveness — match the upstream image; only override if you're behind a path-rewriting proxy. /version is best-effort: llama-server doesn't actually expose it, so engineVersion logs 'glm-ocr/unknown'. The API key is sent as Authorization: Bearer; only set when the OCR server was started with OCR_API_KEY."
+        notes="Scanned pages are OCR'd by Claude vision through the Vibe Shield gateway (Anthropic Messages API at /v1/messages, one POST per page). Shield masks PII in each page image — under the token-overlay masker — before Claude sees it, so the markdown comes back tokenized and is materialized at export. URL is typically http://vibe-shield-gateway:8080. The API key is the Shield tenant key (vs_live_…), sent as Authorization: Bearer. Model defaults to claude-sonnet-4-6. Requires the cpa-converter-output policy with the token-overlay masker, or the statement's PII is lost."
       />
 
       <EditableEngine
@@ -251,7 +250,7 @@ function EditableEngine({
   config,
   notes,
   showAdvanced = false,
-  showPaths = false,
+  showShieldFields = false,
   showApiKey = false,
 }: {
   engine: EngineKey;
@@ -263,10 +262,9 @@ function EditableEngine({
   config: EngineConfig | null;
   notes?: string | undefined;
   showAdvanced?: boolean | undefined;
-  // Exposes the `/ocr`, `/health`, `/version` path inputs. Currently
-  // only relevant for glm-ocr, but the prop keeps the component
-  // generic for future engines whose path varies by deployment.
-  showPaths?: boolean | undefined;
+  // Exposes the health-path + Claude model + OCR-prompt inputs (Vibe
+  // Shield only).
+  showShieldFields?: boolean | undefined;
   // Exposes the bearer-token field. Write-only — the plaintext key
   // never round-trips back from the server (see maskEngineConfig).
   showApiKey?: boolean | undefined;
@@ -276,9 +274,9 @@ function EditableEngine({
   const [url, setUrl] = useState('');
   const [timeoutMs, setTimeoutMs] = useState('');
   const [concurrency, setConcurrency] = useState('');
-  const [ocrPath, setOcrPath] = useState('');
   const [healthPath, setHealthPath] = useState('');
-  const [versionPath, setVersionPath] = useState('');
+  const [model, setModel] = useState('');
+  const [prompt, setPrompt] = useState('');
   const [apiKey, setApiKey] = useState('');
 
   // Hydrate inputs whenever the loaded config changes (after a save the
@@ -289,9 +287,9 @@ function EditableEngine({
     setUrl(config.source === 'db' ? (config.url ?? '') : '');
     setTimeoutMs(config.timeoutMs ? String(config.timeoutMs) : '');
     setConcurrency(config.concurrency ? String(config.concurrency) : '');
-    setOcrPath(config.ocrPath ?? '');
     setHealthPath(config.healthPath ?? '');
-    setVersionPath(config.versionPath ?? '');
+    setModel(config.model ?? '');
+    setPrompt(config.prompt ?? '');
     // apiKey is write-only — the API doesn't echo it back, only
     // `hasApiKey` + last-4. Reset the input on re-hydration so a
     // typed-but-unsaved value doesn't survive a refresh.
@@ -303,9 +301,9 @@ function EditableEngine({
       url?: string | null;
       timeoutMs?: number | null;
       concurrency?: number | null;
-      ocrPath?: string | null;
       healthPath?: string | null;
-      versionPath?: string | null;
+      model?: string | null;
+      prompt?: string | null;
       apiKey?: string | null;
     }) => api.post<EngineConfig>(`/api/admin/engines/${engine}`, input),
     onSuccess: () => {
@@ -330,9 +328,9 @@ function EditableEngine({
       url?: string | null;
       timeoutMs?: number | null;
       concurrency?: number | null;
-      ocrPath?: string | null;
       healthPath?: string | null;
-      versionPath?: string | null;
+      model?: string | null;
+      prompt?: string | null;
       apiKey?: string | null;
     } = {};
     const trimmed = url.trim();
@@ -344,11 +342,11 @@ function EditableEngine({
       const c = concurrency.trim();
       input.concurrency = c.length === 0 ? null : Number.parseInt(c, 10);
     }
-    if (showPaths) {
+    if (showShieldFields) {
       const norm = (s: string): string | null => (s.trim().length === 0 ? null : s.trim());
-      input.ocrPath = norm(ocrPath);
       input.healthPath = norm(healthPath);
-      input.versionPath = norm(versionPath);
+      input.model = norm(model);
+      input.prompt = prompt.trim().length === 0 ? null : prompt;
     }
     if (showApiKey) {
       // Only send the apiKey field when the operator actually typed
@@ -451,39 +449,41 @@ function EditableEngine({
             </label>
           </div>
         ) : null}
-        {showPaths ? (
-          <div className="grid grid-cols-3 gap-2">
+        {showShieldFields ? (
+          <>
+            <div className="grid grid-cols-2 gap-2">
+              <label className="block text-xs text-ink-muted">
+                Health path
+                <input
+                  type="text"
+                  placeholder="/health"
+                  value={healthPath}
+                  onChange={(e) => setHealthPath(e.target.value)}
+                  className="mt-1 w-full rounded-md border border-surface-muted px-3 py-1.5 text-sm font-mono"
+                />
+              </label>
+              <label className="block text-xs text-ink-muted">
+                Claude model
+                <input
+                  type="text"
+                  placeholder="claude-sonnet-4-6"
+                  value={model}
+                  onChange={(e) => setModel(e.target.value)}
+                  className="mt-1 w-full rounded-md border border-surface-muted px-3 py-1.5 text-sm font-mono"
+                />
+              </label>
+            </div>
             <label className="block text-xs text-ink-muted">
-              OCR path
-              <input
-                type="text"
-                placeholder="/ocr"
-                value={ocrPath}
-                onChange={(e) => setOcrPath(e.target.value)}
-                className="mt-1 w-full rounded-md border border-surface-muted px-3 py-1.5 text-sm font-mono"
+              OCR prompt (per page)
+              <textarea
+                rows={3}
+                placeholder="Transcribe this statement page to Markdown…"
+                value={prompt}
+                onChange={(e) => setPrompt(e.target.value)}
+                className="mt-1 w-full rounded-md border border-surface-muted px-3 py-1.5 text-sm"
               />
             </label>
-            <label className="block text-xs text-ink-muted">
-              Health path
-              <input
-                type="text"
-                placeholder="/health"
-                value={healthPath}
-                onChange={(e) => setHealthPath(e.target.value)}
-                className="mt-1 w-full rounded-md border border-surface-muted px-3 py-1.5 text-sm font-mono"
-              />
-            </label>
-            <label className="block text-xs text-ink-muted">
-              Version path
-              <input
-                type="text"
-                placeholder="/version"
-                value={versionPath}
-                onChange={(e) => setVersionPath(e.target.value)}
-                className="mt-1 w-full rounded-md border border-surface-muted px-3 py-1.5 text-sm font-mono"
-              />
-            </label>
-          </div>
+          </>
         ) : null}
         {showApiKey ? (
           <label className="block text-xs text-ink-muted">

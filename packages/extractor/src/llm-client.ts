@@ -197,6 +197,11 @@ export interface ExtractResult {
 
 export interface ExtractOptions extends UserPromptOptions {
   schema?: object;
+  // Vibe Shield: the per-conversion session id + policy to quote on this
+  // call (passed through to the Anthropic provider; ignored by the local
+  // gateway). Overrides any provider-level default.
+  sessionId?: string | undefined;
+  policyName?: string | undefined;
 }
 
 // Generic structured-output call for non-extraction LLM use (description
@@ -215,6 +220,9 @@ export interface CompleteOptions {
   // in audit/logs.
   schemaName?: string | undefined;
   maxOutputTokens?: number | undefined;
+  // Vibe Shield: per-call session id + policy (Anthropic provider only).
+  sessionId?: string | undefined;
+  policyName?: string | undefined;
   // Optional image attachments for vision-capable providers. Each
   // becomes an Anthropic `{type:'image', source:{type:'base64',...}}`
   // content part placed BEFORE the text prompt in the user message,
@@ -526,6 +534,13 @@ export interface AnthropicProviderOptions {
   // defaults. Used by buildProvider to pass DB-backed pricing through
   // without coupling the leaf extractor package to the API layer.
   priceTable?: AnthropicPriceTable | undefined;
+  // Vibe Shield extensions. When the provider points at a Shield gateway
+  // (baseUrl), these attach the per-conversion session + redaction policy
+  // to every /v1/messages call so the extractor's tokens share the same
+  // vault as the OCR step. Anthropic ignores unknown fields, so they're
+  // harmless when baseUrl points at api.anthropic.com directly.
+  sessionId?: string | undefined;
+  policyName?: string | undefined;
 }
 
 export class AnthropicProvider implements LlmProvider {
@@ -536,6 +551,8 @@ export class AnthropicProvider implements LlmProvider {
   private timeoutMs: number;
   private fetcher: typeof fetch;
   private priceTable: AnthropicPriceTable;
+  private sessionId: string | null;
+  private policyName: string | null;
 
   constructor(opts: AnthropicProviderOptions) {
     if (!opts.apiKey) throw new Error('AnthropicProvider requires an API key');
@@ -549,6 +566,36 @@ export class AnthropicProvider implements LlmProvider {
     this.timeoutMs = opts.timeoutMs ?? Number(process.env.LLM_TIMEOUT_MS ?? 60_000);
     this.fetcher = opts.fetcher ?? fetch;
     this.priceTable = opts.priceTable ?? ANTHROPIC_PRICE_TABLE_DEFAULT;
+    this.sessionId = opts.sessionId && opts.sessionId.length > 0 ? opts.sessionId : null;
+    this.policyName =
+      opts.policyName && opts.policyName.length > 0
+        ? opts.policyName
+        : (process.env.VIBE_SHIELD_POLICY ?? null);
+  }
+
+  // Shield request extensions, spread into every /v1/messages body. The
+  // session is per-call (each conversion has its own) so it must override
+  // the constructor default — the worker caches providers by id, so a
+  // constructor-baked session would leak across conversions. Empty object
+  // in direct-Anthropic mode (no session/policy).
+  private shieldFields(override?: {
+    sessionId?: string | undefined;
+    policyName?: string | undefined;
+  }): Record<string, string> {
+    const session = override?.sessionId ?? this.sessionId;
+    // Only attach Shield extensions when a session is in play. A session
+    // exists only when the request is bound for the Shield gateway, so
+    // this also keeps `session_id`/`policy_name` off requests to the real
+    // Anthropic API (which would reject the unknown fields). Shield's
+    // policy is bound to the key's appId, but policy_name on /v1/messages
+    // overrides the per-request policy — so we MUST send it explicitly,
+    // else the gateway falls back to its default policy (reid='full'),
+    // which would re-identify the response to cleartext at rest.
+    if (!session) return {};
+    return {
+      session_id: session,
+      policy_name: override?.policyName ?? this.policyName ?? 'cpa-converter-output',
+    };
   }
 
   async health(): Promise<{ ok: boolean; detail?: string }> {
@@ -613,6 +660,7 @@ export class AnthropicProvider implements LlmProvider {
   private async callAnthropic(
     messages: Array<{ role: 'user' | 'assistant'; content: string }>,
     tool: { name: string; description: string; input_schema: object },
+    shield?: { sessionId?: string | undefined; policyName?: string | undefined },
   ): Promise<{
     rawJson: string;
     toolInput: unknown;
@@ -638,6 +686,7 @@ export class AnthropicProvider implements LlmProvider {
           tools: [tool],
           tool_choice: { type: 'tool', name: tool.name },
           messages,
+          ...this.shieldFields(shield),
         }),
         signal: ctl.signal,
       });
@@ -704,7 +753,10 @@ export class AnthropicProvider implements LlmProvider {
         ...exemplarsAsMessages(1),
         { role: 'user', content: userPrompt },
       ];
-      const call = await this.callAnthropic(messages, tool);
+      const call = await this.callAnthropic(messages, tool, {
+        sessionId: opts.sessionId,
+        policyName: opts.policyName,
+      });
       totalInputTokens += call.inputTokens;
       totalOutputTokens += call.outputTokens;
       totalMs += call.ms;
@@ -785,6 +837,7 @@ export class AnthropicProvider implements LlmProvider {
           tools: [tool],
           tool_choice: { type: 'tool', name: toolName },
           messages: [{ role: 'user', content: userContent }],
+          ...this.shieldFields({ sessionId: opts.sessionId, policyName: opts.policyName }),
         }),
         signal: ctl.signal,
       });

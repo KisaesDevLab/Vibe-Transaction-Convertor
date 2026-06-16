@@ -136,6 +136,10 @@ interface AttemptContext {
   stmtId: string;
   markdown: string;
   dateFormatOverride?: 'MDY' | 'DMY' | 'YMD';
+  // The statement's Vibe Shield session, quoted on the extraction call so
+  // its PII tokens share the vault used by the OCR step. null when Shield
+  // is unconfigured (legacy / local-only).
+  sessionId?: string | undefined;
 }
 
 const checkAnthropicMonthlyCap = async (stmtId: string): Promise<string | null> => {
@@ -220,6 +224,7 @@ const attemptExtraction = async (
     result = await provider.extract(ctx.markdown, {
       schema: schemas.extraction.ExtractionJsonSchema,
       ...(ctx.dateFormatOverride ? { dateFormatOverride: ctx.dateFormatOverride } : {}),
+      ...(ctx.sessionId ? { sessionId: ctx.sessionId } : {}),
     });
   } catch (err) {
     const rejection: AttemptRejection =
@@ -707,6 +712,9 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
     // (after a previous AMBIGUOUS extraction), pass that through to the
     // LLM so it interprets the statement consistently.
     const stmtRows = await db.select().from(statements).where(eq(statements.id, stmtId));
+    // The Vibe Shield session opened at upload; quoted on OCR + extraction
+    // so their PII tokens share one vault.
+    const shieldSessionId = stmtRows[0]?.shieldSessionId ?? null;
     const dateFormatOverride =
       stmtRows[0]?.sourceDateFormatUserConfirmed === true &&
       (stmtRows[0]?.sourceDateFormat === 'MDY' ||
@@ -790,18 +798,22 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
       const rasters = await rasterizePdf(data.sourcePdfPath, { dpi: 300 });
       const scopedRasters = rasters.filter((r) => inRange(r.index));
       const images = await Promise.all(scopedRasters.map(async (r) => readFile(r.pngPath)));
-      // DB-backed URL falls back to GLM_OCR_URL env. Resolved per call so
-      // an admin tweak via /admin/engines doesn't require a restart.
-      const ocrConfig = await getEngineConfig(db, 'glm-ocr');
+      // DB-backed config (URL/key/model) falls back to VIBE_SHIELD_* env.
+      // Resolved per call so an admin tweak via /admin/engines doesn't
+      // require a restart. The page images go to Shield→Claude; Shield
+      // masks PII (token-overlay) before Claude sees them, so the markdown
+      // comes back tokenized and is materialized at export.
+      const ocrConfig = await getEngineConfig(db, 'vibe-shield');
       const ocr = await ocrPdfPages(images, {
         cache: redisOcrCache,
         ...(ocrConfig.url ? { baseUrl: ocrConfig.url } : {}),
         ...(ocrConfig.timeoutMs ? { timeoutMs: ocrConfig.timeoutMs } : {}),
         ...(ocrConfig.concurrency ? { concurrency: ocrConfig.concurrency } : {}),
-        ...(ocrConfig.ocrPath ? { ocrPath: ocrConfig.ocrPath } : {}),
         ...(ocrConfig.healthPath ? { healthPath: ocrConfig.healthPath } : {}),
-        ...(ocrConfig.versionPath ? { versionPath: ocrConfig.versionPath } : {}),
+        ...(ocrConfig.model ? { model: ocrConfig.model } : {}),
+        ...(ocrConfig.prompt ? { prompt: ocrConfig.prompt } : {}),
         ...(ocrConfig.apiKey ? { apiKey: ocrConfig.apiKey } : {}),
+        ...(shieldSessionId ? { sessionId: shieldSessionId } : {}),
       });
       lastOcrResponse = ocr;
       return ocr.pages
@@ -826,6 +838,7 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
       stmtId,
       markdown,
       ...(dateFormatOverride ? { dateFormatOverride } : {}),
+      ...(shieldSessionId ? { sessionId: shieldSessionId } : {}),
     };
 
     const persistAmbiguousHalt = async (a: AttemptOutcome): Promise<void> => {
@@ -1054,14 +1067,20 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
       });
     }
 
+    // OCR now runs through Shield→Claude (vision), so its tokens/cost
+    // count toward the statement's LLM rollup. Zero on the text-layer
+    // path (no OCR) and when usage is absent. The cast re-widens the
+    // type: lastOcrResponse is only assigned inside the produceOcrMarkdown
+    // closure, which TS can't see, so it narrows the read to `null`.
+    const ocrUsage = (lastOcrResponse as OcrResponse | null)?.usage;
     await db
       .update(statements)
       .set({
         llmProvider: chosen.providerId,
-        llmInputTokens: chosen.totalInputTokens,
-        llmOutputTokens: chosen.totalOutputTokens,
+        llmInputTokens: chosen.totalInputTokens + (ocrUsage?.inputTokens ?? 0),
+        llmOutputTokens: chosen.totalOutputTokens + (ocrUsage?.outputTokens ?? 0),
         llmCallCount: chosen.totalCallCount,
-        llmCostMicros: chosen.totalCostMicros,
+        llmCostMicros: chosen.totalCostMicros + (ocrUsage?.costMicros ?? 0n),
         llmModelVersion: chosen.modelVersion,
         sourceDateFormat: chosen.dateFormat,
         sourceDateFormatConfidence: chosen.dateFormatConfidence,

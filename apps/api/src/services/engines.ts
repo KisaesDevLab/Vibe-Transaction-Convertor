@@ -1,5 +1,5 @@
 // DB-backed configuration for the external "engines" the worker depends
-// on (GLM-OCR + LLM Gateway). Mirrors the LLM-provider pattern: each
+// on (Vibe Shield + LLM Gateway). Mirrors the LLM-provider pattern: each
 // setting reads from `system_settings` first, falls back to the env var,
 // and reports its `source` so the admin UI can label it.
 //
@@ -14,34 +14,31 @@ import { systemSettings } from '../db/schema.js';
 import { unwrapSecret, wrapSecret } from '../lib/secrets.js';
 import { invalidateProviderCache } from './llm-provider.js';
 
-export type EngineKey = 'glm-ocr' | 'llm-gateway';
+export type EngineKey = 'vibe-shield' | 'llm-gateway';
 
 interface EngineSettingKeys {
   url: string;
   timeoutMs?: string;
   concurrency?: string;
-  // Optional sub-path overrides — only meaningful for HTTP-shaped
-  // engines whose endpoint names diverge between the standalone image
-  // and the appliance's shared service (most notably GLM-OCR). NULL or
-  // unset → the client-side defaults apply.
-  ocrPath?: string;
   healthPath?: string;
-  versionPath?: string;
-  // Optional bearer-auth key. Stored in the encrypted secret column —
-  // see system_settings.value_secret. Only meaningful for engines that
-  // gate access (currently glm-ocr via OCR_API_KEY).
+  // Claude model id + per-page OCR prompt — only meaningful for the
+  // Vibe Shield OCR engine. Stored as plaintext.
+  model?: string;
+  prompt?: string;
+  // Optional bearer-auth key (the Shield `vs_live_…` tenant key). Stored
+  // in the encrypted secret column — see system_settings.value_secret.
   apiKey?: string;
 }
 
 const KEYS: Record<EngineKey, EngineSettingKeys> = {
-  'glm-ocr': {
-    url: 'engine.glm_ocr.url',
-    timeoutMs: 'engine.glm_ocr.timeout_ms',
-    concurrency: 'engine.glm_ocr.concurrency',
-    ocrPath: 'engine.glm_ocr.ocr_path',
-    healthPath: 'engine.glm_ocr.health_path',
-    versionPath: 'engine.glm_ocr.version_path',
-    apiKey: 'engine.glm_ocr.api_key',
+  'vibe-shield': {
+    url: 'engine.vibe_shield.url',
+    timeoutMs: 'engine.vibe_shield.timeout_ms',
+    concurrency: 'engine.vibe_shield.concurrency',
+    healthPath: 'engine.vibe_shield.health_path',
+    model: 'engine.vibe_shield.model',
+    prompt: 'engine.vibe_shield.prompt',
+    apiKey: 'engine.vibe_shield.api_key',
   },
   'llm-gateway': {
     url: 'engine.llm_gateway.url',
@@ -49,7 +46,7 @@ const KEYS: Record<EngineKey, EngineSettingKeys> = {
 };
 
 const ENV_FALLBACK: Record<EngineKey, string> = {
-  'glm-ocr': 'GLM_OCR_URL',
+  'vibe-shield': 'VIBE_SHIELD_URL',
   'llm-gateway': 'LLM_GATEWAY_URL',
 };
 
@@ -58,12 +55,9 @@ export interface EngineConfig {
   source: 'db' | 'env' | 'unset';
   timeoutMs?: number | undefined;
   concurrency?: number | undefined;
-  // Sub-path overrides. Returned for the engines that declare them in
-  // KEYS (currently glm-ocr only). null / undefined means "use the
-  // client default" (typically `/ocr`, `/health`, `/version`).
-  ocrPath?: string | null | undefined;
   healthPath?: string | null | undefined;
-  versionPath?: string | null | undefined;
+  model?: string | null | undefined;
+  prompt?: string | null | undefined;
   // Bearer-auth key (plaintext). The worker passes this to the OCR
   // client; admin responses are scrubbed via maskEngineConfig before
   // leaving the API. Loaded from the encrypted `value_secret` column
@@ -134,17 +128,17 @@ const loadConfig = async (db: Db, engine: EngineKey): Promise<EngineConfig> => {
       if (Number.isFinite(n)) out.concurrency = n;
     }
   }
-  if (keys.ocrPath) {
-    const v = await readSetting(db, keys.ocrPath);
-    if (v !== null && v.length > 0) out.ocrPath = v;
-  }
   if (keys.healthPath) {
     const v = await readSetting(db, keys.healthPath);
     if (v !== null && v.length > 0) out.healthPath = v;
   }
-  if (keys.versionPath) {
-    const v = await readSetting(db, keys.versionPath);
-    if (v !== null && v.length > 0) out.versionPath = v;
+  if (keys.model) {
+    const v = await readSetting(db, keys.model);
+    if (v !== null && v.length > 0) out.model = v;
+  }
+  if (keys.prompt) {
+    const v = await readSetting(db, keys.prompt);
+    if (v !== null && v.length > 0) out.prompt = v;
   }
   if (keys.apiKey) {
     // API keys live in the encrypted secret column, NOT plaintext.
@@ -181,22 +175,21 @@ export const getEngineConfig = async (db: Db, engine: EngineKey): Promise<Engine
 };
 
 export const getAllEngineConfigs = async (db: Db): Promise<Record<EngineKey, EngineConfig>> => {
-  const [glmOcr, llmGateway] = await Promise.all([
-    getEngineConfig(db, 'glm-ocr'),
+  const [vibeShield, llmGateway] = await Promise.all([
+    getEngineConfig(db, 'vibe-shield'),
     getEngineConfig(db, 'llm-gateway'),
   ]);
-  return { 'glm-ocr': glmOcr, 'llm-gateway': llmGateway };
+  return { 'vibe-shield': vibeShield, 'llm-gateway': llmGateway };
 };
 
 export interface SetEngineInput {
   url?: string | null;
   timeoutMs?: number | null;
   concurrency?: number | null;
-  // null clears the override (client default applies). Each path must
-  // start with "/" — the client concatenates it onto baseUrl.
-  ocrPath?: string | null;
+  // null clears the override (client default applies). Must start with "/".
   healthPath?: string | null;
-  versionPath?: string | null;
+  model?: string | null;
+  prompt?: string | null;
   // null clears the stored key; a non-empty string is encrypted and
   // stored. Not echoed back in admin responses (see maskEngineConfig).
   apiKey?: string | null;
@@ -207,10 +200,10 @@ const normalisePath = (raw: string | null): string | null => {
   const trimmed = raw.trim();
   if (trimmed.length === 0) return null;
   if (!trimmed.startsWith('/')) {
-    throw new Error('path must start with "/" (e.g. /ocr, /v1/ocr)');
+    throw new Error('path must start with "/" (e.g. /health)');
   }
   // Strip a trailing slash so concatenation with the baseUrl is
-  // predictable (`baseUrl/ocr` vs `baseUrl/ocr/`).
+  // predictable (`baseUrl/health` vs `baseUrl/health/`).
   return trimmed.replace(/\/+$/, '');
 };
 
@@ -264,14 +257,17 @@ export const setEngineConfig = async (
           : null;
     await writeSetting(db, keys.concurrency, v, actorId);
   }
-  if (input.ocrPath !== undefined && keys.ocrPath) {
-    await writeSetting(db, keys.ocrPath, normalisePath(input.ocrPath), actorId);
-  }
   if (input.healthPath !== undefined && keys.healthPath) {
     await writeSetting(db, keys.healthPath, normalisePath(input.healthPath), actorId);
   }
-  if (input.versionPath !== undefined && keys.versionPath) {
-    await writeSetting(db, keys.versionPath, normalisePath(input.versionPath), actorId);
+  if (input.model !== undefined && keys.model) {
+    const v = input.model === null || input.model.trim().length === 0 ? null : input.model.trim();
+    await writeSetting(db, keys.model, v, actorId);
+  }
+  if (input.prompt !== undefined && keys.prompt) {
+    const v =
+      input.prompt === null || input.prompt.trim().length === 0 ? null : input.prompt.trim();
+    await writeSetting(db, keys.prompt, v, actorId);
   }
   if (input.apiKey !== undefined && keys.apiKey) {
     if (input.apiKey === null || input.apiKey === '') {
@@ -292,7 +288,7 @@ export const setEngineConfig = async (
     }
   }
   // Engine URL is read by the LLM provider (for engine.llm_gateway.url)
-  // and the OCR client (for engine.glm_ocr.url); drop both caches.
+  // and the OCR client (for engine.vibe_shield.url); drop both caches.
   invalidateEngineCache();
   invalidateProviderCache();
   return getEngineConfig(db, engine);
@@ -304,24 +300,17 @@ export const clearEngineConfig = async (
   actorId: string,
 ): Promise<EngineConfig> => {
   const keys = KEYS[engine];
-  await db.delete(systemSettings).where(eq(systemSettings.key, keys.url));
-  if (keys.timeoutMs) {
-    await db.delete(systemSettings).where(eq(systemSettings.key, keys.timeoutMs));
-  }
-  if (keys.concurrency) {
-    await db.delete(systemSettings).where(eq(systemSettings.key, keys.concurrency));
-  }
-  if (keys.ocrPath) {
-    await db.delete(systemSettings).where(eq(systemSettings.key, keys.ocrPath));
-  }
-  if (keys.healthPath) {
-    await db.delete(systemSettings).where(eq(systemSettings.key, keys.healthPath));
-  }
-  if (keys.versionPath) {
-    await db.delete(systemSettings).where(eq(systemSettings.key, keys.versionPath));
-  }
-  if (keys.apiKey) {
-    await db.delete(systemSettings).where(eq(systemSettings.key, keys.apiKey));
+  const allKeys = [
+    keys.url,
+    keys.timeoutMs,
+    keys.concurrency,
+    keys.healthPath,
+    keys.model,
+    keys.prompt,
+    keys.apiKey,
+  ].filter((k): k is string => typeof k === 'string');
+  for (const k of allKeys) {
+    await db.delete(systemSettings).where(eq(systemSettings.key, k));
   }
   void actorId; // audit-logged at the route layer
   invalidateEngineCache();
