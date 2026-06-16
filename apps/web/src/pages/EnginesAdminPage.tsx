@@ -132,7 +132,7 @@ export function EnginesAdminPage() {
         showAdvanced
         showShieldFields
         showApiKey
-        notes="Stage 1 of 2 — OCR. Scanned page images are read by Claude VISION through the Vibe Shield gateway (it masks PII first), turning the scan into markdown text. (Stage 2 — turning that text into structured rows — is the separate LLM provider on /admin/llm-provider, which defaults to the local gateway.) The URL defaults to the appliance address http://vibe-shield-gateway:8080 — leave it blank to use that; you only need to set the Shield tenant key (vs_live_…, appId='converter'). Requires Vibe Shield ≥ v1.12 with ZDR enabled. Run `pnpm shield:smoke` to verify."
+        notes="Stage 1 of 2 — OCR. Scanned page images are read by Claude VISION, turning the scan into markdown text. (Stage 2 — turning that text into structured rows — is the separate LLM provider on /admin/llm-provider, which defaults to the local gateway.) DEFAULT: route through the Vibe Shield gateway (it masks PII first) — URL defaults to http://vibe-shield-gateway:8080 (leave blank to use it) and the key is your Shield tenant key (vs_live_…, appId='converter'); requires Vibe Shield ≥ v1.12 with ZDR. Run `pnpm shield:smoke` to verify. DIRECT MODE: set the URL to https://api.anthropic.com and the key to a real sk-ant key to bypass Shield — ⚠️ this egresses UNREDACTED page images to Anthropic (no PII masking) and needs outbound internet."
       />
 
       <EditableEngine

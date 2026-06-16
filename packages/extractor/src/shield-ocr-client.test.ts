@@ -151,3 +151,40 @@ describe('ocrPdfPages', () => {
     ).rejects.toThrow(/api[_ ]?key/i);
   });
 });
+
+describe('direct Anthropic mode (bypass Shield)', () => {
+  it('buildShieldOcrRequestBody(direct) drops policy_name + session_id', () => {
+    const body = buildShieldOcrRequestBody(Buffer.from('x'), {
+      model: 'm',
+      prompt: 'p',
+      maxTokens: 10,
+      sessionId: 's',
+      policyName: 'cpa-converter-output',
+      direct: true,
+    });
+    expect('policy_name' in body).toBe(false);
+    expect('session_id' in body).toBe(false);
+  });
+
+  it('uses x-api-key (not Bearer), omits Shield fields, and tags engine "anthropic"', async () => {
+    const fetcher = vi.fn(async () => messageResponse('# Direct OCR'));
+    const res = await ocrPdfPages([Buffer.from('img')], {
+      baseUrl: 'https://api.anthropic.com',
+      apiKey: 'sk-ant-test',
+      fetcher: fetcher as unknown as typeof fetch,
+      sessionId: 'ignored-in-direct-mode',
+    });
+    expect(res.engineVersion).toMatch(/^anthropic\//);
+
+    const [url, init] = fetcher.mock.calls[0]!;
+    expect(String(url)).toBe('https://api.anthropic.com/v1/messages');
+    const headers = (init as RequestInit).headers as Record<string, string>;
+    expect(headers['x-api-key']).toBe('sk-ant-test');
+    expect(headers['anthropic-version']).toBe('2023-06-01');
+    expect(headers.authorization).toBeUndefined();
+
+    const body = JSON.parse((init as RequestInit).body as string) as Record<string, unknown>;
+    expect('policy_name' in body).toBe(false);
+    expect('session_id' in body).toBe(false);
+  });
+});

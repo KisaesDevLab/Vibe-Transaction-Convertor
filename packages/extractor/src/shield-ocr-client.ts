@@ -160,6 +160,8 @@ interface InternalConfig {
   apiKey: string;
   sessionId: string | null;
   policyName: string;
+  // True when baseUrl is the direct Anthropic API (bypass Shield).
+  direct: boolean;
   priceTable: AnthropicPriceTable | undefined;
 }
 
@@ -227,6 +229,13 @@ const resolvePath = (override: string | undefined, fallback: string): string => 
 // the vs_live_ key (no need to also type the URL).
 const DEFAULT_VIBE_SHIELD_URL = 'http://vibe-shield-gateway:8080';
 
+// When the engine URL is the direct Anthropic API, OCR bypasses Vibe
+// Shield entirely: x-api-key auth (not Bearer), no policy_name/session_id
+// fields (Anthropic rejects unknown body params), and the /v1/models
+// health probe. NOTE: in this mode page images egress UNREDACTED to
+// Anthropic — Shield's PII masking is not applied.
+const ANTHROPIC_DIRECT = 'https://api.anthropic.com';
+
 const resolveConfig = (opts: ShieldOcrClientOptions = {}): InternalConfig => {
   const baseUrl = (opts.baseUrl ?? process.env.VIBE_SHIELD_URL ?? DEFAULT_VIBE_SHIELD_URL).replace(
     /\/$/,
@@ -264,6 +273,7 @@ const resolveConfig = (opts: ShieldOcrClientOptions = {}): InternalConfig => {
     apiKey,
     sessionId: opts.sessionId && opts.sessionId.length > 0 ? opts.sessionId : null,
     policyName: opts.policyName ?? process.env.VIBE_SHIELD_POLICY ?? 'cpa-converter-output',
+    direct: baseUrl === ANTHROPIC_DIRECT,
     priceTable: opts.priceTable,
   };
 };
@@ -353,6 +363,9 @@ export const buildShieldOcrRequestBody = (
     maxTokens: number;
     sessionId: string | null;
     policyName: string;
+    // Direct-Anthropic mode omits the Shield extension fields, which the
+    // real Anthropic API would reject as unknown body params.
+    direct?: boolean;
   },
 ): Record<string, unknown> => ({
   model: cfg.model,
@@ -370,8 +383,9 @@ export const buildShieldOcrRequestBody = (
     },
   ],
   temperature: 0,
-  policy_name: cfg.policyName,
-  ...(cfg.sessionId ? { session_id: cfg.sessionId } : {}),
+  ...(cfg.direct
+    ? {}
+    : { policy_name: cfg.policyName, ...(cfg.sessionId ? { session_id: cfg.sessionId } : {}) }),
 });
 
 const ocrPage = async (
@@ -420,7 +434,12 @@ const ocrPage = async (
     maxTokens: cfg.maxTokens,
     sessionId: cfg.sessionId,
     policyName: cfg.policyName,
+    direct: cfg.direct,
   });
+  // Shield gateway → Bearer; direct Anthropic → x-api-key + version.
+  const authHeaders: Record<string, string> = cfg.direct
+    ? { 'x-api-key': cfg.apiKey, 'anthropic-version': '2023-06-01' }
+    : { authorization: `Bearer ${cfg.apiKey}` };
   let lastErr: unknown;
   for (let attempt = 1; attempt <= cfg.maxAttempts; attempt += 1) {
     const controller = new AbortController();
@@ -428,10 +447,7 @@ const ocrPage = async (
     try {
       const res = await cfg.fetcher(url, {
         method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          authorization: `Bearer ${cfg.apiKey}`,
-        },
+        headers: { 'content-type': 'application/json', ...authHeaders },
         body: JSON.stringify(requestBody),
         signal: controller.signal,
       });
@@ -539,7 +555,7 @@ export const ocrPdfPages = async (
   }
   return {
     pages,
-    engineVersion: `vibe-shield/${cfg.model}`,
+    engineVersion: `${cfg.direct ? 'anthropic' : 'vibe-shield'}/${cfg.model}`,
     parseDiagnostics,
     usage: {
       inputTokens,
@@ -557,10 +573,17 @@ export const probeShieldHealth = async (
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 1500);
     try {
-      const res = await cfg.fetcher(`${cfg.baseUrl}${cfg.healthPath}`, {
-        headers: { authorization: `Bearer ${cfg.apiKey}` },
-        signal: controller.signal,
-      });
+      // Direct Anthropic has no /health — probe /v1/models (no token cost)
+      // with x-api-key. Shield gateway → its /health with the Bearer key.
+      const res = cfg.direct
+        ? await cfg.fetcher(`${cfg.baseUrl}/v1/models`, {
+            headers: { 'x-api-key': cfg.apiKey, 'anthropic-version': '2023-06-01' },
+            signal: controller.signal,
+          })
+        : await cfg.fetcher(`${cfg.baseUrl}${cfg.healthPath}`, {
+            headers: { authorization: `Bearer ${cfg.apiKey}` },
+            signal: controller.signal,
+          });
       return res.ok ? { ok: true, status: res.status } : { ok: false, status: res.status };
     } finally {
       clearTimeout(timer);
