@@ -21,9 +21,9 @@ the first admin and you're in.
 ## Deployment modes
 
 - **Standalone** (`docker-compose.yml`) ships its own Postgres, Redis,
-  GLM-OCR, and LLM gateway.
+  a Vibe Shield gateway for OCR, and the LLM gateway.
 - **Vibe Appliance** (`docker-compose.appliance.yml` + `vibe-app.yaml`)
-  joins the shared Postgres/Redis/GLM-OCR/LLM gateway.
+  joins the shared Postgres/Redis/Vibe Shield/LLM gateway.
 
 ## Documentation
 

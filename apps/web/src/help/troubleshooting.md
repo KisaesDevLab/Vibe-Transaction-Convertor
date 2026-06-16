@@ -36,11 +36,11 @@ pdf.js's worker transfers (not copies) the buffer; subsequent renders re-issue t
 
 The export filename was built from the FI name + period and contained a non-ASCII character (curly quote, en/em dash, accented letter). Fixed by sanitizing to ASCII before the header is set.
 
-## Extraction fails with "GLM_OCR_URL is not set"
+## Extraction fails with "VIBE_SHIELD_URL is not set"
 
-The PDF is scanned (no text layer) and OCR isn't configured.
+The PDF is scanned (no text layer) and OCR isn't configured. OCR runs through the Vibe Shield gateway (Claude vision).
 
-- Configure GLM-OCR on `/admin/engines` and re-extract.
+- Configure **Vibe Shield (OCR via Claude)** on `/admin/engines` (URL + `vs_live_…` key) and re-extract. Run `pnpm shield:smoke` to confirm the full path.
 - Or, if you're sure the PDF has a text layer, the routing heuristic was wrong — open the PDF in Acrobat / Preview and select some text to verify. If text selects, the heuristic is the bug. Re-extract; the LLM may pick up the text path on retry.
 
 ## Extraction fails with "LLM_GATEWAY_URL not set"

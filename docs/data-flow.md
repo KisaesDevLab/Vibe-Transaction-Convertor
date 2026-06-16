@@ -21,7 +21,7 @@ A one-page reference for SOC 2 reviewers and security auditors.
 │        ├── Local LLM Gateway  ◄─── DEFAULT (zero outbound)         │
 │        │   (Vibe LLM Gateway, Qwen3-8B)                            │
 │        │                                                            │
-│        ├── GLM-OCR (HTTP, on-prem)                                  │
+│        ├── Vibe Shield OCR (HTTP gateway → Claude vision)           │
 │        │                                                            │
 │        └── Anthropic API (OPT-IN, admin-enabled)                    │
 │            │                                                        │

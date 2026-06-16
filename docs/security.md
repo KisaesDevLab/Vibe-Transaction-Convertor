@@ -87,14 +87,14 @@ before persistence.
 
 The default posture is **zero outbound network calls at runtime**:
 
-| Path                           | Default   | What egresses                                                                                          |
-| ------------------------------ | --------- | ------------------------------------------------------------------------------------------------------ |
-| Local LLM extraction (default) | nothing   | All LLM traffic is to the in-cluster Vibe LLM Gateway.                                                 |
-| GLM-OCR                        | nothing   | OCR is always local, called over HTTP to the GLM-OCR container.                                        |
-| FIDIR refresh                  | nothing   | The mirror at `data/fidir/fidir-us.txt` is replaced manually, never fetched (ADR-007).                 |
-| Anthropic provider (opt-in)    | OFF       | OCR-extracted **markdown text** + the JSON schema → `api.anthropic.com`. **Never** raw PDFs or images. |
-| Telemetry / analytics SDKs     | NEVER     | None. There are no analytics SDKs in any workspace.                                                    |
-| Container image pull           | first-run | `docker pull` from GHCR. Thereafter offline.                                                           |
+| Path                           | Default              | What egresses                                                                                                                                                                                                               |
+| ------------------------------ | -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Local LLM extraction (default) | nothing              | All LLM traffic is to the in-cluster Vibe LLM Gateway.                                                                                                                                                                      |
+| OCR (Vibe Shield)              | redacted page images | Scanned-page OCR runs through the on-appliance Vibe Shield gateway (Claude vision). Shield masks PII (token-overlay) before the image reaches Anthropic; markdown returns tokenized, materialized only at export (ADR-022). |
+| FIDIR refresh                  | nothing              | The mirror at `data/fidir/fidir-us.txt` is replaced manually, never fetched (ADR-007).                                                                                                                                      |
+| Anthropic provider (opt-in)    | OFF                  | OCR-extracted **markdown text** + the JSON schema → `api.anthropic.com`. **Never** raw PDFs or images.                                                                                                                      |
+| Telemetry / analytics SDKs     | NEVER                | None. There are no analytics SDKs in any workspace.                                                                                                                                                                         |
+| Container image pull           | first-run            | `docker pull` from GHCR. Thereafter offline.                                                                                                                                                                                |
 
 There are no phone-home pings, no license-server calls, no auto-update
 checks. `LICENSE` is enforced at source-level only (ADR-011); there is

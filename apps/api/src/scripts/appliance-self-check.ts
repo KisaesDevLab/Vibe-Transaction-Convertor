@@ -8,7 +8,7 @@
 // the schemaVersion.
 //
 // Run with the same env this app would in production — DATABASE_URL,
-// REDIS_URL, GLM_OCR_URL, LLM_GATEWAY_URL — to get a useful answer.
+// REDIS_URL, VIBE_SHIELD_URL, LLM_GATEWAY_URL — to get a useful answer.
 // Missing/unset shared services come back as {configured: false}; the
 // exit code is governed only by the things that MUST work for boot
 // to succeed (db + session secret).

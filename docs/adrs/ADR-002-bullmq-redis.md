@@ -7,7 +7,7 @@ Accepted.
 ## Context
 
 PDF extraction is the long-pole pipeline step. A single statement can take 30 s
-to several minutes (text-layer fast path) or much longer if GLM-OCR runs over
+to several minutes (text-layer fast path) or much longer if OCR runs over
 many scanned pages. We need a job system that survives API restarts, supports
 retry with backoff, exposes per-job state to the UI, and lets us run multiple
 worker processes in production. Cloud queues are off the table — the runtime

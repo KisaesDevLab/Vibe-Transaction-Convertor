@@ -699,7 +699,7 @@ export const adminRouter = (): Router => {
     }
   });
 
-  // DB-backed engine configuration (GLM-OCR + LLM Gateway). Reads
+  // DB-backed engine configuration (Vibe Shield OCR + LLM Gateway). Reads
   // system_settings → falls back to env. Editable from the
   // /admin/engines UI without a worker restart.
   const ENGINE_KEYS: readonly EngineKey[] = ['vibe-shield', 'llm-gateway'];

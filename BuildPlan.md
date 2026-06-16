@@ -5,6 +5,13 @@
 > **License:** PolyForm Internal Use 1.0.0 (no runtime enforcement).
 > **Scope locked for v1:** USD + en-US dates only; download-only outputs (no push integrations); minimal Companies/Accounts model (name + FI + acct type + acct #).
 
+> **⚠️ SUPERSEDED — OCR engine.** This plan describes the original local
+> **GLM-OCR** design. GLM-OCR has since been **removed**: scanned-page OCR
+> now runs through the **Vibe Shield gateway** (Claude vision, PII-redacted)
+> per **ADR-022**. Every "GLM-OCR" / `GLM_OCR_URL` / `glm-ocr` reference
+> below is historical — read it as "Vibe Shield OCR" (`VIBE_SHIELD_URL`,
+> `vibe-shield`). The client is `packages/extractor/src/shield-ocr-client.ts`.
+
 ---
 
 ## 0. Product Overview

@@ -1,5 +1,5 @@
 // /admin/engines — DB-backed engine configuration with a live readiness
-// probe. Operators can edit GLM-OCR and LLM-Gateway URLs (plus per-engine
+// probe. Operators can edit Vibe Shield (OCR) and LLM-Gateway URLs (plus per-engine
 // timeoutMs / concurrency where applicable) without a restart; values
 // land in `system_settings`, falling back to the env vars when unset.
 //

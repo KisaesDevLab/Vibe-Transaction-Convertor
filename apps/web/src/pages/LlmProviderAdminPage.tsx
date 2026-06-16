@@ -23,7 +23,7 @@ const PDF_STRATEGY_LABELS: Record<PdfProcessingStrategy, { title: string; descri
   auto: {
     title: 'Auto',
     description:
-      'Text-layer when the PDF has one; GLM-OCR when it doesn’t. No retry. Current default.',
+      'Text-layer when the PDF has one; OCR (Claude vision via Vibe Shield) when it doesn’t. No retry. Current default.',
   },
   'force-text': {
     title: 'Force text-layer',
@@ -31,19 +31,19 @@ const PDF_STRATEGY_LABELS: Record<PdfProcessingStrategy, { title: string; descri
       'Always read the embedded text layer. Upload fails if the PDF has none (scanned-only banks).',
   },
   'force-ocr': {
-    title: 'Force GLM-OCR',
+    title: 'Force OCR',
     description:
-      'Always run GLM-OCR, even when a text layer is present. Useful when the embedded text is scrambled or hidden.',
+      'Always run OCR (Claude vision via Vibe Shield), even when a text layer is present. Useful when the embedded text is scrambled or hidden.',
   },
   'auto-ocr-fallback': {
     title: 'Text-layer with OCR fallback',
     description:
-      'Try the text layer first; if the LLM rejects the result (HTTP error, malformed response, empty transactions, or reconciliation discrepancy), retry with GLM-OCR. Up to twice the LLM cost when triggered.',
+      'Try the text layer first; if the LLM rejects the result (HTTP error, malformed response, empty transactions, or reconciliation discrepancy), retry with OCR (Vibe Shield). Up to twice the LLM cost when triggered.',
   },
   'auto-text-fallback': {
-    title: 'GLM-OCR with text-layer fallback',
+    title: 'OCR with text-layer fallback',
     description:
-      'Run GLM-OCR first; if the LLM rejects the result, retry with the embedded text layer (when present). Mirror of the OCR-fallback path — useful when the text layer is unreliable (scrambled / hidden text). Up to twice the LLM cost when triggered.',
+      'Run OCR (Vibe Shield) first; if the LLM rejects the result, retry with the embedded text layer (when present). Mirror of the OCR-fallback path — useful when the text layer is unreliable (scrambled / hidden text). Up to twice the LLM cost when triggered.',
   },
 };
 

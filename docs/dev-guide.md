@@ -17,7 +17,7 @@ packages/
   fidir/            FIDIR text-format parser + pg_trgm-style search helpers.
   reconciler/       Golden Rule reconciler + period-bounds checker.
   exporters/        CSV / OFX-XML / SGML (QBO + QFX) writers, FITID, TRNTYPE rules.
-  extractor/        PDF preprocess, GLM-OCR client, LLM provider abstraction, prompts.
+  extractor/        PDF preprocess, Vibe Shield OCR client, LLM provider abstraction, prompts.
 data/
   fidir/fidir-us.txt   Vendored FIDIR mirror (ADR-007). Never fetched at runtime.
 docs/
@@ -42,7 +42,7 @@ pnpm --filter @vibe-tx-converter/api run db:seed   # optional: load fixtures
 pnpm dev                                       # api on :4000, web on :5173
 ```
 
-GLM-OCR and the LLM gateway are optional for most code paths — only the
+Vibe Shield (OCR) and the LLM gateway are optional for most code paths — only the
 extraction worker needs them. For unit tests, mocks live alongside the
 clients.
 
@@ -88,8 +88,10 @@ boundary and in OFX/CSV outputs.
 
 ## LLM + OCR development
 
-GLM-OCR is always called over HTTP (ADR-003). `packages/extractor/src/
-glm-ocr-client.ts` retries 5xx with backoff and caches by PNG sha256.
+OCR is called over HTTP through the Vibe Shield gateway — Claude vision,
+with PII redacted before egress (ADR-022, supersedes ADR-003).
+`packages/extractor/src/shield-ocr-client.ts` retries 5xx/429 with
+backoff and caches by image sha256 + Shield session.
 
 LLM extraction goes through `LlmProvider` (ADR-019/020). Two
 implementations: `LocalGatewayProvider` (default, OpenAI wire format

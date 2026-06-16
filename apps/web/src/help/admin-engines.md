@@ -12,16 +12,17 @@ Persistence layer. Schema is `vibetc`. **Set via boot env only** (`DATABASE_URL`
 
 BullMQ extraction queue + login rate-limit + OCR cache. Boot env only (`REDIS_URL`). Without Redis, the extraction queue runs in-process and queue stats won't display on Diagnostics.
 
-## GLM-OCR
+## Vibe Shield (OCR via Claude)
 
-Zhipu GLM-OCR over HTTP. Used **only** when the PDF lacks a text layer. If you only ever upload modern bank PDFs (which always have a text layer), you can leave this unset and the field stays at "unconfigured".
+Scanned pages are OCR'd by **Claude vision through the Vibe Shield gateway** (Anthropic Messages API at `/v1/messages`). Shield masks PII in each page image — under the token-overlay masker — before Claude transcribes it, so the markdown comes back tokenized and is materialized back to cleartext at export. Used **only** when the PDF lacks a text layer; if you only ever upload modern bank PDFs (which always have a text layer), you can leave this unset.
 
-- **Standalone Docker:** typically `http://glm-ocr:8080` (the sibling container) or `http://localhost:8080` from the host.
-- **Vibe Appliance:** the shared service URL from the appliance manifest.
-- **Timeout:** default 60s. Increase if your GLM-OCR is on slow hardware.
-- **Concurrency:** how many pages can be OCR'd in parallel. Default 2; raise if your hardware supports it.
+- **URL:** the Shield gateway, typically `http://vibe-shield-gateway:8080` (appliance) or your gateway host.
+- **API key:** the Shield tenant key (`vs_live_…`), sent as `Authorization: Bearer`. The key MUST be issued with `appId='converter'`.
+- **Model:** the Claude model used for OCR (default `claude-sonnet-4-6`).
+- **OCR prompt:** the per-page transcription instruction.
+- **Timeout / Concurrency:** Claude vision per page + the Shield hop; defaults 120s / 2.
 
-The "Test connection" button hits the `/health` endpoint and reports latency. A green pill means OCR will work; red means scanned PDFs will fail with `GLM_OCR_URL is not set`-style errors.
+The "Test connection" button hits the gateway `/health` endpoint. For a full end-to-end check (key appId, materialize gate, ZDR), run `pnpm shield:smoke` (or `just shield-smoke`). Prerequisites: Vibe Shield ≥ v1.12, an `appId='converter'` key, and `VIBE_SHIELD_ZDR_ENABLED=true` on the gateway. See ADR-022.
 
 ## LLM Gateway (Vibe)
 
@@ -34,8 +35,8 @@ If you've switched to the Anthropic provider on `/admin/llm-provider`, this URL 
 
 ## Why edits don't need a restart
 
-Both the GLM-OCR client and the LocalGatewayProvider read their config from `system_settings` per call, falling back to the env var only when no DB override exists. So toggling the URL on this page changes the **next** request without any reload — useful when you're hot-swapping a backend during development.
+Both the Vibe Shield OCR client and the LocalGatewayProvider read their config from `system_settings` per call, falling back to the env var only when no DB override exists. So toggling the URL on this page changes the **next** request without any reload — useful when you're hot-swapping a backend during development.
 
 ## Auth
 
-Neither field can carry an API key today. Both clients ship URL-only and assume a private network or appliance gateway in front. If you need bearer-token support, that's a real feature add — not configurable.
+The Vibe Shield engine takes a bearer key (`vs_live_…`, stored AES-256-GCM-encrypted at rest). The LLM Gateway is URL-only and assumes a private network or appliance gateway in front.

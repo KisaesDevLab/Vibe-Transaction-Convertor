@@ -15,9 +15,9 @@ const STRATEGY_LABELS: Record<StrategyChoice, string> = {
   default: 'Use firm default',
   auto: 'Auto (text-layer if present, else OCR)',
   'force-text': 'Force text-layer extraction',
-  'force-ocr': 'Force GLM-OCR',
+  'force-ocr': 'Force OCR',
   'auto-ocr-fallback': 'Text-layer with OCR fallback',
-  'auto-text-fallback': 'GLM-OCR with text-layer fallback',
+  'auto-text-fallback': 'OCR with text-layer fallback',
 };
 
 const CONFIRM_PHRASE = 'RE-EXTRACT';

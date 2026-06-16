@@ -11,7 +11,7 @@ across `packages/extractor/` and `packages/exporters/`.
 
 ```
 PDF → preprocess (text-layer probe + raster routing)
-    → GLM-OCR (over HTTP, ADR-003)
+    → OCR via Vibe Shield (Claude vision, ADR-022)
     → markdown cleanup + token-budget truncation
     → LLM extraction (LocalGatewayProvider | AnthropicProvider)
     → JSON-Schema-validated ExtractionResult

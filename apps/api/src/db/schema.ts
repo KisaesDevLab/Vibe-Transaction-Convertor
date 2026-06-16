@@ -61,7 +61,7 @@ export const extractionMethod = vibetc.enum('extraction_method', ['text', 'ocr',
 // time; NULL means "use the firm default".
 //   - auto               : text-layer if present, OCR if not. No retry.
 //   - force-text         : always use the text layer. Fail if absent.
-//   - force-ocr          : always run GLM-OCR, even with a text layer.
+//   - force-ocr          : always run OCR (Vibe Shield), even with a text layer.
 //   - auto-ocr-fallback  : text-layer first; re-run extraction with OCR
 //                          when the LLM stack rejects the text-layer
 //                          input (HTTP / malformed / empty-txs /

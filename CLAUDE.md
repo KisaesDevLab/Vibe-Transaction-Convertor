@@ -12,7 +12,7 @@ When `BuildPlan.md` and this file disagree, `BuildPlan.md` wins. When `BuildPlan
 
 ## Product in one paragraph
 
-`vibe-tx-converter` (env prefix `VIBETC_`, DB schema `vibetc`) is a self-hosted Docker app that converts bank/credit-card PDF statements into **CSV, OFX 2.x XML, QFX, and QBO Web Connect** files for re-import into QuickBooks / Quicken / Xero. Pipeline: PDF upload → text-layer detection → (if scanned) GLM-OCR → Qwen3-8B JSON-Schema-constrained extraction → Golden Rule reconciliation gate → review/edit grid (PDF coord highlight) → exporter pack → file download. Two deployment modes: **standalone** (ships its own Postgres / Redis / GLM-OCR / LLM gateway) and **Vibe Appliance** (uses shared services).
+`vibe-tx-converter` (env prefix `VIBETC_`, DB schema `vibetc`) is a self-hosted Docker app that converts bank/credit-card PDF statements into **CSV, OFX 2.x XML, QFX, and QBO Web Connect** files for re-import into QuickBooks / Quicken / Xero. Pipeline: PDF upload → text-layer detection → (if scanned) OCR via Vibe Shield (Claude vision, PII-redacted) → Qwen3-8B JSON-Schema-constrained extraction → Golden Rule reconciliation gate → review/edit grid (PDF coord highlight) → exporter pack → file download. Two deployment modes: **standalone** (ships its own Postgres / Redis / LLM gateway; reaches a Vibe Shield gateway for OCR) and **Vibe Appliance** (uses shared services, incl. Vibe Shield).
 
 ## Hard product invariants — do not violate without explicit user approval
 

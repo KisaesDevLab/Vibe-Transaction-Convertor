@@ -16,7 +16,7 @@ Run the command from the repo root — `docker-compose.yml` mounts
 `./Caddyfile` with a relative path, and Caddy will refuse to start if
 launched from elsewhere.
 
-This brings up Postgres 16, Redis 7, GLM-OCR, the local LLM gateway,
+This brings up Postgres 16, Redis 7, the local LLM gateway,
 Caddy, and the API. Caddy serves plain HTTP on `:80` by default so the
 out-of-the-box experience works on a LAN with no DNS or cert setup.
 For that mode the compose ships `SESSION_SECURE=false` and
@@ -37,7 +37,7 @@ a LAN evaluation):
 
 If your firm already runs the Vibe appliance, the recommended path is
 the appliance installer, which reads `vibe-app.yaml` at the repo root
-and wires in the shared Postgres / Redis / GLM-OCR / LLM gateway and
+and wires in the shared Postgres / Redis / Vibe Shield / LLM gateway and
 Caddy:
 
 ```bash
@@ -116,11 +116,11 @@ By default extraction runs locally. To opt into the Anthropic provider:
 ## Troubleshooting
 
 - **`/api/health/ready` returns 503** — check the per-dependency
-  block: `postgres`, `redis`, `glmOcr`, `llmGateway`. Each entry is
+  block: `postgres`, `redis`, `vibeShield`, `llmGateway`. Each entry is
   `{ status: ok | unconfigured | fail, detail? }`.
 - **Extraction stuck in `extracting`** — check the worker logs
   (`docker logs vibe-tx-converter-api-1`). The most common failure is
-  GLM-OCR being unhealthy; the OCR client retries 3× with exponential
+  Vibe Shield being unhealthy; the OCR client retries 3× with exponential
   backoff before failing the job.
 - **Discrepancy on the Golden Rule** — open the statement in the
   review UI; either edit transactions to make balances tie, or click

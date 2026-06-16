@@ -1,6 +1,6 @@
 # @vibe-tx-converter/extractor
 
-PDF preprocessing, GLM-OCR HTTP client, LLM provider abstraction,
+PDF preprocessing, Vibe Shield OCR client, LLM provider abstraction,
 prompts, and exemplars. Owns everything between "PDF on disk" and
 "validated `ExtractionResult`".
 
@@ -10,10 +10,11 @@ prompts, and exemplars. Owns everything between "PDF on disk" and
   DOM, no canvas). Decides per-PDF whether to take the `text` route,
   the `ocr` route, or `hybrid`. Rasterizes via `pdftoppm` shell-out
   (Q-006 resolution) when OCR is needed.
-- **`glm-ocr-client.ts`** — `undici`-based HTTP client for the GLM-OCR
-  container (ADR-003). Concurrency-limited via `p-limit`, retries
-  5xx with exponential backoff, per-PNG sha256 cache (currently
-  in-memory; spec calls for Redis — see `PROGRESS.md` Phase 11).
+- **`shield-ocr-client.ts`** — HTTP client for OCR via the Vibe Shield
+  gateway (Claude vision, Anthropic Messages `/v1/messages`; ADR-022,
+  supersedes ADR-003). Concurrency-limited, retries 5xx/429 with
+  exponential backoff + circuit breaker, per-image sha256 + session
+  cache (Redis-backed via the API layer's adapter).
 - **`prompts/extract.ts`** — system prompt, user-prompt builder
   (`userPromptFor`), repair-prompt builder (`repairPromptFor`),
   markdown cleanup (`cleanupMarkdown`), token estimator
@@ -32,7 +33,7 @@ prompts, and exemplars. Owns everything between "PDF on disk" and
 
 ```ts
 export * from './preprocess.js';
-export * from './glm-ocr-client.js';
+export * from './shield-ocr-client.js';
 export * from './prompts/extract.js';
 export * from './exemplars.js';
 export * from './llm-client.js';
@@ -43,8 +44,8 @@ Notable types and functions:
 
 - `analyzePdfFromPath(path)`, `routePdf(analysis)`,
   `extractTextLayer(path)`, `rasterizePdf(path, dpi)`.
-- `class GlmOcrClient { ocrPage(pngPath, opts); ocrPdf(rasters,
-opts) }`.
+- `ocrPdfPages(images, opts)`, `probeShieldHealth(opts)` (Vibe Shield
+  OCR via Claude vision).
 - `LlmProvider`, `LocalGatewayProvider`, `AnthropicProvider`,
   `prepareMarkdown(raw, budget)`.
 - `SYSTEM_PROMPT`, `userPromptFor(markdown, opts)`,
@@ -59,7 +60,8 @@ opts) }`.
   pipeline: `analyzePdf` → `routePdf` → (text / OCR) →
   `multi-account-detector` → `LlmProvider.extract` → reconciler →
   TRNTYPE + FITID → persist.
-- `apps/api/src/scripts/ocr-test.ts` exposes the OCR client as a CLI.
+- `apps/api/src/scripts/shield-smoke.ts` exercises the OCR-via-Shield
+  path end-to-end as a CLI (`pnpm shield:smoke`).
 - `apps/api/src/routes/admin.ts` uses `LlmProvider.health()` to
   surface readiness on the admin page.
 
@@ -69,8 +71,9 @@ opts) }`.
 pnpm --filter @vibe-tx-converter/extractor test
 ```
 
-Tests cover preprocess routing, GLM-OCR client retry/cache (stubbed
-HTTP), the extraction prompt builder (snapshot for fixed inputs), each
-exemplar round-tripping the Zod schema, and the multi-account detector
-on synthetic page-text inputs. The full PDF-to-FITID integration is
-exercised in `apps/api/src/api.test.ts` against the worker.
+Tests cover preprocess routing, the Vibe Shield OCR client request/parse
+
+- retry/cache/circuit breaker (stubbed HTTP), the extraction prompt builder (snapshot for fixed inputs), each
+  exemplar round-tripping the Zod schema, and the multi-account detector
+  on synthetic page-text inputs. The full PDF-to-FITID integration is
+  exercised in `apps/api/src/api.test.ts` against the worker.

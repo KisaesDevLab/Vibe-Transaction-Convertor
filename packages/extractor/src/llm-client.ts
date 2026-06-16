@@ -598,12 +598,38 @@ export class AnthropicProvider implements LlmProvider {
     };
   }
 
+  // True when baseUrl is NOT the direct Anthropic API — i.e. we're routed
+  // through a gateway (the Vibe Shield gateway on this appliance), which
+  // speaks the Messages API but does not serve /v1/models and authenticates
+  // with a Bearer token instead of x-api-key.
+  private get viaGateway(): boolean {
+    return this.baseUrl.replace(/\/$/, '') !== 'https://api.anthropic.com';
+  }
+
   async health(): Promise<{ ok: boolean; detail?: string }> {
-    if (!this.apiKey) return { ok: false, detail: 'ANTHROPIC_API_KEY not set' };
-    // Hit /v1/models to confirm the key is actually valid. This endpoint
-    // is in the public Anthropic API surface and doesn't burn message
-    // tokens — it returns the list of models the key can use.
-    // 401 → key is wrong; 200 → key works. 5s timeout.
+    if (!this.apiKey) return { ok: false, detail: 'API key not set' };
+    if (this.viaGateway) {
+      // Gateway (e.g. Vibe Shield): probe its liveness endpoint with the
+      // Bearer key. A 2xx means the gateway is reachable; the per-request
+      // policy / ZDR / appId checks are validated by the Shield smoke test
+      // (`pnpm shield:smoke`), not this lightweight connectivity probe.
+      const ctl = new AbortController();
+      const timer = setTimeout(() => ctl.abort(), 5_000);
+      try {
+        const res = await this.fetcher(`${this.baseUrl}/health`, {
+          headers: { authorization: `Bearer ${this.apiKey}` },
+          signal: ctl.signal,
+        });
+        return res.ok ? { ok: true } : { ok: false, detail: `gateway /health HTTP ${res.status}` };
+      } catch (err) {
+        return { ok: false, detail: (err as Error).message };
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+    // Direct Anthropic — hit /v1/models to confirm the key is actually
+    // valid. This endpoint is in the public Anthropic API surface and
+    // doesn't burn message tokens. 401 → key is wrong; 200 → key works.
     const ctl = new AbortController();
     const timer = setTimeout(() => ctl.abort(), 5_000);
     try {
@@ -629,7 +655,12 @@ export class AnthropicProvider implements LlmProvider {
   // /admin/llm-provider page to populate the model dropdown so it
   // tracks Anthropic's catalog instead of being hardcoded.
   async listModels(): Promise<{ ok: boolean; models: string[]; detail?: string }> {
-    if (!this.apiKey) return { ok: false, models: [], detail: 'ANTHROPIC_API_KEY not set' };
+    if (!this.apiKey) return { ok: false, models: [], detail: 'API key not set' };
+    if (this.viaGateway) {
+      // The Shield gateway doesn't expose /v1/models; the model picker
+      // falls back to the curated list. Skip the doomed call.
+      return { ok: false, models: [], detail: 'live catalog unavailable via gateway' };
+    }
     const ctl = new AbortController();
     const timer = setTimeout(() => ctl.abort(), 5_000);
     try {

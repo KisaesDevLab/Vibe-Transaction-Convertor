@@ -9,7 +9,7 @@ On the **account detail page** (`/accounts/<id>`), drag PDFs onto the upload zon
 - **PDF only.** Other formats are rejected.
 - **Max upload size:** controlled by `MAX_UPLOAD_MB` (default 25 MB per file).
 - **Max batch size:** `MAX_BATCH_SIZE` (default 100 files per drop).
-- **Text-layer or scanned.** The pipeline auto-detects. Scanned PDFs are routed through GLM-OCR; text-layer PDFs skip OCR entirely.
+- **Text-layer or scanned.** The pipeline auto-detects. Scanned PDFs are routed through OCR (Claude vision via Vibe Shield); text-layer PDFs skip OCR entirely.
 
 ## What happens after a drop
 
@@ -34,7 +34,7 @@ If the PDF uses an ambiguous date format (e.g. `04/05/2026` could be Apr 5 or Ma
 ## What can go wrong at this stage
 
 - **"there is no unique or exclusion constraint matching the ON CONFLICT specification"** — DB schema drift. Run `pnpm db:migrate` and restart.
-- **"GLM_OCR_URL is not set"** — the PDF is scanned and the OCR engine isn't configured. Either configure it on `/admin/engines` or upload a text-layer PDF instead.
+- **"VIBE_SHIELD_URL is not set"** — the PDF is scanned and the OCR engine (Vibe Shield) isn't configured. Either configure it on `/admin/engines` or upload a text-layer PDF instead.
 - **"LLM_GATEWAY_URL not set"** — the LLM provider is `local` but the gateway URL is empty. Either set it, or switch to the Anthropic provider with a key.
 
 See [Troubleshooting](#troubleshooting) for more.

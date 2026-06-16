@@ -995,7 +995,7 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
       });
       logger.info(
         { stmtId, reason: chosen.rejection },
-        'text-layer extraction rejected — retrying with GLM-OCR',
+        'text-layer extraction rejected — retrying with OCR (Vibe Shield)',
       );
       await setStatus(stmtId, 'ocr', { extractionMethod: 'hybrid' });
       currentPhase = 'ocr-fallback-markdown';
@@ -1255,7 +1255,7 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
     // Rich failure trace — same shape as the success / halted-ambiguous
     // traces, plus a fully described error (class, name, message,
     // cause chain, truncated stack). With this in place the operator
-    // sees "phase: ocr-markdown" + "GLM-OCR POST .../v1/chat/completions
+    // sees "phase: ocr-markdown" + "Shield POST .../v1/messages
     // timed out after 60000 ms" instead of bare DOMException.
     const e = err instanceof Error ? err : new Error(String(err));
     const failureDiagnostic: Record<string, unknown> = {
@@ -1356,8 +1356,8 @@ export const startExtractionWorker = (): Worker<ExtractionJobData> => {
       // otherwise BullMQ marks the job as orphaned and re-queues it
       // while the worker is still processing → duplicate work + the
       // statements row gets stomped. Worst-case scenario:
-      //   * 50-page CPU-bound OCR run
-      //   * 50s per page (per vibe-glm-ocr's CPU benchmark)
+      //   * 50-page OCR run (Claude vision via Vibe Shield)
+      //   * ~50s per page worst case
       //   * concurrency=2 → 25 sequential rounds → ~21 min
       // Default 30 min (with the historical 60s buffer) covers that
       // and a noisy retry; GPU operators waste nothing because the

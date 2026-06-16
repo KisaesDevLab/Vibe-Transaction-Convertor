@@ -109,7 +109,8 @@ export const FEATURE_DEFS: readonly FeatureDef[] = [
     key: 'admin.engines',
     label: 'Engine Config',
     area: 'admin',
-    description: 'Configure the GLM-OCR and LLM-Gateway engine endpoints and credentials.',
+    description:
+      'Configure the Vibe Shield (OCR) and LLM-Gateway engine endpoints and credentials.',
   },
   {
     key: 'admin.backup',

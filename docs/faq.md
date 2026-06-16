@@ -35,11 +35,13 @@ Exports are streamed and not persisted on disk by default.
 
 ## Can I run this offline?
 
-**Yes**, in the default local-provider mode. Once the container image
-is pulled and FIDIR is mirrored, the application has no runtime
-network dependency outside its own Postgres / Redis / GLM-OCR / LLM
-Gateway containers. This is the supported posture for air-gapped
-firms.
+**Yes, for text-layer PDFs in the default local-provider mode.** Once
+the image is pulled and FIDIR is mirrored, processing a text-layer PDF
+has no runtime network dependency outside its own Postgres / Redis / LLM
+Gateway. Note: **scanned PDFs now OCR through the Vibe Shield gateway**
+(Claude vision), which egresses PII-redacted page images to Anthropic —
+so OCR is no longer air-gapped (ADR-022). Air-gapped firms should upload
+only text-layer PDFs, or keep a local OCR path.
 
 ## Why are some FITIDs the same on re-import?
 
