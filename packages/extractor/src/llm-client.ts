@@ -606,6 +606,21 @@ export class AnthropicProvider implements LlmProvider {
     return this.baseUrl.replace(/\/$/, '') !== 'https://api.anthropic.com';
   }
 
+  // Headers for a /v1/messages call. The Vibe Shield gateway authenticates
+  // with `Authorization: Bearer <vs_live_ key>`; the direct Anthropic API
+  // uses `x-api-key` + `anthropic-version`. Picking the wrong one yields a
+  // 401, so this is keyed off the base URL.
+  private messageHeaders(): Record<string, string> {
+    if (this.viaGateway) {
+      return { 'content-type': 'application/json', authorization: `Bearer ${this.apiKey}` };
+    }
+    return {
+      'content-type': 'application/json',
+      'x-api-key': this.apiKey,
+      'anthropic-version': '2023-06-01',
+    };
+  }
+
   async health(): Promise<{ ok: boolean; detail?: string }> {
     if (!this.apiKey) return { ok: false, detail: 'API key not set' };
     if (this.viaGateway) {
@@ -705,11 +720,7 @@ export class AnthropicProvider implements LlmProvider {
     try {
       const res = await this.fetcher(`${this.baseUrl}/v1/messages`, {
         method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          'x-api-key': this.apiKey,
-          'anthropic-version': '2023-06-01',
-        },
+        headers: this.messageHeaders(),
         body: JSON.stringify({
           model: this.model,
           system: SYSTEM_PROMPT,
@@ -856,11 +867,7 @@ export class AnthropicProvider implements LlmProvider {
     try {
       const res = await this.fetcher(`${this.baseUrl}/v1/messages`, {
         method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          'x-api-key': this.apiKey,
-          'anthropic-version': '2023-06-01',
-        },
+        headers: this.messageHeaders(),
         body: JSON.stringify({
           model: this.model,
           system: opts.systemPrompt,
