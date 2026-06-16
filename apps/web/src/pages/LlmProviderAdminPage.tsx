@@ -265,9 +265,20 @@ export function LlmProviderAdminPage() {
       </Link>
       <header>
         <h1 className="text-2xl font-semibold">LLM provider</h1>
-        <p className="text-sm text-ink-subtle">
-          Local Vibe Gateway is the default. Anthropic is opt-in; switching to it sends
-          OCR-extracted markdown text outbound (never raw PDFs or page images).
+        <p className="mt-1 rounded-md bg-surface-subtle px-3 py-2 text-xs text-ink-muted">
+          <strong>Stage 2 of 2 — extraction.</strong> This turns the OCR/text markdown into the
+          structured rows (dates, amounts, descriptions, balances). It is <em>separate</em> from
+          OCR: scanned-page OCR (image → text) is the <strong>Vibe Shield</strong> engine on{' '}
+          <Link to="/admin/engines" className="text-accent hover:underline">
+            Engines
+          </Link>
+          . Extraction defaults to the <strong>local Vibe Gateway (Qwen)</strong> — Claude is only
+          used here if you switch the provider to Anthropic below.
+        </p>
+        <p className="mt-2 text-sm text-ink-subtle">
+          Anthropic is opt-in; switching to it sends OCR-extracted markdown text outbound (never raw
+          PDFs or page images). Point the “Anthropic endpoint” at Vibe Shield to route those calls
+          through Shield too.
         </p>
       </header>
 

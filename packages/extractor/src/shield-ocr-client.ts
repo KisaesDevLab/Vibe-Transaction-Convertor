@@ -222,9 +222,16 @@ const resolvePath = (override: string | undefined, fallback: string): string => 
   return withLead.replace(/\/+$/, '') || fallback;
 };
 
+// The Shield gateway's address on the appliance/docker network. Used as
+// the final fallback so OCR works out of the box once the operator sets
+// the vs_live_ key (no need to also type the URL).
+const DEFAULT_VIBE_SHIELD_URL = 'http://vibe-shield-gateway:8080';
+
 const resolveConfig = (opts: ShieldOcrClientOptions = {}): InternalConfig => {
-  const baseUrl = (opts.baseUrl ?? process.env.VIBE_SHIELD_URL ?? '').replace(/\/$/, '');
-  if (!baseUrl) throw new ShieldOcrError('VIBE_SHIELD_URL is not set');
+  const baseUrl = (opts.baseUrl ?? process.env.VIBE_SHIELD_URL ?? DEFAULT_VIBE_SHIELD_URL).replace(
+    /\/$/,
+    '',
+  );
   const apiKey = opts.apiKey ?? process.env.VIBE_SHIELD_API_KEY ?? '';
   if (apiKey.length === 0) {
     throw new ShieldOcrError(

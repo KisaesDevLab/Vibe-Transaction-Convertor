@@ -8,7 +8,7 @@
 // service covers only the session-management endpoints.
 
 import type { Db } from '../db/client.js';
-import { getEngineConfig } from './engines.js';
+import { getEngineConfig, VIBE_SHIELD_GATEWAY_URL } from './engines.js';
 
 export interface ShieldConn {
   baseUrl: string;
@@ -30,10 +30,16 @@ export class ShieldError extends Error {
 // redaction.
 export const resolveShieldConn = async (db: Db): Promise<ShieldConn> => {
   const cfg = await getEngineConfig(db, 'vibe-shield');
-  const baseUrl = (cfg.url ?? process.env.VIBE_SHIELD_URL ?? '').replace(/\/$/, '');
+  const baseUrl = (cfg.url ?? process.env.VIBE_SHIELD_URL ?? VIBE_SHIELD_GATEWAY_URL).replace(
+    /\/$/,
+    '',
+  );
   const apiKey = cfg.apiKey ?? process.env.VIBE_SHIELD_API_KEY ?? '';
-  if (!baseUrl) throw new ShieldError('Vibe Shield URL is not configured');
-  if (!apiKey) throw new ShieldError('Vibe Shield API key is not configured');
+  if (!apiKey) {
+    throw new ShieldError(
+      'Vibe Shield API key is not configured — set the vs_live_ key on /admin/engines',
+    );
+  }
   return { baseUrl, apiKey };
 };
 

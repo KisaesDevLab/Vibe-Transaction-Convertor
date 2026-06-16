@@ -50,9 +50,18 @@ const ENV_FALLBACK: Record<EngineKey, string> = {
   'llm-gateway': 'LLM_GATEWAY_URL',
 };
 
+// Built-in default URLs — the address the service is assigned on the
+// appliance / docker network. Used as the final fallback when neither a
+// DB override nor an env var is set, so OCR works out of the box on a
+// standard deploy (the operator still supplies the vs_live_ key).
+export const VIBE_SHIELD_GATEWAY_URL = 'http://vibe-shield-gateway:8080';
+const ENGINE_DEFAULTS: Partial<Record<EngineKey, string>> = {
+  'vibe-shield': VIBE_SHIELD_GATEWAY_URL,
+};
+
 export interface EngineConfig {
   url: string | null;
-  source: 'db' | 'env' | 'unset';
+  source: 'db' | 'env' | 'default' | 'unset';
   timeoutMs?: number | undefined;
   concurrency?: number | undefined;
   healthPath?: string | null | undefined;
@@ -101,13 +110,17 @@ const loadConfig = async (db: Db, engine: EngineKey): Promise<EngineConfig> => {
   const envUrl = process.env[envName] ?? null;
 
   let url: string | null;
-  let source: 'db' | 'env' | 'unset';
+  let source: EngineConfig['source'];
   if (dbUrl && dbUrl.length > 0) {
     url = dbUrl;
     source = 'db';
   } else if (envUrl && envUrl.length > 0) {
     url = envUrl;
     source = 'env';
+  } else if (ENGINE_DEFAULTS[engine]) {
+    // Built-in appliance/docker address — works out of the box.
+    url = ENGINE_DEFAULTS[engine]!;
+    source = 'default';
   } else {
     url = null;
     source = 'unset';

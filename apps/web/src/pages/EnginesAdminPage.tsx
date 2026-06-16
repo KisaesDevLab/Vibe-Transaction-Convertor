@@ -23,7 +23,7 @@ interface ReadyCheck {
 
 interface EngineConfig {
   url: string | null;
-  source: 'db' | 'env' | 'unset';
+  source: 'db' | 'env' | 'default' | 'unset';
   timeoutMs?: number;
   concurrency?: number;
   // Optional overrides (Vibe Shield only). null / undefined means "use
@@ -68,7 +68,13 @@ const palette = (s: 'ok' | 'fail' | 'unconfigured'): string =>
       : 'bg-surface-muted text-ink-muted';
 
 const sourceLabel = (s: EngineConfig['source']): string =>
-  s === 'db' ? 'operator-set' : s === 'env' ? 'from environment' : 'unset';
+  s === 'db'
+    ? 'operator-set'
+    : s === 'env'
+      ? 'from environment'
+      : s === 'default'
+        ? 'appliance default'
+        : 'unset';
 
 export function EnginesAdminPage() {
   const ready = useQuery({
@@ -119,14 +125,14 @@ export function EnginesAdminPage() {
 
       <EditableEngine
         engine="vibe-shield"
-        name="Vibe Shield (OCR via Claude)"
+        name="Vibe Shield — OCR (vision)"
         envVar="VIBE_SHIELD_URL"
         status={deps.vibeShield}
         config={cfgs?.['vibe-shield'] ?? null}
         showAdvanced
         showShieldFields
         showApiKey
-        notes="Scanned pages are OCR'd by Claude vision through the Vibe Shield gateway (Anthropic Messages API at /v1/messages, one POST per page). Shield masks PII in each page image — under the token-overlay masker — before Claude sees it, so the markdown comes back tokenized and is materialized at export. URL is typically http://vibe-shield-gateway:8080. The API key is the Shield tenant key (vs_live_…), sent as Authorization: Bearer. Model defaults to claude-sonnet-4-6. Requires the cpa-converter-output policy with the token-overlay masker, or the statement's PII is lost."
+        notes="Stage 1 of 2 — OCR. Scanned page images are read by Claude VISION through the Vibe Shield gateway (it masks PII first), turning the scan into markdown text. (Stage 2 — turning that text into structured rows — is the separate LLM provider on /admin/llm-provider, which defaults to the local gateway.) The URL defaults to the appliance address http://vibe-shield-gateway:8080 — leave it blank to use that; you only need to set the Shield tenant key (vs_live_…, appId='converter'). Requires Vibe Shield ≥ v1.12 with ZDR enabled. Run `pnpm shield:smoke` to verify."
       />
 
       <EditableEngine
