@@ -71,9 +71,9 @@ Notable types and functions:
 pnpm --filter @vibe-tx-converter/extractor test
 ```
 
-Tests cover preprocess routing, the Vibe Shield OCR client request/parse
-
-- retry/cache/circuit breaker (stubbed HTTP), the extraction prompt builder (snapshot for fixed inputs), each
-  exemplar round-tripping the Zod schema, and the multi-account detector
-  on synthetic page-text inputs. The full PDF-to-FITID integration is
-  exercised in `apps/api/src/api.test.ts` against the worker.
+Tests cover preprocess routing, the Vibe Shield OCR client
+(request/parse, retry, cache, circuit breaker — stubbed HTTP), the
+extraction prompt builder (snapshot for fixed inputs), each exemplar
+round-tripping the Zod schema, and the multi-account detector on
+synthetic page-text inputs. The full PDF-to-FITID integration is
+exercised in `apps/api/src/api.test.ts` against the worker.
