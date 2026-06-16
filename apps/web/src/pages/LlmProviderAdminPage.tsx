@@ -57,6 +57,12 @@ interface ProviderStatus {
   anthropicKeyConfigured: boolean;
   anthropicKeyLastFour: string | null;
   allowedModels: string[];
+  // Effective Anthropic base URL + whether extraction is proxied through a
+  // gateway (Vibe Shield on this appliance) rather than hitting Anthropic
+  // directly. Lets this page surface + configure the Shield routing that
+  // used to be env-only (ANTHROPIC_BASE_URL).
+  anthropicBaseUrl: string;
+  anthropicViaShield: boolean;
   monthlyCapUsd: number | null;
 }
 
@@ -164,6 +170,11 @@ export function LlmProviderAdminPage() {
     mutationFn: (model: string) => api.post('/api/admin/llm-provider/anthropic-model', { model }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'llm-provider'] }),
   });
+  const setBaseUrl = useMutation({
+    mutationFn: (baseUrl: string) =>
+      api.post('/api/admin/llm-provider/anthropic-base-url', { baseUrl }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'llm-provider'] }),
+  });
   const setCap = useMutation({
     mutationFn: (usd: number | null) => api.post('/api/admin/llm-provider/monthly-cap', { usd }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'llm-provider'] }),
@@ -232,6 +243,19 @@ export function LlmProviderAdminPage() {
     }
     await setCap.mutateAsync(parsed);
     toast.success(`Monthly cap set to ${fmtUsd(parsed)}.`);
+  };
+
+  const onSaveBaseUrl = async (baseUrl: string): Promise<void> => {
+    try {
+      await setBaseUrl.mutateAsync(baseUrl);
+      toast.success(
+        baseUrl.length > 0
+          ? `Anthropic endpoint set to ${baseUrl}`
+          : 'Anthropic endpoint reset to direct (api.anthropic.com).',
+      );
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : 'failed');
+    }
   };
 
   return (
@@ -304,6 +328,15 @@ export function LlmProviderAdminPage() {
         )}
       </section>
 
+      {provider.data ? (
+        <BaseUrlSection
+          baseUrl={provider.data.anthropicBaseUrl}
+          viaShield={provider.data.anthropicViaShield}
+          disabled={setBaseUrl.isPending}
+          onSave={onSaveBaseUrl}
+        />
+      ) : null}
+
       <section className="rounded-lg border border-surface-muted bg-white p-4">
         <h2 className="text-base font-medium">PDF processing strategy (firm default)</h2>
         <p className="mt-1 text-xs text-ink-muted">
@@ -364,7 +397,8 @@ export function LlmProviderAdminPage() {
           {provider.data.anthropicKeyConfigured ? (
             <div className="mt-2 flex flex-wrap items-center gap-3 text-sm">
               <span className="font-mono text-ink-muted">
-                sk-ant-…{provider.data.anthropicKeyLastFour}
+                {provider.data.anthropicViaShield ? 'vs_live_' : 'sk-ant-'}…
+                {provider.data.anthropicKeyLastFour}
               </span>
               <button
                 type="button"
@@ -386,11 +420,14 @@ export function LlmProviderAdminPage() {
             <p className="mt-1 text-xs text-ink-subtle">
               Stored AES-256-GCM-encrypted at rest. Only OCR-extracted markdown text egresses; raw
               PDFs and page images NEVER leave this server.
+              {provider.data.anthropicViaShield
+                ? ' Routing via Vibe Shield — paste your vs_live_… Shield key here (not a raw sk-ant key); Shield redacts PII before forwarding to Claude.'
+                : ''}
             </p>
             <input
               type="password"
               autoComplete="off"
-              placeholder="sk-ant-…"
+              placeholder={provider.data.anthropicViaShield ? 'vs_live_…' : 'sk-ant-…'}
               className="mt-2 w-full rounded-md border border-surface-muted px-3 py-2 text-sm font-mono"
               value={keyInput}
               onChange={(e) => setKeyInput(e.target.value)}
@@ -807,6 +844,82 @@ function PricingSection({ currentModel }: { currentModel: string | null }) {
           </table>
         </div>
       )}
+    </section>
+  );
+}
+
+// Anthropic endpoint editor. Points the extraction LLM at the Vibe Shield
+// gateway (so PII is redacted before reaching Claude) instead of calling
+// api.anthropic.com directly — the routing that used to be env-only.
+function BaseUrlSection({
+  baseUrl,
+  viaShield,
+  disabled,
+  onSave,
+}: {
+  baseUrl: string;
+  viaShield: boolean;
+  disabled: boolean;
+  onSave: (baseUrl: string) => Promise<void>;
+}) {
+  // Empty input == "direct api.anthropic.com". Pre-fill only when a
+  // gateway override is active so clearing is obvious.
+  const [val, setVal] = useState(viaShield ? baseUrl : '');
+  useEffect(() => {
+    setVal(viaShield ? baseUrl : '');
+  }, [baseUrl, viaShield]);
+
+  return (
+    <section className="rounded-lg border border-surface-muted bg-white p-4">
+      <header className="flex items-baseline justify-between gap-2">
+        <h2 className="text-base font-medium">Anthropic endpoint</h2>
+        {viaShield ? (
+          <span className="rounded bg-emerald-100 px-1.5 py-0.5 text-xs font-medium text-emerald-800">
+            via Vibe Shield
+          </span>
+        ) : (
+          <span className="rounded bg-surface-subtle px-1.5 py-0.5 text-xs text-ink-muted">
+            direct
+          </span>
+        )}
+      </header>
+      <p className="mt-1 text-xs text-ink-subtle">
+        Point this at the Vibe Shield gateway (e.g.{' '}
+        <code className="rounded bg-surface-subtle px-1">http://vibe-shield-gateway:8080</code>) to
+        route the extraction LLM through Shield — PII is tokenized before it reaches Claude, and the
+        “Anthropic API key” below then holds your <code>vs_live_…</code> Shield key. Leave blank to
+        call <code className="rounded bg-surface-subtle px-1">api.anthropic.com</code> directly.
+      </p>
+      <p className="mt-2 text-sm">
+        Current: <code className="rounded bg-surface-subtle px-1 font-mono">{baseUrl}</code>
+      </p>
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        <input
+          type="url"
+          placeholder="http://vibe-shield-gateway:8080  (blank = direct)"
+          value={val}
+          onChange={(e) => setVal(e.target.value)}
+          className="min-w-0 flex-1 rounded-md border border-surface-muted px-3 py-1.5 text-sm font-mono"
+        />
+        <button
+          type="button"
+          onClick={() => void onSave(val.trim())}
+          disabled={disabled}
+          className="rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-accent-fg disabled:opacity-50"
+        >
+          {disabled ? 'Saving…' : 'Save'}
+        </button>
+        {viaShield ? (
+          <button
+            type="button"
+            onClick={() => void onSave('')}
+            disabled={disabled}
+            className="rounded-md border border-surface-muted px-3 py-1.5 text-sm disabled:opacity-50"
+          >
+            Reset to direct
+          </button>
+        ) : null}
+      </div>
     </section>
   );
 }

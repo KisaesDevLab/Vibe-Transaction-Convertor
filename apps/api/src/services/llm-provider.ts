@@ -12,8 +12,30 @@ import { readSetting } from './system-settings.js';
 const KEY_PROVIDER = 'llm.provider';
 const KEY_ANTHROPIC_KEY = 'llm.anthropic.api_key';
 const KEY_ANTHROPIC_MODEL = 'llm.anthropic.model';
+const KEY_ANTHROPIC_BASE_URL = 'llm.anthropic.base_url';
+
+const DIRECT_ANTHROPIC = 'https://api.anthropic.com';
 
 export type ProviderId = 'local' | 'anthropic';
+
+// Effective Anthropic base URL: operator-set (system_settings) wins, then
+// the ANTHROPIC_BASE_URL env, then the direct Anthropic API. When this
+// points anywhere other than api.anthropic.com the extraction LLM is
+// routed through a gateway — for this app that's the Vibe Shield gateway,
+// which redacts PII before it reaches Claude.
+export const resolveAnthropicBaseUrl = async (db: Db): Promise<string> => {
+  const row = await readSetting(db, KEY_ANTHROPIC_BASE_URL);
+  const fromDb = row?.valuePlaintext?.trim();
+  if (fromDb && fromDb.length > 0) return fromDb.replace(/\/$/, '');
+  const fromEnv = process.env.ANTHROPIC_BASE_URL?.trim();
+  if (fromEnv && fromEnv.length > 0) return fromEnv.replace(/\/$/, '');
+  return DIRECT_ANTHROPIC;
+};
+
+// True when the effective base URL is NOT the direct Anthropic API, i.e.
+// extraction is proxied (through Vibe Shield on this appliance).
+export const isAnthropicViaGateway = (baseUrl: string): boolean =>
+  baseUrl.replace(/\/$/, '') !== DIRECT_ANTHROPIC;
 
 // Operator-selectable routing policy for the LLM extraction call.
 // - local-only / anthropic-only: hard pick, current behavior.
@@ -99,7 +121,11 @@ const constructAnthropic = async (db: Db): Promise<LlmProvider> => {
   // Merge curated defaults + operator overrides so worker cost rollups
   // include any models the operator added on /admin/llm-provider.
   const priceTable = await getMergedPriceTable(db);
-  return new AnthropicProvider({ apiKey, model, priceTable });
+  // Operator-set base URL (e.g. the Vibe Shield gateway) so routing the
+  // extraction LLM through Shield is configurable from /admin/llm-provider
+  // instead of an env-only ANTHROPIC_BASE_URL.
+  const baseUrl = await resolveAnthropicBaseUrl(db);
+  return new AnthropicProvider({ apiKey, model, priceTable, baseUrl });
 };
 
 export const buildProviderForId = async (db: Db, id: ProviderId): Promise<LlmProvider> => {

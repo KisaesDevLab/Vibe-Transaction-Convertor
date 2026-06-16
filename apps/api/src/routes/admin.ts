@@ -24,7 +24,9 @@ import {
 import {
   buildProvider,
   invalidateProviderCache,
+  isAnthropicViaGateway,
   providerOrderFor,
+  resolveAnthropicBaseUrl,
   resolveProviderPolicy,
   type LlmProviderPolicy,
 } from '../services/llm-provider.js';
@@ -57,6 +59,7 @@ import { logger } from '../lib/logger.js';
 const PROVIDER_KEY = 'llm.provider';
 const ANTHROPIC_KEY = 'llm.anthropic.api_key';
 const ANTHROPIC_MODEL = 'llm.anthropic.model';
+const ANTHROPIC_BASE_URL_KEY = 'llm.anthropic.base_url';
 const MONTHLY_CAP_KEY = 'llm.anthropic.monthly_cap_usd';
 
 // Phase 26 #29: curated Claude family with known pricing in the
@@ -124,6 +127,7 @@ export const adminRouter = (): Router => {
       }
       const policy = await resolveProviderPolicy(db);
       const { primary } = providerOrderFor(policy);
+      const anthropicBaseUrl = await resolveAnthropicBaseUrl(db);
       res.json({
         // Primary provider — what runs first when extraction starts.
         // Pre-policy clients read this field; new clients read `policy`.
@@ -133,6 +137,12 @@ export const adminRouter = (): Router => {
         anthropicKeyConfigured: lastFour !== null,
         anthropicKeyLastFour: lastFour,
         allowedModels: CURATED_ANTHROPIC_MODELS,
+        // Effective Anthropic base URL + whether extraction is proxied
+        // (through Vibe Shield on this appliance) vs hitting Anthropic
+        // directly. Lets the admin UI surface the Shield routing that was
+        // previously env-only (ANTHROPIC_BASE_URL).
+        anthropicBaseUrl,
+        anthropicViaShield: isAnthropicViaGateway(anthropicBaseUrl),
         monthlyCapUsd: capRows[0]?.valuePlaintext
           ? Number.parseFloat(capRows[0].valuePlaintext)
           : null,
@@ -234,6 +244,48 @@ export const adminRouter = (): Router => {
         payload: { model },
       });
       res.json({ ok: true, model });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // Set/clear the Anthropic base URL. Point this at the Vibe Shield
+  // gateway (e.g. http://vibe-shield-gateway:8080) to route the extraction
+  // LLM through Shield — the stored "Anthropic API key" then holds the
+  // vs_live_ Shield key. An empty value clears the override (back to env /
+  // direct api.anthropic.com).
+  router.post('/llm-provider/anthropic-base-url', async (req, res, next) => {
+    try {
+      const raw = String(req.body?.baseUrl ?? '').trim();
+      if (raw.length === 0) {
+        await db.delete(systemSettings).where(eq(systemSettings.key, ANTHROPIC_BASE_URL_KEY));
+      } else {
+        if (!/^https?:\/\//.test(raw)) {
+          throw new ValidationError('baseUrl must start with http:// or https://');
+        }
+        const value = raw.replace(/\/$/, '');
+        await db
+          .insert(systemSettings)
+          .values({ key: ANTHROPIC_BASE_URL_KEY, valuePlaintext: value, isSecret: false })
+          .onConflictDoUpdate({
+            target: systemSettings.key,
+            set: { valuePlaintext: value, updatedAt: sql`now()`, updatedByUserId: req.user!.id },
+          });
+      }
+      invalidateProviderCache();
+      const anthropicBaseUrl = await resolveAnthropicBaseUrl(db);
+      await writeAudit(db, {
+        actorUserId: req.user!.id,
+        entityType: 'system_settings',
+        entityId: ANTHROPIC_BASE_URL_KEY,
+        action: 'anthropic-base-url.change',
+        payload: { baseUrl: anthropicBaseUrl, viaShield: isAnthropicViaGateway(anthropicBaseUrl) },
+      });
+      res.json({
+        ok: true,
+        anthropicBaseUrl,
+        anthropicViaShield: isAnthropicViaGateway(anthropicBaseUrl),
+      });
     } catch (err) {
       next(err);
     }
