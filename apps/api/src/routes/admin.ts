@@ -27,6 +27,7 @@ import {
   isAnthropicViaGateway,
   providerOrderFor,
   resolveAnthropicBaseUrl,
+  resolveLlmTimeoutMs,
   resolveProviderPolicy,
   type LlmProviderPolicy,
 } from '../services/llm-provider.js';
@@ -60,6 +61,7 @@ const PROVIDER_KEY = 'llm.provider';
 const ANTHROPIC_KEY = 'llm.anthropic.api_key';
 const ANTHROPIC_MODEL = 'llm.anthropic.model';
 const ANTHROPIC_BASE_URL_KEY = 'llm.anthropic.base_url';
+const LLM_TIMEOUT_KEY = 'llm.timeout_ms';
 const MONTHLY_CAP_KEY = 'llm.anthropic.monthly_cap_usd';
 
 // Phase 26 #29: curated Claude family with known pricing in the
@@ -143,6 +145,7 @@ export const adminRouter = (): Router => {
         // previously env-only (ANTHROPIC_BASE_URL).
         anthropicBaseUrl,
         anthropicViaShield: isAnthropicViaGateway(anthropicBaseUrl),
+        llmTimeoutMs: await resolveLlmTimeoutMs(db),
         monthlyCapUsd: capRows[0]?.valuePlaintext
           ? Number.parseFloat(capRows[0].valuePlaintext)
           : null,
@@ -286,6 +289,49 @@ export const adminRouter = (): Router => {
         anthropicBaseUrl,
         anthropicViaShield: isAnthropicViaGateway(anthropicBaseUrl),
       });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // Per-call LLM timeout (ms) for extraction + enrichment, applied to both
+  // the local gateway and the Anthropic/Shield provider. Empty/0 clears the
+  // override (back to LLM_TIMEOUT_MS env / 60s default). A slow statement
+  // routed through Shield may need more than the 60s default.
+  router.post('/llm-provider/timeout', async (req, res, next) => {
+    try {
+      const raw = req.body?.timeoutMs;
+      let value: string | null;
+      if (raw === null || raw === undefined || raw === '') {
+        value = null;
+      } else {
+        const n = Number.parseInt(String(raw), 10);
+        if (!Number.isFinite(n) || n < 1000 || n > 600_000) {
+          throw new ValidationError('timeoutMs must be between 1000 and 600000 (1s–10min)');
+        }
+        value = String(n);
+      }
+      if (value === null) {
+        await db.delete(systemSettings).where(eq(systemSettings.key, LLM_TIMEOUT_KEY));
+      } else {
+        await db
+          .insert(systemSettings)
+          .values({ key: LLM_TIMEOUT_KEY, valuePlaintext: value, isSecret: false })
+          .onConflictDoUpdate({
+            target: systemSettings.key,
+            set: { valuePlaintext: value, updatedAt: sql`now()`, updatedByUserId: req.user!.id },
+          });
+      }
+      invalidateProviderCache();
+      const llmTimeoutMs = await resolveLlmTimeoutMs(db);
+      await writeAudit(db, {
+        actorUserId: req.user!.id,
+        entityType: 'system_settings',
+        entityId: LLM_TIMEOUT_KEY,
+        action: 'llm-timeout.change',
+        payload: { timeoutMs: llmTimeoutMs },
+      });
+      res.json({ ok: true, llmTimeoutMs });
     } catch (err) {
       next(err);
     }

@@ -63,6 +63,9 @@ interface ProviderStatus {
   // used to be env-only (ANTHROPIC_BASE_URL).
   anthropicBaseUrl: string;
   anthropicViaShield: boolean;
+  // Per-call extraction/enrichment timeout (ms). DB-backed; falls back to
+  // LLM_TIMEOUT_MS env, then 60000.
+  llmTimeoutMs: number;
   monthlyCapUsd: number | null;
 }
 
@@ -107,6 +110,9 @@ const fmtUsd = (n: number): string =>
 // Phase 26 #29: typed-confirmation phrase. Filed verbatim in the audit
 // log when an operator enables the Anthropic provider.
 const CONFIRM_PHRASE = 'I AUTHORIZE OCR EGRESS';
+
+// Mirrors the server default (resolveLlmTimeoutMs / DEFAULT_LLM_TIMEOUT_MS).
+const DEFAULT_TIMEOUT_MS = 60000;
 
 export function LlmProviderAdminPage() {
   const qc = useQueryClient();
@@ -179,6 +185,11 @@ export function LlmProviderAdminPage() {
     mutationFn: (usd: number | null) => api.post('/api/admin/llm-provider/monthly-cap', { usd }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'llm-provider'] }),
   });
+  const setLlmTimeout = useMutation({
+    mutationFn: (timeoutMs: number | '') =>
+      api.post('/api/admin/llm-provider/timeout', { timeoutMs }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'llm-provider'] }),
+  });
   const test = useMutation({
     mutationFn: () => api.post<TestResult>('/api/admin/llm-provider/test'),
   });
@@ -243,6 +254,18 @@ export function LlmProviderAdminPage() {
     }
     await setCap.mutateAsync(parsed);
     toast.success(`Monthly cap set to ${fmtUsd(parsed)}.`);
+  };
+
+  const onSaveTimeout = async (raw: string): Promise<void> => {
+    const v = raw.trim();
+    try {
+      await setLlmTimeout.mutateAsync(v === '' ? '' : Number.parseInt(v, 10));
+      toast.success(
+        v === '' ? 'LLM timeout reset to default (60s).' : `LLM timeout set to ${v} ms.`,
+      );
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : 'failed');
+    }
   };
 
   const onSaveBaseUrl = async (baseUrl: string): Promise<void> => {
@@ -489,6 +512,23 @@ export function LlmProviderAdminPage() {
             current={provider.data.monthlyCapUsd}
             disabled={setCap.isPending}
             onSubmit={onSetCap}
+          />
+        </section>
+      ) : null}
+
+      {provider.data ? (
+        <section className="rounded-lg border border-surface-muted bg-white p-4">
+          <h2 className="text-base font-medium">LLM call timeout</h2>
+          <p className="mt-1 text-xs text-ink-subtle">
+            Per-call timeout for extraction + enrichment (both the local gateway and
+            Anthropic/Shield). A large statement routed through Vibe Shield can exceed the 60s
+            default. A slow statement may take up to ~2× this (one reminder retry). Range
+            1000–600000 ms. Blank = default ({DEFAULT_TIMEOUT_MS} ms).
+          </p>
+          <TimeoutForm
+            current={provider.data.llmTimeoutMs}
+            disabled={setLlmTimeout.isPending}
+            onSubmit={onSaveTimeout}
           />
         </section>
       ) : null}
@@ -990,6 +1030,49 @@ function CapForm({
         className="rounded-md border border-surface-muted px-3 py-1.5 text-sm"
       >
         {disabled ? 'Saving…' : 'Save cap'}
+      </button>
+    </form>
+  );
+}
+
+function TimeoutForm({
+  current,
+  disabled,
+  onSubmit,
+}: {
+  current: number;
+  disabled: boolean;
+  onSubmit: (raw: string) => Promise<void>;
+}) {
+  const [val, setVal] = useState<string>(String(current));
+  useEffect(() => {
+    setVal(String(current));
+  }, [current]);
+  return (
+    <form
+      className="mt-2 flex flex-wrap items-center gap-2"
+      onSubmit={(e) => {
+        e.preventDefault();
+        void onSubmit(val);
+      }}
+    >
+      <input
+        type="number"
+        min="1000"
+        max="600000"
+        step="1000"
+        placeholder={String(DEFAULT_TIMEOUT_MS)}
+        value={val}
+        onChange={(e) => setVal(e.target.value)}
+        className="w-32 rounded-md border border-surface-muted px-3 py-1.5 text-sm tabular-nums"
+      />
+      <span className="text-sm text-ink-muted">ms</span>
+      <button
+        type="submit"
+        disabled={disabled}
+        className="rounded-md border border-surface-muted px-3 py-1.5 text-sm"
+      >
+        {disabled ? 'Saving…' : 'Save'}
       </button>
     </form>
   );

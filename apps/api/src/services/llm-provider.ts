@@ -13,6 +13,22 @@ const KEY_PROVIDER = 'llm.provider';
 const KEY_ANTHROPIC_KEY = 'llm.anthropic.api_key';
 const KEY_ANTHROPIC_MODEL = 'llm.anthropic.model';
 const KEY_ANTHROPIC_BASE_URL = 'llm.anthropic.base_url';
+const KEY_LLM_TIMEOUT = 'llm.timeout_ms';
+
+export const DEFAULT_LLM_TIMEOUT_MS = 60_000;
+
+// Per-call timeout (ms) for extraction + enrichment LLM requests, applied
+// to both the local gateway and the Anthropic/Shield provider. Operator-set
+// (system_settings) wins, then the LLM_TIMEOUT_MS env, then 60s. A slow
+// statement may take up to ~2x this (one reminder-retry).
+export const resolveLlmTimeoutMs = async (db: Db): Promise<number> => {
+  const row = await readSetting(db, KEY_LLM_TIMEOUT);
+  const fromDb = row?.valuePlaintext ? Number.parseInt(row.valuePlaintext, 10) : NaN;
+  if (Number.isFinite(fromDb) && fromDb > 0) return fromDb;
+  const fromEnv = Number.parseInt(process.env.LLM_TIMEOUT_MS ?? '', 10);
+  if (Number.isFinite(fromEnv) && fromEnv > 0) return fromEnv;
+  return DEFAULT_LLM_TIMEOUT_MS;
+};
 
 const DIRECT_ANTHROPIC = 'https://api.anthropic.com';
 
@@ -102,7 +118,8 @@ const constructLocal = async (db: Db): Promise<LlmProvider> => {
   // Fall back to LLM_GATEWAY_URL env if the DB has no override.
   const gatewayRow = await readSetting(db, 'engine.llm_gateway.url');
   const baseUrl = gatewayRow?.valuePlaintext ?? undefined;
-  return new LocalGatewayProvider(baseUrl ? { baseUrl } : {});
+  const timeoutMs = await resolveLlmTimeoutMs(db);
+  return new LocalGatewayProvider({ ...(baseUrl ? { baseUrl } : {}), timeoutMs });
 };
 
 const constructAnthropic = async (db: Db): Promise<LlmProvider> => {
@@ -125,7 +142,8 @@ const constructAnthropic = async (db: Db): Promise<LlmProvider> => {
   // extraction LLM through Shield is configurable from /admin/llm-provider
   // instead of an env-only ANTHROPIC_BASE_URL.
   const baseUrl = await resolveAnthropicBaseUrl(db);
-  return new AnthropicProvider({ apiKey, model, priceTable, baseUrl });
+  const timeoutMs = await resolveLlmTimeoutMs(db);
+  return new AnthropicProvider({ apiKey, model, priceTable, baseUrl, timeoutMs });
 };
 
 export const buildProviderForId = async (db: Db, id: ProviderId): Promise<LlmProvider> => {
