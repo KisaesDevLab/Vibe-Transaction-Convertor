@@ -106,14 +106,23 @@ a prerequisite fails earlier in the chain.
 
 ### Remaining known limitation
 
-- **FITID determinism on forced re-extract (ADR-005 / ADR-016).**
-  `normalizedDescription`/`FITID` are computed over the tokenized
-  description, and tokens are session-scoped. Re-uploading identical bytes
-  is safe (upload dedupes by `source_pdf_hash` → reuses the same statement
-  and session → same tokens → same FITIDs). The edge case is a _forced
-  re-extract_ after the session has been deleted/expired: a new session
-  may renumber tokens and change FITIDs. Acceptable for now; a
-  stable-token or materialize-before-FITID strategy would close it.
-- **check-resolution through Shield** now reads token-overlaid payees, but
-  the resolved value is itself a token until materialize; the feature
-  hasn't been re-validated end-to-end and should be exercised before use.
+- **FITID determinism on forced re-extract (ADR-005 / ADR-016) — FIXED.**
+  The extraction worker now derives `seq_in_day` + `FITID` from the
+  **materialized cleartext** (materialize-before-FITID — see
+  `materializeDescriptionsForFitid` in `extraction.worker.ts`), not the
+  session-scoped tokens. So even a forced re-extract under a _new_ session
+  (renumbered tokens) produces the same FITID and re-import stays
+  idempotent in QuickBooks/Quicken. The tokenized form is still what's
+  persisted at rest; only the non-PII FITID hash (date | amount |
+  normalized_desc | seq) is derived from cleartext. Best-effort: if Shield
+  is unreachable at extraction time, FITIDs fall back to token-derivation
+  (still unique within the statement) with a logged warning.
+- **check-payee resolution through Shield — partial, by design.**
+  _Transcription_ works: Claude reads the token-overlaid `<PERSON_n>` and
+  `materialize` resolves it to the real payee at export. What does **not**
+  work — and cannot, by design — is asking Claude to _normalize / fuzzy-
+  match_ the actual payee name (e.g. "WALMART #1234" → "Walmart"), because
+  that needs the cleartext name to reach Claude, which violates Shield hard
+  rule #1. Keep any such normalization out of Shield: disable check-resolve
+  through the gateway, or run it against a local model. The transcription
+  path should still be exercised end-to-end before relying on it.

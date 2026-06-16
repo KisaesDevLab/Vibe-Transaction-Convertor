@@ -14,6 +14,21 @@ describe('computeFitid', () => {
     expect(id).toHaveLength(20);
   });
 
+  it('is stable across sessions when derived from materialized cleartext (ADR-022 #4)', () => {
+    // Same statement re-uploaded → Shield assigns DIFFERENT session tokens
+    // for the same payee, but the materialized cleartext is identical, so
+    // the FITID must match (idempotent re-import). The worker derives FITID
+    // from the materialized cleartext for exactly this reason.
+    const base = { postedDate: '2026-03-05', amountCents: -450, seqInDay: 0 } as const;
+    expect(computeFitid({ ...base, description: 'STARBUCKS STORE 1234' })).toBe(
+      computeFitid({ ...base, description: 'STARBUCKS STORE 1234' }),
+    );
+    // Deriving from session-scoped tokens (the pre-fix bug) is NOT stable:
+    expect(computeFitid({ ...base, description: '<MERCHANT_1>' })).not.toBe(
+      computeFitid({ ...base, description: '<MERCHANT_7>' }),
+    );
+  });
+
   it('is deterministic across calls with the same input', () => {
     const a = computeFitid({
       postedDate: '2026-03-05',

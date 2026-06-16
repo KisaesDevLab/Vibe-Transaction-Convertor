@@ -36,10 +36,51 @@ import {
 import { redisOcrCache } from '../services/ocr-cache.js';
 import { resolvePdfStrategy } from '../services/pdf-strategy.js';
 import { writeAudit } from '../services/audit.js';
+import { materialize, resolveShieldConn } from '../services/shield.js';
 
 import { QUEUE_EXTRACTION, getJobConnection, type ExtractionJobData } from './queues.js';
 
 type StatementStatus = NonNullable<typeof statements.$inferInsert.status>;
+
+// ADR-022 #4 — FITID/seq stability across re-uploads. Under the
+// cpa-converter-output policy, persisted descriptions are session-scoped
+// Shield tokens (<ENTITY_N>), which renumber on every re-OCR (a new
+// Shield session) and would change the derived FITID — breaking the
+// idempotent re-import QuickBooks/Quicken rely on. We derive FITID + seq
+// from the MATERIALIZED cleartext so they stay stable across re-uploads;
+// only the tokenized form is persisted at rest, and the FITID itself is a
+// non-PII hash (date | amount | normalized_desc | seq).
+const SHIELD_TOKEN_RE = /<[A-Z][A-Z0-9_]*_\d+>/;
+
+const materializeDescriptionsForFitid = async (
+  shieldSessionId: string | null,
+  descriptions: string[],
+): Promise<string[]> => {
+  if (!shieldSessionId) return descriptions;
+  if (!descriptions.some((d) => SHIELD_TOKEN_RE.test(d))) return descriptions;
+  try {
+    const conn = await resolveShieldConn(db);
+    const { materialized } = await materialize(
+      conn,
+      shieldSessionId,
+      { descriptions },
+      'fitid-derivation',
+    );
+    const arr = (materialized as { descriptions?: unknown }).descriptions;
+    if (Array.isArray(arr) && arr.length === descriptions.length) {
+      return descriptions.map((d, i) => (typeof arr[i] === 'string' ? (arr[i] as string) : d));
+    }
+  } catch (err) {
+    // Best-effort: if Shield is unreachable at extraction time, fall back
+    // to the tokenized form. FITIDs stay unique within the statement; only
+    // cross-re-upload stability degrades, and this warning flags it.
+    logger.warn(
+      { err: (err as Error).message },
+      'fitid materialize failed; FITIDs derived from tokens (re-upload stability degraded)',
+    );
+  }
+  return descriptions;
+};
 
 const setStatus = async (
   statementId: string,
@@ -1096,11 +1137,19 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
     const reconciled = chosen.reconciled;
     const repairApplied = chosen.repairApplied;
 
+    // ADR-022 #4: derive seq + FITID from the materialized cleartext so
+    // they're stable across re-uploads (the stored description stays
+    // tokenized). Falls back to the tokenized form if Shield is down.
+    const fitidDescriptions = await materializeDescriptionsForFitid(
+      shieldSessionId,
+      effectiveTxs.map((t) => t.description),
+    );
+
     const seqAssigned = assignSeqInDay(
-      effectiveTxs.map((t) => ({
+      effectiveTxs.map((t, i) => ({
         postedDate: t.postedDate,
         amountCents: t.amountCents,
-        description: t.description,
+        description: fitidDescriptions[i] ?? t.description,
         sourceLine: t.sourceLine,
       })),
     );
@@ -1124,7 +1173,8 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
         const fitid = computeFitid({
           postedDate: txn.postedDate,
           amountCents: txn.amountCents,
-          description: txn.description,
+          // Stable cleartext (ADR-022 #4), not the session-scoped token.
+          description: fitidDescriptions[i] ?? txn.description,
           seqInDay: seq,
         });
         const trntype = inferTrntype({
