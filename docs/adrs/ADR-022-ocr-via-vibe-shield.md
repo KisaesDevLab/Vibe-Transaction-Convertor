@@ -58,37 +58,47 @@ vs_live_…`). The client lives in
   session-deletion retention sweeps, and backfilling existing cleartext
   descriptions to tokens.
 
-## Known limitations (QA, verified against Vibe-Shield source)
+## Status of the original QA blockers — RESOLVED in Vibe Shield v1.12
 
-These are accepted, documented limitations — the integration is shipped
-but is **not functional end-to-end until the Shield-side items are
-addressed**. Verified by reading the Vibe-Shield gateway + engine.
+The two critical blockers found in QA were fixed Shield-side in
+`feat(v1.12): Tx Converter OCR-via-Shield enablers` (verified against the
+Vibe-Shield source):
 
-1. **CRITICAL — image PII is black-boxed, not token-overlaid.** Shield's
-   engine masks image regions with `apply_solid_black_mask` (solid black
-   rectangles); there is no token-overlay masker and no config flag for
-   one (`apps/engine/app/image/masker.py`). The gateway swaps in the
-   black-boxed image and does **not** pass the engine's tokenized OCR
-   text to Claude. So Claude transcribes a statement with the account
-   holder, account number, addresses, and payee names blacked out — that
-   data is lost. **Blocked on Shield adding a token-overlay masker for
-   `cpa-converter-output`.** Until then, OCR output is missing all PII
-   fields.
-2. **CRITICAL — session TTL ≤ 24h.** `POST /v1/sessions` caps
-   `ttl_minutes` at 1440 (appliance default 60). Materialize-at-export
-   needs the session alive, so an export more than the TTL after upload
-   fails (`404`) and must re-OCR. We request the 1440 max; the ceiling is
-   a hard Shield constraint.
-3. **HIGH — check-resolution can't work through Shield.** Vision check-
-   payee resolution sends the check image to Claude; Shield black-boxes
-   the payee region (the very text being read). Disable check-resolve, or
-   route it outside Shield.
-4. **HIGH — FITID determinism (ADR-005 / ADR-016).** `normalizedDescription`
-   and `FITID` are computed over the tokenized description; Shield tokens
-   are session-scoped, so a re-upload (new session) can renumber them and
-   change FITIDs, breaking idempotent re-import. Needs a stable-token or
-   materialize-before-FITID strategy.
-5. **Operator requirement.** The Shield tenant key (`vs_live_…`) MUST be
-   issued with `appId='converter'`; the `cpa-converter-output` policy
-   (and the materialize gate) is bound to that appId, not to the session.
-   A wrong appId yields `403` at export.
+1. **RESOLVED — token-overlay masker (was: black-box).** The
+   `cpa-converter-output` policy now sets `image_masker: 'token-overlay'`.
+   The gateway redactor OCRs each page image, allocates session-stable
+   vault tokens for the PII spans, and stamps those `<ENTITY_N>` tokens
+   into the image (`engine.overlayImage`) before Claude sees it. Claude
+   transcribes the tokens (not black holes); the tokenized markdown
+   round-trips through materialize at export. No Converter code change was
+   needed — the `/v1/messages` image path picks up the policy's masker.
+2. **RESOLVED — session TTL.** `POST /v1/sessions` now applies a
+   per-policy ceiling; `cpa-converter-output` raises it to **30 days**
+   (`max_session_ttl_minutes`). The Converter requests the full 30-day TTL
+   at session create, so late exports still materialize.
+
+### Operator prerequisites (hard requirements)
+
+- **Vibe Shield ≥ v1.12** (token-overlay masker + per-policy TTL).
+- The Shield tenant key (`vs_live_…`) MUST be issued with
+  **`appId='converter'`** — the `cpa-converter-output` policy, its
+  token-overlay masker, its 30-day TTL ceiling, and the materialize gate
+  are all bound to that appId. A wrong appId silently falls back to the
+  bookkeeping policy (black-box masker, 24h TTL, `403` at materialize).
+- The gateway MUST run with **ZDR enabled** (`ZDR_ENABLED=true`):
+  `cpa-converter-output` sets `zdr_required: true`, so every Converter
+  request is rejected if the gateway isn't ZDR-configured.
+
+### Remaining known limitation
+
+- **FITID determinism on forced re-extract (ADR-005 / ADR-016).**
+  `normalizedDescription`/`FITID` are computed over the tokenized
+  description, and tokens are session-scoped. Re-uploading identical bytes
+  is safe (upload dedupes by `source_pdf_hash` → reuses the same statement
+  and session → same tokens → same FITIDs). The edge case is a _forced
+  re-extract_ after the session has been deleted/expired: a new session
+  may renumber tokens and change FITIDs. Acceptable for now; a
+  stable-token or materialize-before-FITID strategy would close it.
+- **check-resolution through Shield** now reads token-overlaid payees, but
+  the resolved value is itself a token until materialize; the feature
+  hasn't been re-validated end-to-end and should be exercised before use.

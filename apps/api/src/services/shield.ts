@@ -37,12 +37,13 @@ export const resolveShieldConn = async (db: Db): Promise<ShieldConn> => {
   return { baseUrl, apiKey };
 };
 
-// Shield caps session TTL at 24h (1440 min); the create schema rejects
-// anything larger. Use the max so an export within a day of upload can
-// still materialize. Exports after the TTL must re-OCR (see the QA notes
-// in ADR-022 — this is a hard Shield-side constraint, not a default we
-// can raise).
-const MAX_TTL_MINUTES = 1440;
+// Shield v1.12 raised the session-TTL ceiling per policy: the
+// cpa-converter-output policy allows 30 days (43200 min), so a session
+// stays materializable from upload through a late export + retention
+// window. Requesting 30 days requires the Shield key's appId to be
+// `converter` (otherwise the policy's lower 24h ceiling applies and the
+// request 400s). See ADR-022.
+const CONVERTER_SESSION_TTL_MINUTES = 30 * 24 * 60;
 
 const fetchJson = async (
   conn: ShieldConn,
@@ -97,7 +98,7 @@ export const createSession = async (
     method: 'POST',
     body: {
       user_id: opts.userId && opts.userId.length > 0 ? opts.userId : 'converter',
-      ttl_minutes: Math.min(opts.ttlMinutes ?? MAX_TTL_MINUTES, MAX_TTL_MINUTES),
+      ttl_minutes: opts.ttlMinutes ?? CONVERTER_SESSION_TTL_MINUTES,
     },
   });
   const id = body && typeof body === 'object' ? (body as Record<string, unknown>).id : undefined;
