@@ -77,6 +77,21 @@ Vibe-Shield source):
    (`max_session_ttl_minutes`). The Converter requests the full 30-day TTL
    at session create, so late exports still materialize.
 
+### Verifying a deployment
+
+Run the live smoke test from the API container (or anywhere with the
+Shield env/DB config) — one command, exits non-zero with a remediation
+line per failed prerequisite:
+
+```
+pnpm shield:smoke        # or: just shield-smoke   (add --no-llm to skip the tiny /v1/messages probe)
+```
+
+It checks gateway reachability, that the key's appId is `converter` (via a
+30-day session create), the materialize policy gate, and ZDR (via a
+minimal `/v1/messages` call). It does **not** spend Anthropic tokens when
+a prerequisite fails earlier in the chain.
+
 ### Operator prerequisites (hard requirements)
 
 - **Vibe Shield ≥ v1.12** (token-overlay masker + per-policy TTL).
