@@ -216,7 +216,11 @@ const buildOfxStmt = (stmt: Statement, account: Account, txs: Transaction[]): Bu
         typeof t.cleansedDescription === 'string' &&
         t.cleansedDescription.length > 0 &&
         t.cleansedDescription !== t.description;
-      const name = useCleansed ? t.cleansedDescription! : t.description;
+      // A check payee (read from the cancelled-check image) is the most
+      // accurate <NAME> for a check row — prefer it over the cleansed/raw
+      // description; the raw bank string still goes to <MEMO> for audit.
+      const usePayee = typeof t.payee === 'string' && t.payee.length > 0;
+      const name = usePayee ? t.payee! : useCleansed ? t.cleansedDescription! : t.description;
       const out: Stmt['transactions'][number] = {
         trntype: t.trntype,
         postedDate: t.postedDate,
@@ -226,7 +230,7 @@ const buildOfxStmt = (stmt: Statement, account: Account, txs: Transaction[]): Bu
       };
       if (t.checkNumber) {
         out.checkNumber = t.checkNumber;
-      } else if (useCleansed) {
+      } else if (usePayee || useCleansed) {
         out.memo = t.description;
       }
       return out;

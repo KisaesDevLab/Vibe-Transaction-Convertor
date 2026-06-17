@@ -44,6 +44,10 @@ export const ExtractionTransaction = z.object({
   amount_cents: z.number().int(),
   running_balance_cents: z.number().int().nullable().optional(),
   check_number: z.string().max(40).nullable().optional(),
+  // The party a check is made out to ("Pay to the order of"), read from the
+  // cancelled-check image when present. Drives the OFX <NAME> field for
+  // check transactions. Null for non-check rows or when not visible.
+  payee: z.string().max(200).nullable().optional(),
   trntype: TrntypeEnum.optional(),
   source_page: z.number().int().min(1),
   confidence: z.number().min(0).max(1).default(1),
@@ -108,6 +112,13 @@ const transactionJsonSchema = {
     amount_cents: { type: 'integer' },
     running_balance_cents: { type: ['integer', 'null'] },
     check_number: { type: ['string', 'null'], maxLength: 40 },
+    payee: {
+      type: ['string', 'null'],
+      maxLength: 200,
+      description:
+        'Who a check is made out to ("Pay to the order of"), read from the ' +
+        'cancelled-check image. Null for non-check rows or when not visible.',
+    },
     trntype: { type: 'string', enum: TrntypeEnum.options },
     source_page: { type: 'integer', minimum: 1 },
     confidence: { type: 'number', minimum: 0, maximum: 1 },

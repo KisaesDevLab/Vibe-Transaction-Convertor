@@ -92,6 +92,13 @@
       "when": 1779400000000,
       "tag": "0012_shield_session",
       "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1779500000000,
+      "tag": "0013_transaction_payee",
+      "breakpoints": true
     }
   ]
 }

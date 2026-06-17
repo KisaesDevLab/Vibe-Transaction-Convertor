@@ -3,9 +3,11 @@
 
 import { schemas } from '@vibe-tx-converter/shared';
 import {
+  IMAGE_SYSTEM_PROMPT,
   SYSTEM_PROMPT,
   cleanupMarkdown,
   estimateTokens,
+  imageUserPromptFor,
   missingFieldsReminderPromptFor,
   userPromptFor,
   type UserPromptOptions,
@@ -214,6 +216,13 @@ export interface ExtractOptions extends UserPromptOptions {
   // gateway). Overrides any provider-level default.
   sessionId?: string | undefined;
   policyName?: string | undefined;
+  // v1.x — vision extraction. (Shield-redacted) page images sent directly to
+  // Claude instead of OCR'd markdown — better fidelity, and it can read the
+  // check payee. Anthropic provider only; the local gateway/Qwen has no
+  // vision input, so callers fall back to the markdown path there.
+  images?:
+    | Array<{ data: Buffer; mediaType: 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp' }>
+    | undefined;
 }
 
 // Generic structured-output call for non-extraction LLM use (description
@@ -734,9 +743,12 @@ export class AnthropicProvider implements LlmProvider {
   // call it twice (initial + reminder retry) and accumulate tokens
   // without duplicating the request-building logic.
   private async callAnthropic(
-    messages: Array<{ role: 'user' | 'assistant'; content: string }>,
+    // ``content`` is a bare string for the OCR-markdown path or an array of
+    // Anthropic content blocks (images + text) for the vision-extraction path.
+    messages: Array<{ role: 'user' | 'assistant'; content: unknown }>,
     tool: { name: string; description: string; input_schema: object },
     shield?: { sessionId?: string | undefined; policyName?: string | undefined },
+    system: string = SYSTEM_PROMPT,
   ): Promise<{
     rawJson: string;
     toolInput: unknown;
@@ -753,7 +765,7 @@ export class AnthropicProvider implements LlmProvider {
         headers: this.messageHeaders(),
         body: JSON.stringify({
           model: this.model,
-          system: SYSTEM_PROMPT,
+          system,
           max_tokens: this.effectiveMaxTokens(this.maxTokens),
           tools: [tool],
           tool_choice: { type: 'tool', name: tool.name },
@@ -830,6 +842,7 @@ export class AnthropicProvider implements LlmProvider {
 
   async extract(markdown: string, arg?: ExtractOptions | object): Promise<ExtractResult> {
     const opts = coerceOpts(arg);
+    const useVision = !!(opts.images && opts.images.length > 0);
     const { text } = prepareMarkdown(markdown);
     const promptOpts: UserPromptOptions = {};
     if (opts.dateFormatOverride) promptOpts.dateFormatOverride = opts.dateFormatOverride;
@@ -840,25 +853,42 @@ export class AnthropicProvider implements LlmProvider {
       input_schema: opts.schema ?? schemas.extraction.ExtractionJsonSchema,
     };
 
+    // Vision path sends (Shield-redacted) page images directly; markdown path
+    // sends OCR'd text. The user content is a content-block array for vision
+    // (images first, text last) or a bare string for markdown.
+    const system = useVision ? IMAGE_SYSTEM_PROMPT : SYSTEM_PROMPT;
+    const imageBlocks = useVision
+      ? (opts.images ?? []).map((img) => ({
+          type: 'image',
+          source: { type: 'base64', media_type: img.mediaType, data: img.data.toString('base64') },
+        }))
+      : [];
+    const userContentFor = (promptText: string): unknown =>
+      useVision ? [...imageBlocks, { type: 'text', text: promptText }] : promptText;
+
     // One-shot reminder retry. Anthropic tool_use almost always honors
     // input_schema strictly, but the same defensive retry that the
     // local gateway needs applies here too — if the model returns a
     // tool_use whose input omits a required top-level field, retry
     // once with an explicit reminder before bouncing to fallback.
-    let userPrompt = userPromptFor(text, promptOpts);
+    let userPrompt = useVision ? imageUserPromptFor(promptOpts) : userPromptFor(text, promptOpts);
     let totalInputTokens = 0;
     let totalOutputTokens = 0;
     let totalMs = 0;
 
     for (let attempt = 1; attempt <= 2; attempt += 1) {
-      const messages: Array<{ role: 'user' | 'assistant'; content: string }> = [
-        ...exemplarsAsMessages(1),
-        { role: 'user', content: userPrompt },
+      const messages: Array<{ role: 'user' | 'assistant'; content: unknown }> = [
+        // Text-only few-shot exemplars would confuse the vision call (they
+        // reference markdown), so the image path skips them.
+        ...(useVision ? [] : exemplarsAsMessages(1)),
+        { role: 'user', content: userContentFor(userPrompt) },
       ];
-      const call = await this.callAnthropic(messages, tool, {
-        sessionId: opts.sessionId,
-        policyName: opts.policyName,
-      });
+      const call = await this.callAnthropic(
+        messages,
+        tool,
+        { sessionId: opts.sessionId, policyName: opts.policyName },
+        system,
+      );
       totalInputTokens += call.inputTokens;
       totalOutputTokens += call.outputTokens;
       totalMs += call.ms;
@@ -886,7 +916,13 @@ export class AnthropicProvider implements LlmProvider {
           err instanceof ExtractionResponseError &&
           err.missingTopLevelFields.length > 0
         ) {
-          userPrompt = missingFieldsReminderPromptFor(text, err.missingTopLevelFields, promptOpts);
+          const fields = err.missingTopLevelFields.join(', ');
+          userPrompt = useVision
+            ? `Your previous response was REJECTED — missing required field(s): ${fields}. ` +
+              `Re-read the image(s) and emit the FULL extraction JSON with period, balances, ` +
+              `source_date_format, AND transactions all present. "transactions" MUST be an ` +
+              `array (emit [] if none). Output only the JSON.`
+            : missingFieldsReminderPromptFor(text, err.missingTopLevelFields, promptOpts);
           continue;
         }
         throw err;

@@ -7,7 +7,6 @@ import {
   analyzePdfFromBuffer,
   detectMultiAccount,
   extractTextLayerFromBuffer,
-  ocrPdfPages,
   rasterizePdf,
   repairPromptFor,
   routePdf,
@@ -26,14 +25,12 @@ import { schemas } from '@vibe-tx-converter/shared';
 import { db } from '../db/client.js';
 import { accounts, statements, systemSettings, transactions } from '../db/schema.js';
 import { logger } from '../lib/logger.js';
-import { getEngineConfig } from '../services/engines.js';
 import {
   buildProviderForId,
   providerOrderFor,
   resolveProviderPolicy,
   type ProviderId,
 } from '../services/llm-provider.js';
-import { redisOcrCache } from '../services/ocr-cache.js';
 import { resolvePdfStrategy } from '../services/pdf-strategy.js';
 import { writeAudit } from '../services/audit.js';
 import { materialize, resolveShieldConn } from '../services/shield.js';
@@ -137,6 +134,7 @@ interface ProcessedTx {
   amountCents: bigint;
   runningBalanceCents: bigint | null;
   checkNumber: string | null;
+  payee: string | null;
   trntypeHint: schemas.extraction.Trntype | undefined;
   sourcePage: number;
   confidence: number;
@@ -181,6 +179,13 @@ interface AttemptContext {
   // its PII tokens share the vault used by the OCR step. null when Shield
   // is unconfigured (legacy / local-only).
   sessionId?: string | undefined;
+  // v1.x — vision extraction. (Shield-redacted) page images sent directly to
+  // Claude instead of OCR'd markdown. Set for scanned/image statements;
+  // Anthropic-only (the local provider ignores them). When present the
+  // extraction reads the images, not ``markdown``.
+  images?:
+    | Array<{ data: Buffer; mediaType: 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp' }>
+    | undefined;
 }
 
 const checkAnthropicMonthlyCap = async (stmtId: string): Promise<string | null> => {
@@ -213,6 +218,7 @@ const mapLlmTxs = (txs: schemas.extraction.ExtractionResult['transactions']): Pr
         ? BigInt(t.running_balance_cents)
         : null,
     checkNumber: t.check_number ?? null,
+    payee: t.payee ?? null,
     trntypeHint: t.trntype,
     sourcePage: t.source_page,
     confidence: t.confidence ?? 1,
@@ -266,6 +272,12 @@ const attemptExtraction = async (
       schema: schemas.extraction.ExtractionJsonSchema,
       ...(ctx.dateFormatOverride ? { dateFormatOverride: ctx.dateFormatOverride } : {}),
       ...(ctx.sessionId ? { sessionId: ctx.sessionId } : {}),
+      // Vision extraction: the Anthropic provider reads these (Shield-redacted)
+      // images directly; the local provider has no vision and falls back to
+      // ctx.markdown. Only forward to a vision-capable provider.
+      ...(ctx.images && ctx.images.length > 0 && provider.id === 'anthropic'
+        ? { images: ctx.images }
+        : {}),
     });
   } catch (err) {
     const rejection: AttemptRejection =
@@ -630,8 +642,10 @@ type ExtractionPhase =
   | 'preprocessing'
   | 'text-markdown'
   | 'ocr-markdown'
+  | 'ocr-images'
   | 'extracting'
   | 'ocr-fallback-markdown'
+  | 'ocr-fallback-images'
   | 'text-fallback-markdown'
   | 'reconciling'
   | 'persisting'
@@ -832,38 +846,27 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
       return scoped.map((p) => `# Page ${p.index + 1}\n\n${p.text}`).join('\n\n');
     };
 
-    const produceOcrMarkdown = async (): Promise<string> => {
-      // OCR path. rasterizePdf shells out to pdftoppm (poppler-utils).
-      // The standalone Dockerfile installs poppler; on host machines the
-      // operator needs `brew install poppler` (or apt/choco equivalent).
+    // v1.x — vision extraction. For scanned/image statements we rasterize the
+    // pages and send the IMAGES straight to Claude (through Shield, which
+    // identity-zone-redacts them first), replacing the old OCR→markdown→
+    // extract-from-text step. rasterizePdf shells out to pdftoppm
+    // (poppler-utils): the standalone Dockerfile installs it; on host
+    // machines the operator needs `brew install poppler` (or apt/choco).
+    const produceOcrImages = async (): Promise<Array<{ data: Buffer; mediaType: 'image/png' }>> => {
       const rasters = await rasterizePdf(data.sourcePdfPath, { dpi: 300 });
       const scopedRasters = rasters.filter((r) => inRange(r.index));
-      const images = await Promise.all(scopedRasters.map(async (r) => readFile(r.pngPath)));
-      // DB-backed config (URL/key/model) falls back to VIBE_SHIELD_* env.
-      // Resolved per call so an admin tweak via /admin/engines doesn't
-      // require a restart. The page images go to Shield→Claude; Shield
-      // masks PII (token-overlay) before Claude sees them, so the markdown
-      // comes back tokenized and is materialized at export.
-      const ocrConfig = await getEngineConfig(db, 'vibe-shield');
-      const ocr = await ocrPdfPages(images, {
-        cache: redisOcrCache,
-        ...(ocrConfig.url ? { baseUrl: ocrConfig.url } : {}),
-        ...(ocrConfig.timeoutMs ? { timeoutMs: ocrConfig.timeoutMs } : {}),
-        ...(ocrConfig.concurrency ? { concurrency: ocrConfig.concurrency } : {}),
-        ...(ocrConfig.healthPath ? { healthPath: ocrConfig.healthPath } : {}),
-        ...(ocrConfig.model ? { model: ocrConfig.model } : {}),
-        ...(ocrConfig.prompt ? { prompt: ocrConfig.prompt } : {}),
-        ...(ocrConfig.apiKey ? { apiKey: ocrConfig.apiKey } : {}),
-        ...(shieldSessionId ? { sessionId: shieldSessionId } : {}),
-      });
-      lastOcrResponse = ocr;
-      return ocr.pages
-        .map((p, i) => `# Page ${(scopedRasters[i]?.index ?? p.index) + 1}\n\n${p.markdown}`)
-        .join('\n\n');
+      const buffers = await Promise.all(scopedRasters.map(async (r) => readFile(r.pngPath)));
+      return buffers.map((data) => ({ data, mediaType: 'image/png' as const }));
     };
 
-    currentPhase = method === 'text' ? 'text-markdown' : 'ocr-markdown';
-    markdown = method === 'text' ? await produceTextMarkdown() : await produceOcrMarkdown();
+    currentPhase = method === 'text' ? 'text-markdown' : 'ocr-images';
+    let ocrImages: Array<{ data: Buffer; mediaType: 'image/png' }> | undefined;
+    if (method === 'text') {
+      markdown = await produceTextMarkdown();
+    } else {
+      ocrImages = await produceOcrImages();
+      markdown = ''; // the images carry the statement content
+    }
     timing.markdownMs = Date.now() - phaseStart;
 
     await checkCancelled(stmtId);
@@ -880,6 +883,7 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
       markdown,
       ...(dateFormatOverride ? { dateFormatOverride } : {}),
       ...(shieldSessionId ? { sessionId: shieldSessionId } : {}),
+      ...(ocrImages ? { images: ocrImages } : {}),
     };
 
     const persistAmbiguousHalt = async (a: AttemptOutcome): Promise<void> => {
@@ -998,11 +1002,13 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
         'text-layer extraction rejected — retrying with OCR (Vibe Shield)',
       );
       await setStatus(stmtId, 'ocr', { extractionMethod: 'hybrid' });
-      currentPhase = 'ocr-fallback-markdown';
+      currentPhase = 'ocr-fallback-images';
       const ocrMarkdownStart = Date.now();
-      markdown = await produceOcrMarkdown();
+      // Vision fallback: rasterize and send images (through Shield) instead of
+      // OCR'd markdown — same path as the primary scanned route.
+      const fallbackImages = await produceOcrImages();
       timing.ocrFallbackMarkdownMs = Date.now() - ocrMarkdownStart;
-      attemptCtx = { ...attemptCtx, markdown };
+      attemptCtx = { ...attemptCtx, markdown: '', images: fallbackImages };
       currentPhase = 'extracting';
       await setStatus(stmtId, 'extracting');
       const ocrLlmStart = Date.now();
@@ -1054,7 +1060,8 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
       const textMarkdownStart = Date.now();
       markdown = await produceTextMarkdown();
       timing.ocrFallbackMarkdownMs = Date.now() - textMarkdownStart;
-      attemptCtx = { ...attemptCtx, markdown };
+      // Falling back to the text layer: use markdown, NOT the OCR images.
+      attemptCtx = { ...attemptCtx, markdown, images: undefined };
       currentPhase = 'extracting';
       const textLlmStart = Date.now();
       const textChosen = await runProviderFallback(attemptCtx, 'text-layer');
@@ -1195,6 +1202,7 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
             amountCents: txn.amountCents,
             runningBalanceCents: txn.runningBalanceCents,
             checkNumber: txn.checkNumber,
+            payee: txn.payee,
             trntype,
             fitid,
             sourcePage: txn.sourcePage,

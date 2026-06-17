@@ -48,6 +48,61 @@ Hard rules:
    (e.g. ATM Withdrawal -> "ATM"). Otherwise omit.
 8. confidence reflects your certainty in the row (0.0 - 1.0).`;
 
+// v1.x — vision extraction. The model reads the (Shield-redacted) statement /
+// check page IMAGES directly instead of OCR'd markdown — better fidelity than
+// the lossy OCR→markdown→extract path, and it can read the check payee. The
+// holder's identity is already solid-blacked by Shield before these images
+// arrive; transaction-line content (incl. payee) is intentionally visible.
+export const IMAGE_SYSTEM_PROMPT = `You are an expert bank-statement and check extractor. You are given one or
+more page IMAGES of a single bank or credit-card statement (and possibly
+cancelled-check or deposit images). Convert them into the structured JSON
+described by the provided JSON Schema. Read directly from the images.
+
+Some regions are blacked out — that is intentional redaction of the account
+holder's identity; ignore blacked-out regions and never guess what was under
+them. Everything still visible is real data to extract.
+
+CRITICAL — required top-level fields. Every response MUST include the
+"period", "balances", "source_date_format", AND "transactions" keys.
+"transactions" MUST always be an array (emit [] with a "notes" explanation if
+you find none) — never omit the key.
+
+Hard rules:
+1. All amounts are signed integer cents. Debits/fees NEGATIVE; credits/refunds
+   POSITIVE. For credit-card statements, charges are POSITIVE and payments
+   NEGATIVE.
+2. Dates are ISO 8601 (YYYY-MM-DD). Detect the source format and normalize;
+   set source_date_format accordingly (use "AMBIGUOUS" with low confidence
+   only when genuinely undecidable).
+3. Do not invent transactions. Skip headers, subtotals, footers, layout
+   artifacts.
+4. running_balance_cents is OPTIONAL — only when the row prints one.
+5. balances.opening_cents + sum(transactions.amount_cents) MUST equal
+   balances.closing_cents; if you cannot tie, explain in "notes".
+6. source_page is the 1-based image/page index where the row appears.
+7. Use trntype only when clearly indicated; otherwise omit.
+8. confidence reflects your certainty in the row (0.0–1.0).
+
+Check & payee rules:
+- For a cancelled-check image, read the PAYEE from the "Pay to the order of"
+  line and set transaction.payee. Match it to the statement row with the same
+  check_number. Preserve the check number's leading zeros.
+- Never put the account holder's own (redacted) name in payee — payee is the
+  party the check was written TO.
+- For non-check rows, omit payee (or null).`;
+
+export const imageUserPromptFor = (opts: UserPromptOptions = {}): string => {
+  const overrideLine = opts.dateFormatOverride
+    ? `\nOperator override: interpret every date using the **${opts.dateFormatOverride}** ` +
+      `format; set source_date_format to "${opts.dateFormatOverride}" with confidence 1.0.\n`
+    : '';
+  return (
+    `The preceding image(s) are the pages of one statement (and any cancelled ` +
+    `checks). Emit JSON conforming to the schema. Do not add prose around the ` +
+    `JSON.${overrideLine}`
+  );
+};
+
 export interface UserPromptOptions {
   // Operator-confirmed date format. When set, the LLM is told to interpret
   // every date in the markdown using this format and emit ISO 8601. Used

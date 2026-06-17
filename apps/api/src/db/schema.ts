@@ -349,6 +349,10 @@ export const transactions = vibetc.table(
     amountCents: bigint('amount_cents', { mode: 'bigint' }).notNull(),
     runningBalanceCents: bigint('running_balance_cents', { mode: 'bigint' }),
     checkNumber: text('check_number'),
+    // Who a check is made out to ("Pay to the order of"), read from the
+    // cancelled-check image during vision extraction. Preferred over
+    // cleansedDescription for the OFX <NAME> field on check rows.
+    payee: text('payee'),
     trntype: trntype('trntype').notNull(),
     fitid: text('fitid').notNull(),
     sourcePage: integer('source_page').notNull(),
