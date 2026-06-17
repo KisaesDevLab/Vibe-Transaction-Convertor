@@ -132,6 +132,18 @@ export const adminRouter = (): Router => {
       const policy = await resolveProviderPolicy(db);
       const { primary } = providerOrderFor(policy);
       const anthropicBaseUrl = await resolveAnthropicBaseUrl(db);
+      const viaShield = isAnthropicViaGateway(anthropicBaseUrl);
+      const llmMaxTokens = await resolveLlmMaxTokens(db);
+      // What the provider will ACTUALLY send, resolved the same way
+      // constructAnthropic / AnthropicProvider do — so the admin page can
+      // show the on-the-wire request without the operator triggering a
+      // failure. The model applies the DB → env → default fallback; the
+      // max_tokens is clamped to the Shield policy ceiling when routed
+      // through the gateway (Shield 400s anything above it).
+      const effectiveModel =
+        modelRows[0]?.valuePlaintext ?? process.env.ANTHROPIC_MODEL ?? 'claude-sonnet-4-6';
+      const shieldCeiling = Number(process.env.VIBE_SHIELD_MAX_TOKENS_CEILING ?? 32_000);
+      const effectiveMaxTokens = viaShield ? Math.min(llmMaxTokens, shieldCeiling) : llmMaxTokens;
       res.json({
         // Primary provider — what runs first when extraction starts.
         // Pre-policy clients read this field; new clients read `policy`.
@@ -146,9 +158,13 @@ export const adminRouter = (): Router => {
         // directly. Lets the admin UI surface the Shield routing that was
         // previously env-only (ANTHROPIC_BASE_URL).
         anthropicBaseUrl,
-        anthropicViaShield: isAnthropicViaGateway(anthropicBaseUrl),
+        anthropicViaShield: viaShield,
         llmTimeoutMs: await resolveLlmTimeoutMs(db),
-        llmMaxTokens: await resolveLlmMaxTokens(db),
+        llmMaxTokens,
+        // Resolved on-the-wire request shape (read-only; for the admin
+        // "effective request" line).
+        effectiveModel,
+        effectiveMaxTokens,
         monthlyCapUsd: capRows[0]?.valuePlaintext
           ? Number.parseFloat(capRows[0].valuePlaintext)
           : null,

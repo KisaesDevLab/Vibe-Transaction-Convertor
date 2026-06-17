@@ -69,6 +69,11 @@ interface ProviderStatus {
   // Per-call output-token ceiling (Anthropic/Shield path). DB-backed; falls
   // back to LLM_MAX_COMPLETION_TOKENS env, then 32000.
   llmMaxTokens: number;
+  // Resolved on-the-wire request shape — what the provider will actually
+  // send. effectiveModel applies the DB → env → default fallback;
+  // effectiveMaxTokens is clamped to the Shield ceiling when via gateway.
+  effectiveModel: string;
+  effectiveMaxTokens: number;
   monthlyCapUsd: number | null;
 }
 
@@ -328,6 +333,48 @@ export function LlmProviderAdminPage() {
           through Shield too.
         </p>
       </header>
+
+      {provider.data ? (
+        <section className="rounded-lg border border-surface-muted bg-white p-4">
+          <h2 className="text-base font-medium">Effective request</h2>
+          <p className="mt-1 text-xs text-ink-subtle">
+            Exactly what an Anthropic extraction call will send right now — resolved from the
+            settings below (no need to trigger a failure to find out).
+          </p>
+          <dl className="mt-3 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
+            <dt className="text-ink-muted">Model</dt>
+            <dd className="font-mono">{provider.data.effectiveModel}</dd>
+            <dt className="text-ink-muted">Endpoint</dt>
+            <dd className="font-mono">
+              {provider.data.anthropicBaseUrl}{' '}
+              <span className="text-xs text-ink-subtle">
+                ({provider.data.anthropicViaShield ? 'via Vibe Shield' : 'direct'})
+              </span>
+            </dd>
+            <dt className="text-ink-muted">max_tokens</dt>
+            <dd className="font-mono">
+              {provider.data.effectiveMaxTokens.toLocaleString()}
+              {provider.data.anthropicViaShield &&
+              provider.data.effectiveMaxTokens < provider.data.llmMaxTokens ? (
+                <span className="ml-1 text-xs text-amber-700">
+                  (clamped from {provider.data.llmMaxTokens.toLocaleString()} to the Shield ceiling)
+                </span>
+              ) : null}
+            </dd>
+            <dt className="text-ink-muted">Timeout</dt>
+            <dd className="font-mono">{(provider.data.llmTimeoutMs / 1000).toFixed(0)}s</dd>
+            <dt className="text-ink-muted">Auth</dt>
+            <dd className="font-mono">
+              {provider.data.anthropicViaShield ? 'Bearer (gateway key)' : 'x-api-key'}
+            </dd>
+          </dl>
+          {!provider.data.anthropicKeyConfigured ? (
+            <p className="mt-2 text-xs text-amber-700">
+              No API key stored yet — set one below for these to take effect.
+            </p>
+          ) : null}
+        </section>
+      ) : null}
 
       <section className="rounded-lg border border-surface-muted bg-white p-4">
         <h2 className="text-base font-medium">Routing policy</h2>
