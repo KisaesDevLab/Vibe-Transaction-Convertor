@@ -4,9 +4,33 @@ import {
   ExtractionResponseError,
   LocalGatewayProvider,
   computeAnthropicCostMicros,
+  describeAnthropicRequest,
   parseExtractionResponse,
   parsePageClassifications,
 } from './llm-client.js';
+
+describe('describeAnthropicRequest', () => {
+  it('summarizes a vision request without leaking content', () => {
+    const messages = [
+      {
+        role: 'user',
+        content: [
+          { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: 'AAAA' } },
+          { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: 'BBBBBB' } },
+          { type: 'text', text: 'secret prompt' },
+        ],
+      },
+    ];
+    const s = describeAnthropicRequest(messages, 'claude-sonnet-4-6', 32000, true);
+    expect(s).toContain('model=claude-sonnet-4-6');
+    expect(s).toContain('max_tokens=32000');
+    expect(s).toContain('images=2');
+    expect(s).toContain('imageB64Bytes=10');
+    expect(s).toContain('media=image/jpeg');
+    expect(s).toContain('viaGateway=true');
+    expect(s).not.toContain('secret');
+  });
+});
 
 describe('parsePageClassifications', () => {
   it('parses a JSON string array', () => {

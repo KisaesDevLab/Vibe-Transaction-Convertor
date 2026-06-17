@@ -33,6 +33,47 @@ const defaultPromptBudget = (): number => Number(process.env.LLM_MAX_PROMPT_TOKE
 const shieldMaxTokensCeiling = (): number =>
   Number(process.env.VIBE_SHIELD_MAX_TOKENS_CEILING ?? 32_000);
 
+// Compact, PII-free description of an Anthropic /v1/messages request, for
+// attaching to a 4xx error. Shield masks the upstream Anthropic reason, so
+// this lets an operator diagnose a 400 from the app trace alone: it reports
+// the model, the max_tokens we actually sent, and — for the vision path —
+// how many image blocks, their total base64 size, and their media types.
+// Only counts/sizes are included; never image bytes or prompt text.
+export const describeAnthropicRequest = (
+  messages: Array<{ role: string; content: unknown }>,
+  model: string,
+  maxTokens: number,
+  viaGateway: boolean,
+): string => {
+  let images = 0;
+  let imageB64Bytes = 0;
+  let textBlocks = 0;
+  const mediaTypes = new Set<string>();
+  for (const m of messages) {
+    const c = m.content;
+    if (typeof c === 'string') {
+      textBlocks += 1;
+      continue;
+    }
+    if (!Array.isArray(c)) continue;
+    for (const block of c) {
+      const b = block as { type?: string; source?: { data?: unknown; media_type?: unknown } };
+      if (b?.type === 'image') {
+        images += 1;
+        if (typeof b.source?.data === 'string') imageB64Bytes += b.source.data.length;
+        if (typeof b.source?.media_type === 'string') mediaTypes.add(b.source.media_type);
+      } else if (b?.type === 'text') {
+        textBlocks += 1;
+      }
+    }
+  }
+  return (
+    `model=${model} max_tokens=${maxTokens} msgs=${messages.length} ` +
+    `text=${textBlocks} images=${images} imageB64Bytes=${imageB64Bytes} ` +
+    `media=${[...mediaTypes].join('|') || 'none'} viaGateway=${viaGateway}`
+  );
+};
+
 // Cleans the markdown and truncates it to fit the prompt budget. Returns
 // the cleaned text plus the token count for telemetry. When the cleaned
 // text exceeds the budget, the head and tail are both preserved with a
@@ -785,6 +826,7 @@ export class AnthropicProvider implements LlmProvider {
     const ctl = new AbortController();
     const t = setTimeout(() => ctl.abort(), this.timeoutMs);
     const start = Date.now();
+    const sentMaxTokens = this.effectiveMaxTokens(this.maxTokens);
     try {
       const res = await this.fetcher(`${this.baseUrl}/v1/messages`, {
         method: 'POST',
@@ -792,7 +834,7 @@ export class AnthropicProvider implements LlmProvider {
         body: JSON.stringify({
           model: this.model,
           system,
-          max_tokens: this.effectiveMaxTokens(this.maxTokens),
+          max_tokens: sentMaxTokens,
           tools: [tool],
           tool_choice: { type: 'tool', name: tool.name },
           messages,
@@ -803,9 +845,17 @@ export class AnthropicProvider implements LlmProvider {
       if (!res.ok) {
         // Surface the gateway/API error body — a bare status hides the
         // reason (e.g. Shield's {"error":{"type","message"}} for a wrong
-        // policy, ZDR-off, model-not-allowed, or bad session_id).
+        // policy, ZDR-off, model-not-allowed, or bad session_id). Shield
+        // also MASKS the upstream Anthropic 400 reason behind a generic
+        // message + correlation_id, so we attach our own request shape
+        // (counts/sizes only — never image bytes or text) to make a 4xx
+        // diagnosable from the app trace without a Shield-side log dive.
         const detail = await res.text().catch(() => '');
-        throw new Error(`anthropic HTTP ${res.status}${detail ? `: ${detail.slice(0, 500)}` : ''}`);
+        throw new Error(
+          `anthropic HTTP ${res.status} [${describeAnthropicRequest(messages, this.model, sentMaxTokens, this.viaGateway)}]${
+            detail ? `: ${detail.slice(0, 500)}` : ''
+          }`,
+        );
       }
       const body = (await res.json()) as {
         content?: Array<
