@@ -177,11 +177,23 @@ export const extractTextLayerFromBuffer = async (buffer: Buffer): Promise<PageTe
 export interface RasterizeOptions {
   dpi?: number;
   outDir?: string;
+  // Output codec. JPEG is dramatically smaller than PNG for scanned pages,
+  // which matters for vision extraction through Shield: the gateway's
+  // MAX_REQUEST_BYTES caps the JSON body and base64 PNG pages blow past it.
+  // Default stays 'png' for back-compat; the vision path passes 'jpeg'.
+  format?: 'png' | 'jpeg';
+  // JPEG quality 1–100 (pdftoppm -jpegopt quality=N). Default 80 — a good
+  // legibility/size trade for statement text. Ignored for PNG.
+  jpegQuality?: number;
 }
 
 export interface RasterizedPage {
   index: number;
+  // Path to the rasterized image. `pngPath` is retained as a back-compat
+  // alias (equal to `path`) even when the codec is JPEG.
+  path: string;
   pngPath: string;
+  mediaType: 'image/png' | 'image/jpeg';
   width: number;
   height: number;
 }
@@ -195,6 +207,8 @@ export const rasterizePdf = async (
   opts: RasterizeOptions = {},
 ): Promise<RasterizedPage[]> => {
   const dpi = opts.dpi ?? 300;
+  const format = opts.format ?? 'png';
+  const jpegQuality = Math.min(100, Math.max(1, Math.floor(opts.jpegQuality ?? 80)));
   // Per-PDF outDir keyed on the source file's basename (which the
   // upload-storage layer derives from the content sha256, so it's
   // collision-free across statements). Previous behavior used
@@ -209,8 +223,9 @@ export const rasterizePdf = async (
   await rm(outDir, { recursive: true, force: true });
   await mkdir(outDir, { recursive: true });
   const prefix = join(outDir, 'page');
+  const codecArgs = format === 'jpeg' ? ['-jpeg', '-jpegopt', `quality=${jpegQuality}`] : ['-png'];
   try {
-    await execFileP('pdftoppm', ['-png', '-r', String(dpi), path, prefix], {
+    await execFileP('pdftoppm', [...codecArgs, '-r', String(dpi), path, prefix], {
       maxBuffer: 64 * 1024 * 1024,
     });
   } catch (err) {
@@ -224,13 +239,21 @@ export const rasterizePdf = async (
     throw new Error(`pdftoppm failed: ${e.message ?? String(err)}`);
   }
   const entries = await readdir(outDir);
-  const pageFiles = entries.filter((f) => f.startsWith('page-') && f.endsWith('.png')).sort();
-  return pageFiles.map((file, i) => ({
-    index: i,
-    pngPath: join(outDir, file),
-    width: 0,
-    height: 0,
-  }));
+  // pdftoppm writes .jpg for -jpeg, .png for -png.
+  const ext = format === 'jpeg' ? '.jpg' : '.png';
+  const mediaType = format === 'jpeg' ? ('image/jpeg' as const) : ('image/png' as const);
+  const pageFiles = entries.filter((f) => f.startsWith('page-') && f.endsWith(ext)).sort();
+  return pageFiles.map((file, i) => {
+    const filePath = join(outDir, file);
+    return {
+      index: i,
+      path: filePath,
+      pngPath: filePath,
+      mediaType,
+      width: 0,
+      height: 0,
+    };
+  });
 };
 
 // ---- Cleanup ----------------------------------------------------------------

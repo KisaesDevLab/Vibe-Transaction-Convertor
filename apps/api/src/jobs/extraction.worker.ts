@@ -5,8 +5,10 @@ import { readFile } from 'node:fs/promises';
 import {
   ExtractionResponseError,
   analyzePdfFromBuffer,
+  batchPageImages,
   detectMultiAccount,
   extractTextLayerFromBuffer,
+  mergeExtractionResults,
   rasterizePdf,
   repairPromptFor,
   routePdf,
@@ -143,6 +145,12 @@ interface ProcessedTx {
 
 type AttemptRejection = 'http' | 'malformed' | 'empty-txs' | 'discrepancy' | null;
 
+// A rasterized, Shield-redactable page image bound for vision extraction.
+type VisionImage = {
+  data: Buffer;
+  mediaType: 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp';
+};
+
 interface AttemptOutcome {
   providerId: ProviderId;
   rejection: AttemptRejection;
@@ -183,9 +191,7 @@ interface AttemptContext {
   // Claude instead of OCR'd markdown. Set for scanned/image statements;
   // Anthropic-only (the local provider ignores them). When present the
   // extraction reads the images, not ``markdown``.
-  images?:
-    | Array<{ data: Buffer; mediaType: 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp' }>
-    | undefined;
+  images?: VisionImage[] | undefined;
 }
 
 const checkAnthropicMonthlyCap = async (stmtId: string): Promise<string | null> => {
@@ -224,6 +230,45 @@ const mapLlmTxs = (txs: schemas.extraction.ExtractionResult['transactions']): Pr
     confidence: t.confidence ?? 1,
     sourceLine: idx,
   }));
+
+// Vision extraction over a multi-page statement. Shield's gateway caps the
+// JSON body (MAX_REQUEST_BYTES), so we can't send every page image in one
+// /v1/messages call — we batch the pages (1–3 each, within a byte budget),
+// extract each batch, and merge the per-batch results back into one
+// statement-level extraction. The merged result is shaped exactly like a
+// single provider.extract() return so the orchestration downstream is
+// unchanged. Telemetry sums across batches; rawJson keeps each batch's raw
+// for the audit trail.
+const extractFromImagesBatched = async (
+  provider: Awaited<ReturnType<typeof buildProviderForId>>,
+  images: VisionImage[],
+  baseOpts: Parameters<typeof provider.extract>[1],
+): Promise<Awaited<ReturnType<typeof provider.extract>>> => {
+  const batches = batchPageImages(images);
+  const parts: Array<{ data: schemas.extraction.ExtractionResult; startPage: number }> = [];
+  const rawParts: string[] = [];
+  let inputTokens = 0;
+  let outputTokens = 0;
+  let costMicros = 0n;
+  let ms = 0;
+  let model = '';
+  for (const batch of batches) {
+    const r = await provider.extract('', { ...(baseOpts ?? {}), images: batch.images });
+    parts.push({ data: r.data, startPage: batch.startPage });
+    rawParts.push(r.rawJson);
+    inputTokens += r.telemetry.inputTokens ?? 0;
+    outputTokens += r.telemetry.outputTokens ?? 0;
+    costMicros += r.telemetry.costMicros;
+    ms += r.telemetry.ms;
+    model = r.telemetry.model;
+  }
+  const data = mergeExtractionResults(parts);
+  return {
+    data,
+    rawJson: JSON.stringify({ batchCount: batches.length, batches: rawParts }).slice(0, 20_000),
+    telemetry: { inputTokens, outputTokens, ms, model, costMicros },
+  };
+};
 
 // Run extraction + reconciliation + repair using a single provider. The
 // LLM call (and any same-provider repair calls) accumulate into the
@@ -266,19 +311,21 @@ const attemptExtraction = async (
     }
   }
 
+  const useVision = !!(ctx.images && ctx.images.length > 0 && provider.id === 'anthropic');
+  const baseExtractOpts = {
+    schema: schemas.extraction.ExtractionJsonSchema,
+    ...(ctx.dateFormatOverride ? { dateFormatOverride: ctx.dateFormatOverride } : {}),
+    ...(ctx.sessionId ? { sessionId: ctx.sessionId } : {}),
+  };
+
   let result: Awaited<ReturnType<typeof provider.extract>>;
   try {
-    result = await provider.extract(ctx.markdown, {
-      schema: schemas.extraction.ExtractionJsonSchema,
-      ...(ctx.dateFormatOverride ? { dateFormatOverride: ctx.dateFormatOverride } : {}),
-      ...(ctx.sessionId ? { sessionId: ctx.sessionId } : {}),
-      // Vision extraction: the Anthropic provider reads these (Shield-redacted)
-      // images directly; the local provider has no vision and falls back to
-      // ctx.markdown. Only forward to a vision-capable provider.
-      ...(ctx.images && ctx.images.length > 0 && provider.id === 'anthropic'
-        ? { images: ctx.images }
-        : {}),
-    });
+    // Vision extraction: the Anthropic provider reads the (Shield-redacted)
+    // page images directly, batched to fit the gateway body cap and merged.
+    // The local provider has no vision, so it always takes the markdown path.
+    result = useVision
+      ? await extractFromImagesBatched(provider, ctx.images!, baseExtractOpts)
+      : await provider.extract(ctx.markdown, baseExtractOpts);
   } catch (err) {
     const rejection: AttemptRejection =
       err instanceof ExtractionResponseError ? 'malformed' : 'http';
@@ -360,7 +407,12 @@ const attemptExtraction = async (
   // Same-provider LLM repair pass (ADR-010, Phase 16 #6). When the
   // discrepancy is upstream of the provider switch, this repair has a
   // better chance to converge than a second cold extraction.
-  if (reconciled.status === 'discrepancy') {
+  // The repair pass re-reads the markdown with a "your sum is off" hint. It
+  // only applies to the text path — the vision path has no markdown to
+  // re-read (ctx.markdown is ''), and an image re-extract repair is a
+  // separate follow-on. A vision discrepancy falls through to the
+  // discrepancy outcome and surfaces in review.
+  if (reconciled.status === 'discrepancy' && ctx.markdown.length > 0) {
     const suspects = findSuspectRows(
       openingCents,
       effectiveTxs.map((t) => ({
@@ -852,15 +904,25 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
     // extract-from-text step. rasterizePdf shells out to pdftoppm
     // (poppler-utils): the standalone Dockerfile installs it; on host
     // machines the operator needs `brew install poppler` (or apt/choco).
-    const produceOcrImages = async (): Promise<Array<{ data: Buffer; mediaType: 'image/png' }>> => {
-      const rasters = await rasterizePdf(data.sourcePdfPath, { dpi: 300 });
+    // Rasterize to JPEG at a modest DPI (not 300-dpi PNG): page images go
+    // into the JSON body of a Shield /v1/messages call, which is bounded by
+    // the gateway's MAX_REQUEST_BYTES — base64 PNG pages blow past it. JPEG
+    // at ~150 dpi keeps statement text legible while staying small enough to
+    // batch. DPI/quality are operator-tunable for hard-to-read scans.
+    const produceOcrImages = async (): Promise<VisionImage[]> => {
+      const rasters = await rasterizePdf(data.sourcePdfPath, {
+        dpi: Number(process.env.VIBE_SHIELD_RASTER_DPI ?? 150),
+        format: 'jpeg',
+        jpegQuality: Number(process.env.VIBE_SHIELD_RASTER_JPEG_QUALITY ?? 80),
+      });
       const scopedRasters = rasters.filter((r) => inRange(r.index));
-      const buffers = await Promise.all(scopedRasters.map(async (r) => readFile(r.pngPath)));
-      return buffers.map((data) => ({ data, mediaType: 'image/png' as const }));
+      return Promise.all(
+        scopedRasters.map(async (r) => ({ data: await readFile(r.path), mediaType: r.mediaType })),
+      );
     };
 
     currentPhase = method === 'text' ? 'text-markdown' : 'ocr-images';
-    let ocrImages: Array<{ data: Buffer; mediaType: 'image/png' }> | undefined;
+    let ocrImages: VisionImage[] | undefined;
     if (method === 'text') {
       markdown = await produceTextMarkdown();
     } else {

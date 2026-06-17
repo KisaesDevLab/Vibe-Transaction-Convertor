@@ -8,3 +8,5 @@ export * from './prompts/check-resolve.js';
 export * from './exemplars.js';
 export * from './llm-client.js';
 export * from './multi-account-detector.js';
+export * from './image-batch.js';
+export * from './merge-extraction.js';
