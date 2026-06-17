@@ -5,9 +5,10 @@ import { readFile } from 'node:fs/promises';
 import {
   ExtractionResponseError,
   analyzePdfFromBuffer,
+  batchPageImages,
   detectMultiAccount,
   extractTextLayerFromBuffer,
-  ocrPdfPages,
+  mergeExtractionResults,
   rasterizePdf,
   repairPromptFor,
   routePdf,
@@ -26,14 +27,12 @@ import { schemas } from '@vibe-tx-converter/shared';
 import { db } from '../db/client.js';
 import { accounts, statements, systemSettings, transactions } from '../db/schema.js';
 import { logger } from '../lib/logger.js';
-import { getEngineConfig } from '../services/engines.js';
 import {
   buildProviderForId,
   providerOrderFor,
   resolveProviderPolicy,
   type ProviderId,
 } from '../services/llm-provider.js';
-import { redisOcrCache } from '../services/ocr-cache.js';
 import { resolvePdfStrategy } from '../services/pdf-strategy.js';
 import { writeAudit } from '../services/audit.js';
 import { materialize, resolveShieldConn } from '../services/shield.js';
@@ -137,6 +136,7 @@ interface ProcessedTx {
   amountCents: bigint;
   runningBalanceCents: bigint | null;
   checkNumber: string | null;
+  payee: string | null;
   trntypeHint: schemas.extraction.Trntype | undefined;
   sourcePage: number;
   confidence: number;
@@ -144,6 +144,12 @@ interface ProcessedTx {
 }
 
 type AttemptRejection = 'http' | 'malformed' | 'empty-txs' | 'discrepancy' | null;
+
+// A rasterized, Shield-redactable page image bound for vision extraction.
+type VisionImage = {
+  data: Buffer;
+  mediaType: 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp';
+};
 
 interface AttemptOutcome {
   providerId: ProviderId;
@@ -171,6 +177,9 @@ interface AttemptOutcome {
   periodEnd: string | null;
   openingBalanceCents: bigint | null;
   closingBalanceCents: bigint | null;
+  // Shield per-page document types (vision path), in global page order.
+  // null when not the vision path or no classification header was returned.
+  pageClassifications: string[] | null;
 }
 
 interface AttemptContext {
@@ -181,6 +190,11 @@ interface AttemptContext {
   // its PII tokens share the vault used by the OCR step. null when Shield
   // is unconfigured (legacy / local-only).
   sessionId?: string | undefined;
+  // v1.x — vision extraction. (Shield-redacted) page images sent directly to
+  // Claude instead of OCR'd markdown. Set for scanned/image statements;
+  // Anthropic-only (the local provider ignores them). When present the
+  // extraction reads the images, not ``markdown``.
+  images?: VisionImage[] | undefined;
 }
 
 const checkAnthropicMonthlyCap = async (stmtId: string): Promise<string | null> => {
@@ -213,11 +227,65 @@ const mapLlmTxs = (txs: schemas.extraction.ExtractionResult['transactions']): Pr
         ? BigInt(t.running_balance_cents)
         : null,
     checkNumber: t.check_number ?? null,
+    payee: t.payee ?? null,
     trntypeHint: t.trntype,
     sourcePage: t.source_page,
     confidence: t.confidence ?? 1,
     sourceLine: idx,
   }));
+
+// Vision extraction over a multi-page statement. Shield's gateway caps the
+// JSON body (MAX_REQUEST_BYTES), so we can't send every page image in one
+// /v1/messages call — we batch the pages (1–3 each, within a byte budget),
+// extract each batch, and merge the per-batch results back into one
+// statement-level extraction. The merged result is shaped exactly like a
+// single provider.extract() return so the orchestration downstream is
+// unchanged. Telemetry sums across batches; rawJson keeps each batch's raw
+// for the audit trail.
+const extractFromImagesBatched = async (
+  provider: Awaited<ReturnType<typeof buildProviderForId>>,
+  images: VisionImage[],
+  baseOpts: Parameters<typeof provider.extract>[1],
+): Promise<Awaited<ReturnType<typeof provider.extract>>> => {
+  const batches = batchPageImages(images);
+  const parts: Array<{ data: schemas.extraction.ExtractionResult; startPage: number }> = [];
+  const rawParts: string[] = [];
+  // Shield returns one document-type per image block; concatenating the
+  // batches in page order yields the per-page classification for the whole
+  // statement (global page order). undefined when no batch reported any.
+  const classifications: string[] = [];
+  let anyClassification = false;
+  let inputTokens = 0;
+  let outputTokens = 0;
+  let costMicros = 0n;
+  let ms = 0;
+  let model = '';
+  for (const batch of batches) {
+    const r = await provider.extract('', { ...(baseOpts ?? {}), images: batch.images });
+    parts.push({ data: r.data, startPage: batch.startPage });
+    rawParts.push(r.rawJson);
+    if (r.classifications) {
+      anyClassification = true;
+      classifications.push(...r.classifications);
+    } else {
+      // Keep the array aligned with global page numbers even when one batch
+      // had no header: pad with the count of pages it covered.
+      classifications.push(...batch.images.map(() => 'unclassified'));
+    }
+    inputTokens += r.telemetry.inputTokens ?? 0;
+    outputTokens += r.telemetry.outputTokens ?? 0;
+    costMicros += r.telemetry.costMicros;
+    ms += r.telemetry.ms;
+    model = r.telemetry.model;
+  }
+  const data = mergeExtractionResults(parts);
+  return {
+    data,
+    rawJson: JSON.stringify({ batchCount: batches.length, batches: rawParts }).slice(0, 20_000),
+    telemetry: { inputTokens, outputTokens, ms, model, costMicros },
+    ...(anyClassification ? { classifications } : {}),
+  };
+};
 
 // Run extraction + reconciliation + repair using a single provider. The
 // LLM call (and any same-provider repair calls) accumulate into the
@@ -244,6 +312,7 @@ const attemptExtraction = async (
     periodEnd: null,
     openingBalanceCents: null,
     closingBalanceCents: null,
+    pageClassifications: null,
   };
 
   let provider;
@@ -260,13 +329,21 @@ const attemptExtraction = async (
     }
   }
 
+  const useVision = !!(ctx.images && ctx.images.length > 0 && provider.id === 'anthropic');
+  const baseExtractOpts = {
+    schema: schemas.extraction.ExtractionJsonSchema,
+    ...(ctx.dateFormatOverride ? { dateFormatOverride: ctx.dateFormatOverride } : {}),
+    ...(ctx.sessionId ? { sessionId: ctx.sessionId } : {}),
+  };
+
   let result: Awaited<ReturnType<typeof provider.extract>>;
   try {
-    result = await provider.extract(ctx.markdown, {
-      schema: schemas.extraction.ExtractionJsonSchema,
-      ...(ctx.dateFormatOverride ? { dateFormatOverride: ctx.dateFormatOverride } : {}),
-      ...(ctx.sessionId ? { sessionId: ctx.sessionId } : {}),
-    });
+    // Vision extraction: the Anthropic provider reads the (Shield-redacted)
+    // page images directly, batched to fit the gateway body cap and merged.
+    // The local provider has no vision, so it always takes the markdown path.
+    result = useVision
+      ? await extractFromImagesBatched(provider, ctx.images!, baseExtractOpts)
+      : await provider.extract(ctx.markdown, baseExtractOpts);
   } catch (err) {
     const rejection: AttemptRejection =
       err instanceof ExtractionResponseError ? 'malformed' : 'http';
@@ -305,6 +382,7 @@ const attemptExtraction = async (
     periodEnd,
     openingBalanceCents: openingCents,
     closingBalanceCents: closingCents,
+    pageClassifications: result.classifications ?? null,
     repairApplied: null,
   } as const;
 
@@ -348,7 +426,12 @@ const attemptExtraction = async (
   // Same-provider LLM repair pass (ADR-010, Phase 16 #6). When the
   // discrepancy is upstream of the provider switch, this repair has a
   // better chance to converge than a second cold extraction.
-  if (reconciled.status === 'discrepancy') {
+  // The repair pass re-reads the markdown with a "your sum is off" hint. It
+  // only applies to the text path — the vision path has no markdown to
+  // re-read (ctx.markdown is ''), and an image re-extract repair is a
+  // separate follow-on. A vision discrepancy falls through to the
+  // discrepancy outcome and surfaces in review.
+  if (reconciled.status === 'discrepancy' && ctx.markdown.length > 0) {
     const suspects = findSuspectRows(
       openingCents,
       effectiveTxs.map((t) => ({
@@ -496,6 +579,7 @@ const attemptExtraction = async (
     periodEnd,
     openingBalanceCents: openingCents,
     closingBalanceCents: closingCents,
+    pageClassifications: result.classifications ?? null,
   };
 };
 
@@ -630,8 +714,10 @@ type ExtractionPhase =
   | 'preprocessing'
   | 'text-markdown'
   | 'ocr-markdown'
+  | 'ocr-images'
   | 'extracting'
   | 'ocr-fallback-markdown'
+  | 'ocr-fallback-images'
   | 'text-fallback-markdown'
   | 'reconciling'
   | 'persisting'
@@ -832,38 +918,37 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
       return scoped.map((p) => `# Page ${p.index + 1}\n\n${p.text}`).join('\n\n');
     };
 
-    const produceOcrMarkdown = async (): Promise<string> => {
-      // OCR path. rasterizePdf shells out to pdftoppm (poppler-utils).
-      // The standalone Dockerfile installs poppler; on host machines the
-      // operator needs `brew install poppler` (or apt/choco equivalent).
-      const rasters = await rasterizePdf(data.sourcePdfPath, { dpi: 300 });
-      const scopedRasters = rasters.filter((r) => inRange(r.index));
-      const images = await Promise.all(scopedRasters.map(async (r) => readFile(r.pngPath)));
-      // DB-backed config (URL/key/model) falls back to VIBE_SHIELD_* env.
-      // Resolved per call so an admin tweak via /admin/engines doesn't
-      // require a restart. The page images go to Shield→Claude; Shield
-      // masks PII (token-overlay) before Claude sees them, so the markdown
-      // comes back tokenized and is materialized at export.
-      const ocrConfig = await getEngineConfig(db, 'vibe-shield');
-      const ocr = await ocrPdfPages(images, {
-        cache: redisOcrCache,
-        ...(ocrConfig.url ? { baseUrl: ocrConfig.url } : {}),
-        ...(ocrConfig.timeoutMs ? { timeoutMs: ocrConfig.timeoutMs } : {}),
-        ...(ocrConfig.concurrency ? { concurrency: ocrConfig.concurrency } : {}),
-        ...(ocrConfig.healthPath ? { healthPath: ocrConfig.healthPath } : {}),
-        ...(ocrConfig.model ? { model: ocrConfig.model } : {}),
-        ...(ocrConfig.prompt ? { prompt: ocrConfig.prompt } : {}),
-        ...(ocrConfig.apiKey ? { apiKey: ocrConfig.apiKey } : {}),
-        ...(shieldSessionId ? { sessionId: shieldSessionId } : {}),
+    // v1.x — vision extraction. For scanned/image statements we rasterize the
+    // pages and send the IMAGES straight to Claude (through Shield, which
+    // identity-zone-redacts them first), replacing the old OCR→markdown→
+    // extract-from-text step. rasterizePdf shells out to pdftoppm
+    // (poppler-utils): the standalone Dockerfile installs it; on host
+    // machines the operator needs `brew install poppler` (or apt/choco).
+    // Rasterize to JPEG at a modest DPI (not 300-dpi PNG): page images go
+    // into the JSON body of a Shield /v1/messages call, which is bounded by
+    // the gateway's MAX_REQUEST_BYTES — base64 PNG pages blow past it. JPEG
+    // at ~150 dpi keeps statement text legible while staying small enough to
+    // batch. DPI/quality are operator-tunable for hard-to-read scans.
+    const produceOcrImages = async (): Promise<VisionImage[]> => {
+      const rasters = await rasterizePdf(data.sourcePdfPath, {
+        dpi: Number(process.env.VIBE_SHIELD_RASTER_DPI ?? 150),
+        format: 'jpeg',
+        jpegQuality: Number(process.env.VIBE_SHIELD_RASTER_JPEG_QUALITY ?? 80),
       });
-      lastOcrResponse = ocr;
-      return ocr.pages
-        .map((p, i) => `# Page ${(scopedRasters[i]?.index ?? p.index) + 1}\n\n${p.markdown}`)
-        .join('\n\n');
+      const scopedRasters = rasters.filter((r) => inRange(r.index));
+      return Promise.all(
+        scopedRasters.map(async (r) => ({ data: await readFile(r.path), mediaType: r.mediaType })),
+      );
     };
 
-    currentPhase = method === 'text' ? 'text-markdown' : 'ocr-markdown';
-    markdown = method === 'text' ? await produceTextMarkdown() : await produceOcrMarkdown();
+    currentPhase = method === 'text' ? 'text-markdown' : 'ocr-images';
+    let ocrImages: VisionImage[] | undefined;
+    if (method === 'text') {
+      markdown = await produceTextMarkdown();
+    } else {
+      ocrImages = await produceOcrImages();
+      markdown = ''; // the images carry the statement content
+    }
     timing.markdownMs = Date.now() - phaseStart;
 
     await checkCancelled(stmtId);
@@ -880,6 +965,7 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
       markdown,
       ...(dateFormatOverride ? { dateFormatOverride } : {}),
       ...(shieldSessionId ? { sessionId: shieldSessionId } : {}),
+      ...(ocrImages ? { images: ocrImages } : {}),
     };
 
     const persistAmbiguousHalt = async (a: AttemptOutcome): Promise<void> => {
@@ -998,11 +1084,13 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
         'text-layer extraction rejected — retrying with OCR (Vibe Shield)',
       );
       await setStatus(stmtId, 'ocr', { extractionMethod: 'hybrid' });
-      currentPhase = 'ocr-fallback-markdown';
+      currentPhase = 'ocr-fallback-images';
       const ocrMarkdownStart = Date.now();
-      markdown = await produceOcrMarkdown();
+      // Vision fallback: rasterize and send images (through Shield) instead of
+      // OCR'd markdown — same path as the primary scanned route.
+      const fallbackImages = await produceOcrImages();
       timing.ocrFallbackMarkdownMs = Date.now() - ocrMarkdownStart;
-      attemptCtx = { ...attemptCtx, markdown };
+      attemptCtx = { ...attemptCtx, markdown: '', images: fallbackImages };
       currentPhase = 'extracting';
       await setStatus(stmtId, 'extracting');
       const ocrLlmStart = Date.now();
@@ -1054,7 +1142,8 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
       const textMarkdownStart = Date.now();
       markdown = await produceTextMarkdown();
       timing.ocrFallbackMarkdownMs = Date.now() - textMarkdownStart;
-      attemptCtx = { ...attemptCtx, markdown };
+      // Falling back to the text layer: use markdown, NOT the OCR images.
+      attemptCtx = { ...attemptCtx, markdown, images: undefined };
       currentPhase = 'extracting';
       const textLlmStart = Date.now();
       const textChosen = await runProviderFallback(attemptCtx, 'text-layer');
@@ -1166,6 +1255,21 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
     await checkCancelled(stmtId);
     currentPhase = 'persisting';
 
+    // Review hold (Shield vision path). A page classified 'unknown' got
+    // fail-closed maximal redaction, so real data may have been clipped —
+    // flag it so the operator verifies before export. 'unclassified' (a
+    // batch returned no header) is NOT a hold — only an explicit 'unknown'.
+    const pageClassifications = chosen.pageClassifications;
+    const unknownPages = (pageClassifications ?? []).reduce<number[]>((acc, c, i) => {
+      if (c === 'unknown') acc.push(i + 1);
+      return acc;
+    }, []);
+    const reviewHoldReason =
+      unknownPages.length > 0
+        ? `Vibe Shield could not classify page(s) ${unknownPages.join(', ')} and applied ` +
+          `maximal redaction — verify no transaction data was clipped before exporting.`
+        : null;
+
     await db.transaction(async (tx) => {
       for (let i = 0; i < effectiveTxs.length; i += 1) {
         const txn = effectiveTxs[i]!;
@@ -1195,6 +1299,7 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
             amountCents: txn.amountCents,
             runningBalanceCents: txn.runningBalanceCents,
             checkNumber: txn.checkNumber,
+            payee: txn.payee,
             trntype,
             fitid,
             sourcePage: txn.sourcePage,
@@ -1210,6 +1315,10 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
           reconciliationStatus: reconciled.status === 'verified' ? 'verified' : 'discrepancy',
           periodBoundsViolations: reconciled.periodBoundsViolations,
           status: 'review',
+          // Reset on every (re-)extraction so a fresh classification governs.
+          pageClassifications: pageClassifications ?? null,
+          reviewHoldReason,
+          reviewHoldAcknowledged: false,
           updatedAt: sql`now()`,
         })
         .where(
@@ -1238,6 +1347,8 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
         llmEmittedTxCount: chosen.llmEmittedTxCount,
         policy,
         strategy,
+        ...(pageClassifications ? { pageClassifications } : {}),
+        ...(unknownPages.length > 0 ? { reviewHold: { unknownPages } } : {}),
         ...(repairApplied ? { repairApplied } : {}),
         // Full processing trace — operator reads this when a successful
         // extraction looks suspect (cost surprise, slow run, fallback

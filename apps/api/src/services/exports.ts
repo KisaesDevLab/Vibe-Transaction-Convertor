@@ -216,7 +216,11 @@ const buildOfxStmt = (stmt: Statement, account: Account, txs: Transaction[]): Bu
         typeof t.cleansedDescription === 'string' &&
         t.cleansedDescription.length > 0 &&
         t.cleansedDescription !== t.description;
-      const name = useCleansed ? t.cleansedDescription! : t.description;
+      // A check payee (read from the cancelled-check image) is the most
+      // accurate <NAME> for a check row — prefer it over the cleansed/raw
+      // description; the raw bank string still goes to <MEMO> for audit.
+      const usePayee = typeof t.payee === 'string' && t.payee.length > 0;
+      const name = usePayee ? t.payee! : useCleansed ? t.cleansedDescription! : t.description;
       const out: Stmt['transactions'][number] = {
         trntype: t.trntype,
         postedDate: t.postedDate,
@@ -226,7 +230,7 @@ const buildOfxStmt = (stmt: Statement, account: Account, txs: Transaction[]): Bu
       };
       if (t.checkNumber) {
         out.checkNumber = t.checkNumber;
-      } else if (useCleansed) {
+      } else if (usePayee || useCleansed) {
         out.memo = t.description;
       }
       return out;
@@ -238,6 +242,18 @@ const buildOfxStmt = (stmt: Statement, account: Account, txs: Transaction[]): Bu
     currency: 'USD',
   };
   return { stmt: ofxStmt, bankIdSource };
+};
+
+// Vibe Shield review hold: a page classified 'unknown' got fail-closed
+// maximal redaction, so data may have been clipped. Export is blocked until
+// the operator acknowledges (mirrors the reconciliation override, but a
+// separate gate — acknowledging the hold is not the same as overriding a
+// discrepancy). There is no allowOverride bypass: the operator must
+// explicitly acknowledge via the statements route.
+const assertNotHeldForReview = (stmt: Statement): void => {
+  if (stmt.reviewHoldReason && !stmt.reviewHoldAcknowledged) {
+    throw new ConflictError(`export blocked by review hold — ${stmt.reviewHoldReason}`);
+  }
 };
 
 export interface RenderedExport {
@@ -259,6 +275,7 @@ export const renderExport = async (
   if (stmt.reconciliationStatus === 'discrepancy' && !opts.allowOverride) {
     throw new ConflictError('reconciliation discrepancy — export requires override');
   }
+  assertNotHeldForReview(stmt);
 
   const baseName = buildExportBaseName(account, stmt);
 
@@ -354,6 +371,7 @@ export const renderExportSlices = async (
   if (stmt.reconciliationStatus === 'discrepancy' && !opts.allowOverride) {
     throw new ConflictError('reconciliation discrepancy — export requires override');
   }
+  assertNotHeldForReview(stmt);
   if (txs.length <= QBO_SPLIT_THRESHOLD) {
     return [await renderExport(db, statementId, format, opts)];
   }

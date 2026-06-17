@@ -291,6 +291,16 @@ export const statements = vibetc.table(
     errorMessage: text('error_message'),
     detectedSplits: jsonb('detected_splits'),
     multiAccountAcknowledged: boolean('multi_account_acknowledged').notNull().default(false),
+    // Vibe Shield vision path: per-page document type from the
+    // `vs-page-classifications` header (bank_statement | credit_card |
+    // check | deposit | transmittal | unknown | unclassified), in page
+    // order. NULL for the text/markdown path or pre-v1.13.0 gateways.
+    pageClassifications: jsonb('page_classifications'),
+    // Set when a page classified 'unknown' (Shield applied fail-closed
+    // maximal redaction, so real data may have been clipped). Blocks export
+    // until the operator acknowledges — mirrors multiAccountAcknowledged.
+    reviewHoldReason: text('review_hold_reason'),
+    reviewHoldAcknowledged: boolean('review_hold_acknowledged').notNull().default(false),
     // Phase 14 #6/#7: when a PDF was split per detected account, this
     // captures the page range for this slice. NULL means "the whole PDF".
     pageRange: int4range('page_range'),
@@ -349,6 +359,10 @@ export const transactions = vibetc.table(
     amountCents: bigint('amount_cents', { mode: 'bigint' }).notNull(),
     runningBalanceCents: bigint('running_balance_cents', { mode: 'bigint' }),
     checkNumber: text('check_number'),
+    // Who a check is made out to ("Pay to the order of"), read from the
+    // cancelled-check image during vision extraction. Preferred over
+    // cleansedDescription for the OFX <NAME> field on check rows.
+    payee: text('payee'),
     trntype: trntype('trntype').notNull(),
     fitid: text('fitid').notNull(),
     sourcePage: integer('source_page').notNull(),

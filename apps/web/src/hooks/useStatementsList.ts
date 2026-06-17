@@ -28,6 +28,14 @@ export interface StatementSummary {
     splits: Array<{ last4: string; pageStart: number; pageEnd: number }>;
   } | null;
   multiAccountAcknowledged: boolean;
+  // Vibe Shield vision path: per-page document type (bank_statement |
+  // credit_card | check | deposit | transmittal | unknown | unclassified)
+  // in page order. NULL for the text/markdown path or pre-v1.13.0 gateways.
+  pageClassifications: string[] | null;
+  // Set when a page classified 'unknown' (maximal redaction — data may have
+  // been clipped). Export is blocked until reviewHoldAcknowledged is true.
+  reviewHoldReason: string | null;
+  reviewHoldAcknowledged: boolean;
   // Per-statement override of the firm-wide PDF processing strategy.
   // NULL means "use the firm default" at extraction time. Surfaced so
   // the Re-extract dialog can pre-fill the strategy picker.
@@ -329,6 +337,15 @@ export const useAcknowledgeMultiAccount = (statementId: string) => {
   return useMutation({
     mutationFn: () =>
       api.post<{ ok: boolean }>(`/api/statements/${statementId}/acknowledge-multi-account`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['statement', statementId] }),
+  });
+};
+
+export const useAcknowledgeReviewHold = (statementId: string) => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () =>
+      api.post<{ ok: boolean }>(`/api/statements/${statementId}/acknowledge-review-hold`),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['statement', statementId] }),
   });
 };

@@ -5,7 +5,28 @@ import {
   LocalGatewayProvider,
   computeAnthropicCostMicros,
   parseExtractionResponse,
+  parsePageClassifications,
 } from './llm-client.js';
+
+describe('parsePageClassifications', () => {
+  it('parses a JSON string array', () => {
+    expect(parsePageClassifications('["bank_statement","check","unknown"]')).toEqual([
+      'bank_statement',
+      'check',
+      'unknown',
+    ]);
+  });
+  it('treats missing / empty as no classification', () => {
+    expect(parsePageClassifications(null)).toBeUndefined();
+    expect(parsePageClassifications(undefined)).toBeUndefined();
+    expect(parsePageClassifications('')).toBeUndefined();
+  });
+  it('rejects malformed or non-string-array values', () => {
+    expect(parsePageClassifications('not json')).toBeUndefined();
+    expect(parsePageClassifications('{"a":1}')).toBeUndefined();
+    expect(parsePageClassifications('[1,2,3]')).toBeUndefined();
+  });
+});
 
 const SAMPLE = {
   account: { masked_number: '1234', type_hint: 'CHECKING' },
@@ -250,6 +271,42 @@ describe('AnthropicProvider', () => {
     });
     await provider.extract('# md');
     expect(sentMaxTokens).toBe(64_000);
+  });
+
+  it('surfaces the vs-page-classifications header on the vision path', async () => {
+    const provider = new AnthropicProvider({
+      apiKey: 'vs_live_k',
+      baseUrl: 'http://vibe-shield-gateway:8080',
+      fetcher: async () =>
+        ({
+          ok: true,
+          headers: {
+            get: (k: string) =>
+              k === 'vs-page-classifications' ? '["bank_statement","check"]' : null,
+          },
+          json: async () => ({
+            content: [{ type: 'tool_use', name: 'emit_extraction', input: SAMPLE }],
+            usage: { input_tokens: 10, output_tokens: 10 },
+          }),
+        }) as unknown as Response,
+    });
+    const r = await provider.extract('', {
+      images: [{ data: Buffer.from('img'), mediaType: 'image/jpeg' }],
+    });
+    expect(r.classifications).toEqual(['bank_statement', 'check']);
+  });
+
+  it('leaves classifications undefined when no header is present', async () => {
+    const provider = new AnthropicProvider({
+      apiKey: 'k',
+      fetcher: async () =>
+        okJsonResponse({
+          content: [{ type: 'tool_use', name: 'emit_extraction', input: SAMPLE }],
+          usage: { input_tokens: 10, output_tokens: 10 },
+        }),
+    });
+    const r = await provider.extract('# md');
+    expect(r.classifications).toBeUndefined();
   });
 
   it('wraps missing-tool_use as ExtractionResponseError so the audit log captures the raw body', async () => {
