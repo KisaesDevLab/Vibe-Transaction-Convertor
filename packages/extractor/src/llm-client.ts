@@ -776,26 +776,31 @@ export class AnthropicProvider implements LlmProvider {
   // tracks Anthropic's catalog instead of being hardcoded.
   async listModels(): Promise<{ ok: boolean; models: string[]; detail?: string }> {
     if (!this.apiKey) return { ok: false, models: [], detail: 'API key not set' };
-    if (this.viaGateway) {
-      // The Shield gateway doesn't expose /v1/models; the model picker
-      // falls back to the curated list. Skip the doomed call.
-      return { ok: false, models: [], detail: 'live catalog unavailable via gateway' };
-    }
     const ctl = new AbortController();
     const timer = setTimeout(() => ctl.abort(), 5_000);
     try {
+      // Both the direct Anthropic API and the Vibe Shield gateway (v1.13.3+)
+      // serve GET /v1/models. messageHeaders() picks Bearer (gateway) vs
+      // x-api-key + anthropic-version (direct). Shield additionally returns
+      // `allowed_models` (the active policy's allow-list); when present we
+      // intersect so the picker only offers models the gateway will accept
+      // (an empty allow-list = no restriction → the full catalog).
       const res = await this.fetcher(`${this.baseUrl}/v1/models`, {
-        headers: {
-          'x-api-key': this.apiKey,
-          'anthropic-version': '2023-06-01',
-        },
+        headers: this.messageHeaders(),
         signal: ctl.signal,
       });
       if (!res.ok) {
-        return { ok: false, models: [], detail: `Anthropic /v1/models HTTP ${res.status}` };
+        return { ok: false, models: [], detail: `/v1/models HTTP ${res.status}` };
       }
-      const body = (await res.json()) as { data?: Array<{ id?: string }> };
-      const models = (body.data ?? []).map((m) => m.id ?? '').filter((id) => id.length > 0);
+      const body = (await res.json()) as {
+        data?: Array<{ id?: string }>;
+        allowed_models?: string[];
+      };
+      let models = (body.data ?? []).map((m) => m.id ?? '').filter((id) => id.length > 0);
+      if (Array.isArray(body.allowed_models) && body.allowed_models.length > 0) {
+        const allowed = new Set(body.allowed_models);
+        models = models.filter((m) => allowed.has(m));
+      }
       return { ok: true, models };
     } catch (err) {
       return { ok: false, models: [], detail: (err as Error).message };
@@ -1043,6 +1048,10 @@ export class AnthropicProvider implements LlmProvider {
     const ctl = new AbortController();
     const t = setTimeout(() => ctl.abort(), this.timeoutMs);
     const start = Date.now();
+    const sentMaxTokens = this.effectiveMaxTokens(opts.maxOutputTokens ?? this.maxTokens);
+    const messages: Array<{ role: 'user'; content: unknown }> = [
+      { role: 'user', content: userContent },
+    ];
     try {
       const res = await this.fetcher(`${this.baseUrl}/v1/messages`, {
         method: 'POST',
@@ -1050,10 +1059,10 @@ export class AnthropicProvider implements LlmProvider {
         body: JSON.stringify({
           model: this.model,
           system: opts.systemPrompt,
-          max_tokens: this.effectiveMaxTokens(opts.maxOutputTokens ?? this.maxTokens),
+          max_tokens: sentMaxTokens,
           tools: [tool],
           tool_choice: { type: 'tool', name: toolName },
-          messages: [{ role: 'user', content: userContent }],
+          messages,
           ...this.shieldFields({ sessionId: opts.sessionId, policyName: opts.policyName }),
         }),
         signal: ctl.signal,
@@ -1061,9 +1070,16 @@ export class AnthropicProvider implements LlmProvider {
       if (!res.ok) {
         // Surface the gateway/API error body — a bare status hides the
         // reason (e.g. Shield's {"error":{"type","message"}} for a wrong
-        // policy, ZDR-off, model-not-allowed, or bad session_id).
+        // policy, ZDR-off, model-not-allowed, or bad session_id). Shield
+        // masks the upstream Anthropic reason, so attach our request shape
+        // (counts/sizes only) — this is the enrichment/check-resolve path,
+        // so a 400 here now shows model + max_tokens just like extraction.
         const detail = await res.text().catch(() => '');
-        throw new Error(`anthropic HTTP ${res.status}${detail ? `: ${detail.slice(0, 500)}` : ''}`);
+        throw new Error(
+          `anthropic HTTP ${res.status} [${describeAnthropicRequest(messages, this.model, sentMaxTokens, this.viaGateway)}]${
+            detail ? `: ${detail.slice(0, 500)}` : ''
+          }`,
+        );
       }
       const body = (await res.json()) as {
         content?: Array<
@@ -1073,11 +1089,7 @@ export class AnthropicProvider implements LlmProvider {
         usage?: { input_tokens?: number; output_tokens?: number };
       };
       if (body.stop_reason === 'max_tokens') {
-        throw new Error(
-          `anthropic complete: output truncated at max_tokens (${this.effectiveMaxTokens(
-            opts.maxOutputTokens ?? this.maxTokens,
-          )})`,
-        );
+        throw new Error(`anthropic complete: output truncated at max_tokens (${sentMaxTokens})`);
       }
       const toolUse = body.content?.find(
         (c): c is { type: 'tool_use'; name: string; input: unknown } => c.type === 'tool_use',
