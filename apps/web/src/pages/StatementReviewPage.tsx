@@ -12,6 +12,7 @@ import { PdfViewer } from '../components/PdfViewer';
 import { useToast } from '../components/Toast';
 import {
   useAcknowledgeMultiAccount,
+  useAcknowledgeReviewHold,
   useAddTransaction,
   useConfirmDateFormat,
   useDeleteStatement,
@@ -74,6 +75,7 @@ export function StatementReviewPage() {
   const recompute = useRecomputeReconciliation(statementId);
   const confirmFormat = useConfirmDateFormat(statementId);
   const ackMultiAccount = useAcknowledgeMultiAccount(statementId);
+  const ackReviewHold = useAcknowledgeReviewHold(statementId);
   const splitStmt = useSplitStatement(statementId);
   const enrich = useEnrichStatement(statementId);
   const resolveChecks = useResolveCheckPayees(statementId);
@@ -116,7 +118,10 @@ export function StatementReviewPage() {
   const txs = stmt.data.transactions;
   const exportable =
     s.reconciliationStatus === 'verified' || s.reconciliationStatus === 'overridden';
-  const exportBlocked = !exportable || s.status === 'awaiting-locale-confirmation';
+  // A Shield 'unknown'-page review hold blocks export until acknowledged —
+  // the server enforces this too (exports.ts assertNotHeldForReview).
+  const heldForReview = !!s.reviewHoldReason && !s.reviewHoldAcknowledged;
+  const exportBlocked = !exportable || s.status === 'awaiting-locale-confirmation' || heldForReview;
 
   const onExport = async (format: string): Promise<void> => {
     try {
@@ -285,6 +290,42 @@ export function StatementReviewPage() {
       {s.errorMessage ? (
         <div className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-900">
           <strong>Extraction failed.</strong> {s.errorMessage}
+        </div>
+      ) : null}
+
+      {s.reviewHoldReason && !s.reviewHoldAcknowledged ? (
+        <div className="rounded-md border border-amber-300 bg-amber-50 p-4 text-sm text-amber-900">
+          <h2 className="text-base font-semibold">
+            Review hold — page redaction may have clipped data
+          </h2>
+          <p className="mt-1">{s.reviewHoldReason}</p>
+          {s.pageClassifications && s.pageClassifications.length > 0 ? (
+            <p className="mt-2 text-xs text-amber-800">
+              Page types Vibe Shield detected:{' '}
+              {s.pageClassifications.map((c, i) => `p${i + 1}:${c}`).join(', ')}
+            </p>
+          ) : null}
+          <p className="mt-2 text-xs text-amber-800">
+            Export is blocked until you confirm the flagged page(s) didn&apos;t lose any transaction
+            data.
+          </p>
+          <div className="mt-3">
+            <button
+              type="button"
+              onClick={async () => {
+                try {
+                  await ackReviewHold.mutateAsync();
+                  toast.success('Review hold acknowledged — export unblocked');
+                } catch (err) {
+                  toast.error(err instanceof ApiError ? err.message : 'failed');
+                }
+              }}
+              disabled={ackReviewHold.isPending}
+              className="rounded-md bg-amber-700 px-3 py-1.5 text-xs font-medium text-white hover:bg-amber-800 disabled:opacity-50"
+            >
+              I verified the flagged page(s) — acknowledge &amp; unblock export
+            </button>
+          </div>
         </div>
       ) : null}
 

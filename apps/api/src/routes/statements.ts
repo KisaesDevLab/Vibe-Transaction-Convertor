@@ -678,6 +678,37 @@ export const statementsRouter = (): Router => {
     }
   });
 
+  // Acknowledge a Shield 'unknown'-page review hold: the operator confirms
+  // they've checked the maximally-redacted page(s) didn't lose real data,
+  // which unblocks export. Mirrors acknowledge-multi-account.
+  router.post('/:id/acknowledge-review-hold', async (req, res, next) => {
+    try {
+      const id = String(req.params.id);
+      const rows = await db.select().from(statements).where(eq(statements.id, id));
+      const stmt = rows[0];
+      if (!stmt) throw new NotFoundError(`statement ${id}`);
+      if (!stmt.reviewHoldReason) {
+        // Nothing to acknowledge — idempotent success.
+        res.json({ ok: true });
+        return;
+      }
+      await db
+        .update(statements)
+        .set({ reviewHoldAcknowledged: true, updatedAt: sql`now()` })
+        .where(eq(statements.id, id));
+      await writeAudit(db, {
+        actorUserId: req.user!.id,
+        entityType: 'statement',
+        entityId: id,
+        action: 'statement.acknowledge-review-hold',
+        payload: { reason: stmt.reviewHoldReason },
+      });
+      res.json({ ok: true });
+    } catch (err) {
+      next(err);
+    }
+  });
+
   // Confirm an ambiguous source date format. Marks the statement with
   // the user's choice and re-enqueues extraction so the LLM uses the
   // hint. Phase 18 item 6a/6b.

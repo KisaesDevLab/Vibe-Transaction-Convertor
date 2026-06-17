@@ -244,6 +244,18 @@ const buildOfxStmt = (stmt: Statement, account: Account, txs: Transaction[]): Bu
   return { stmt: ofxStmt, bankIdSource };
 };
 
+// Vibe Shield review hold: a page classified 'unknown' got fail-closed
+// maximal redaction, so data may have been clipped. Export is blocked until
+// the operator acknowledges (mirrors the reconciliation override, but a
+// separate gate — acknowledging the hold is not the same as overriding a
+// discrepancy). There is no allowOverride bypass: the operator must
+// explicitly acknowledge via the statements route.
+const assertNotHeldForReview = (stmt: Statement): void => {
+  if (stmt.reviewHoldReason && !stmt.reviewHoldAcknowledged) {
+    throw new ConflictError(`export blocked by review hold — ${stmt.reviewHoldReason}`);
+  }
+};
+
 export interface RenderedExport {
   format: ExportFormat;
   contentType: string;
@@ -263,6 +275,7 @@ export const renderExport = async (
   if (stmt.reconciliationStatus === 'discrepancy' && !opts.allowOverride) {
     throw new ConflictError('reconciliation discrepancy — export requires override');
   }
+  assertNotHeldForReview(stmt);
 
   const baseName = buildExportBaseName(account, stmt);
 
@@ -358,6 +371,7 @@ export const renderExportSlices = async (
   if (stmt.reconciliationStatus === 'discrepancy' && !opts.allowOverride) {
     throw new ConflictError('reconciliation discrepancy — export requires override');
   }
+  assertNotHeldForReview(stmt);
   if (txs.length <= QBO_SPLIT_THRESHOLD) {
     return [await renderExport(db, statementId, format, opts)];
   }

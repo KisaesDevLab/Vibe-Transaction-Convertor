@@ -207,7 +207,32 @@ export interface ExtractResult {
   data: ExtractionResult;
   telemetry: ExtractCallTelemetry;
   rawJson: string;
+  // Vibe Shield `vs-page-classifications` — one document-type per image
+  // block (page) in the request, in page order (e.g. ['bank_statement',
+  // 'check']). Present only on the vision path through Shield ≥ v1.13.0;
+  // undefined for the markdown path, direct Anthropic, or when the header
+  // is absent (Shield treats a missing header as "no classification", not
+  // an error). A 'unknown' entry means Shield applied fail-closed maximal
+  // redaction to that page — the worker holds those for review.
+  classifications?: string[] | undefined;
 }
+
+// Parse the `vs-page-classifications` response header. Shield sends it as a
+// JSON string array; anything else (missing, malformed, non-string items)
+// is treated as "no classification available" rather than an error, so the
+// vision path degrades gracefully on older gateways.
+export const parsePageClassifications = (raw: string | null | undefined): string[] | undefined => {
+  if (!raw) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (Array.isArray(parsed) && parsed.every((x) => typeof x === 'string')) {
+      return parsed as string[];
+    }
+  } catch {
+    /* fall through */
+  }
+  return undefined;
+};
 
 export interface ExtractOptions extends UserPromptOptions {
   schema?: object;
@@ -755,6 +780,7 @@ export class AnthropicProvider implements LlmProvider {
     inputTokens: number;
     outputTokens: number;
     ms: number;
+    classifications: string[] | undefined;
   }> {
     const ctl = new AbortController();
     const t = setTimeout(() => ctl.abort(), this.timeoutMs);
@@ -832,6 +858,12 @@ export class AnthropicProvider implements LlmProvider {
         inputTokens: body.usage?.input_tokens ?? 0,
         outputTokens: body.usage?.output_tokens ?? 0,
         ms: Date.now() - start,
+        // Shield's per-page document-type header (vision path only). Headers
+        // is a standard fetch Headers object in production; guard for test
+        // doubles that return a bare { ok, json } response.
+        classifications: parsePageClassifications(
+          res.headers?.get?.('vs-page-classifications') ?? null,
+        ),
       };
     } catch (err) {
       throw asTimeoutError(err, `anthropic POST ${this.baseUrl}/v1/messages`, this.timeoutMs);
@@ -909,6 +941,7 @@ export class AnthropicProvider implements LlmProvider {
               this.priceTable,
             ),
           },
+          ...(call.classifications ? { classifications: call.classifications } : {}),
         };
       } catch (err) {
         if (

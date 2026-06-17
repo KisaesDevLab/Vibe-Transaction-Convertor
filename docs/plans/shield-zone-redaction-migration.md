@@ -193,8 +193,17 @@ statement in one call. Built (`packages/extractor/src/image-batch.ts`,
    `image_masker: 'identity-zones'` (`vibe-app.yaml` / appliance manifest).
 2. `MAX_REQUEST_BYTES` raised on the Shield gateway (~10–20 MB) to fit the
    image batch.
-3. (When available) Shield returns `vs-page-classifications` → wire the
-   low-confidence/clipped-page review hold.
+3. ~~(When available) Shield returns `vs-page-classifications` → wire the
+   low-confidence/clipped-page review hold.~~ ✅ **BUILT** (Shield shipped the
+   header). `parsePageClassifications` (llm-client) → threaded through
+   `extractFromImagesBatched` (concatenated to global page order) →
+   persisted to `statements.page_classifications`. A page typed `'unknown'`
+   sets `review_hold_reason` and blocks export (`assertNotHeldForReview` in
+   exports.ts) until the operator acknowledges via
+   `POST /statements/:id/acknowledge-review-hold` (amber banner on the
+   review page). Migration `0014_review_hold_classifications`. A numeric
+   confidence threshold can layer on when Shield adds confidence (the
+   header stays `string[]`, so parsing is forward-compatible).
 
 ```
 

@@ -177,6 +177,9 @@ interface AttemptOutcome {
   periodEnd: string | null;
   openingBalanceCents: bigint | null;
   closingBalanceCents: bigint | null;
+  // Shield per-page document types (vision path), in global page order.
+  // null when not the vision path or no classification header was returned.
+  pageClassifications: string[] | null;
 }
 
 interface AttemptContext {
@@ -247,6 +250,11 @@ const extractFromImagesBatched = async (
   const batches = batchPageImages(images);
   const parts: Array<{ data: schemas.extraction.ExtractionResult; startPage: number }> = [];
   const rawParts: string[] = [];
+  // Shield returns one document-type per image block; concatenating the
+  // batches in page order yields the per-page classification for the whole
+  // statement (global page order). undefined when no batch reported any.
+  const classifications: string[] = [];
+  let anyClassification = false;
   let inputTokens = 0;
   let outputTokens = 0;
   let costMicros = 0n;
@@ -256,6 +264,14 @@ const extractFromImagesBatched = async (
     const r = await provider.extract('', { ...(baseOpts ?? {}), images: batch.images });
     parts.push({ data: r.data, startPage: batch.startPage });
     rawParts.push(r.rawJson);
+    if (r.classifications) {
+      anyClassification = true;
+      classifications.push(...r.classifications);
+    } else {
+      // Keep the array aligned with global page numbers even when one batch
+      // had no header: pad with the count of pages it covered.
+      classifications.push(...batch.images.map(() => 'unclassified'));
+    }
     inputTokens += r.telemetry.inputTokens ?? 0;
     outputTokens += r.telemetry.outputTokens ?? 0;
     costMicros += r.telemetry.costMicros;
@@ -267,6 +283,7 @@ const extractFromImagesBatched = async (
     data,
     rawJson: JSON.stringify({ batchCount: batches.length, batches: rawParts }).slice(0, 20_000),
     telemetry: { inputTokens, outputTokens, ms, model, costMicros },
+    ...(anyClassification ? { classifications } : {}),
   };
 };
 
@@ -295,6 +312,7 @@ const attemptExtraction = async (
     periodEnd: null,
     openingBalanceCents: null,
     closingBalanceCents: null,
+    pageClassifications: null,
   };
 
   let provider;
@@ -364,6 +382,7 @@ const attemptExtraction = async (
     periodEnd,
     openingBalanceCents: openingCents,
     closingBalanceCents: closingCents,
+    pageClassifications: result.classifications ?? null,
     repairApplied: null,
   } as const;
 
@@ -560,6 +579,7 @@ const attemptExtraction = async (
     periodEnd,
     openingBalanceCents: openingCents,
     closingBalanceCents: closingCents,
+    pageClassifications: result.classifications ?? null,
   };
 };
 
@@ -1235,6 +1255,21 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
     await checkCancelled(stmtId);
     currentPhase = 'persisting';
 
+    // Review hold (Shield vision path). A page classified 'unknown' got
+    // fail-closed maximal redaction, so real data may have been clipped —
+    // flag it so the operator verifies before export. 'unclassified' (a
+    // batch returned no header) is NOT a hold — only an explicit 'unknown'.
+    const pageClassifications = chosen.pageClassifications;
+    const unknownPages = (pageClassifications ?? []).reduce<number[]>((acc, c, i) => {
+      if (c === 'unknown') acc.push(i + 1);
+      return acc;
+    }, []);
+    const reviewHoldReason =
+      unknownPages.length > 0
+        ? `Vibe Shield could not classify page(s) ${unknownPages.join(', ')} and applied ` +
+          `maximal redaction — verify no transaction data was clipped before exporting.`
+        : null;
+
     await db.transaction(async (tx) => {
       for (let i = 0; i < effectiveTxs.length; i += 1) {
         const txn = effectiveTxs[i]!;
@@ -1280,6 +1315,10 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
           reconciliationStatus: reconciled.status === 'verified' ? 'verified' : 'discrepancy',
           periodBoundsViolations: reconciled.periodBoundsViolations,
           status: 'review',
+          // Reset on every (re-)extraction so a fresh classification governs.
+          pageClassifications: pageClassifications ?? null,
+          reviewHoldReason,
+          reviewHoldAcknowledged: false,
           updatedAt: sql`now()`,
         })
         .where(
@@ -1308,6 +1347,8 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
         llmEmittedTxCount: chosen.llmEmittedTxCount,
         policy,
         strategy,
+        ...(pageClassifications ? { pageClassifications } : {}),
+        ...(unknownPages.length > 0 ? { reviewHold: { unknownPages } } : {}),
         ...(repairApplied ? { repairApplied } : {}),
         // Full processing trace — operator reads this when a successful
         // extraction looks suspect (cost surprise, slow run, fallback
