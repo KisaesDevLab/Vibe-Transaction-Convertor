@@ -1048,6 +1048,10 @@ export class AnthropicProvider implements LlmProvider {
     const ctl = new AbortController();
     const t = setTimeout(() => ctl.abort(), this.timeoutMs);
     const start = Date.now();
+    const sentMaxTokens = this.effectiveMaxTokens(opts.maxOutputTokens ?? this.maxTokens);
+    const messages: Array<{ role: 'user'; content: unknown }> = [
+      { role: 'user', content: userContent },
+    ];
     try {
       const res = await this.fetcher(`${this.baseUrl}/v1/messages`, {
         method: 'POST',
@@ -1055,10 +1059,10 @@ export class AnthropicProvider implements LlmProvider {
         body: JSON.stringify({
           model: this.model,
           system: opts.systemPrompt,
-          max_tokens: this.effectiveMaxTokens(opts.maxOutputTokens ?? this.maxTokens),
+          max_tokens: sentMaxTokens,
           tools: [tool],
           tool_choice: { type: 'tool', name: toolName },
-          messages: [{ role: 'user', content: userContent }],
+          messages,
           ...this.shieldFields({ sessionId: opts.sessionId, policyName: opts.policyName }),
         }),
         signal: ctl.signal,
@@ -1066,9 +1070,16 @@ export class AnthropicProvider implements LlmProvider {
       if (!res.ok) {
         // Surface the gateway/API error body — a bare status hides the
         // reason (e.g. Shield's {"error":{"type","message"}} for a wrong
-        // policy, ZDR-off, model-not-allowed, or bad session_id).
+        // policy, ZDR-off, model-not-allowed, or bad session_id). Shield
+        // masks the upstream Anthropic reason, so attach our request shape
+        // (counts/sizes only) — this is the enrichment/check-resolve path,
+        // so a 400 here now shows model + max_tokens just like extraction.
         const detail = await res.text().catch(() => '');
-        throw new Error(`anthropic HTTP ${res.status}${detail ? `: ${detail.slice(0, 500)}` : ''}`);
+        throw new Error(
+          `anthropic HTTP ${res.status} [${describeAnthropicRequest(messages, this.model, sentMaxTokens, this.viaGateway)}]${
+            detail ? `: ${detail.slice(0, 500)}` : ''
+          }`,
+        );
       }
       const body = (await res.json()) as {
         content?: Array<
@@ -1078,11 +1089,7 @@ export class AnthropicProvider implements LlmProvider {
         usage?: { input_tokens?: number; output_tokens?: number };
       };
       if (body.stop_reason === 'max_tokens') {
-        throw new Error(
-          `anthropic complete: output truncated at max_tokens (${this.effectiveMaxTokens(
-            opts.maxOutputTokens ?? this.maxTokens,
-          )})`,
-        );
+        throw new Error(`anthropic complete: output truncated at max_tokens (${sentMaxTokens})`);
       }
       const toolUse = body.content?.find(
         (c): c is { type: 'tool_use'; name: string; input: unknown } => c.type === 'tool_use',
