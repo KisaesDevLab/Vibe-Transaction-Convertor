@@ -19,6 +19,15 @@ import { exemplarsAsMessages } from './exemplars.js';
 const PROMPT_BUDGET_RESERVE = 4_000;
 const defaultPromptBudget = (): number => Number(process.env.LLM_MAX_PROMPT_TOKENS ?? 24_000);
 
+// Vibe Shield's `cpa-converter-output` policy enforces a hard output-token
+// ceiling (`max_tokens_ceiling`, 8192 as of Shield v1.12) and *rejects*
+// (HTTP 400) any /v1/messages whose max_tokens exceeds it — it does not
+// silently clamp. The direct Anthropic API has no such cap (Sonnet allows
+// far more), so we only clamp when routed through the gateway. Operator-
+// overridable in case Shield raises the policy ceiling. See ADR-022.
+const shieldMaxTokensCeiling = (): number =>
+  Number(process.env.VIBE_SHIELD_MAX_TOKENS_CEILING ?? 8_192);
+
 // Cleans the markdown and truncates it to fit the prompt budget. Returns
 // the cleaned text plus the token count for telemetry. When the cleaned
 // text exceeds the budget, the head and tail are both preserved with a
@@ -614,6 +623,16 @@ export class AnthropicProvider implements LlmProvider {
     return this.baseUrl.replace(/\/$/, '') !== 'https://api.anthropic.com';
   }
 
+  // Output-token ceiling actually sent on the wire. Through the Vibe Shield
+  // gateway this is clamped to the policy ceiling, because Shield 400s a
+  // request whose max_tokens exceeds `max_tokens_ceiling` (it does not
+  // clamp for us). Direct-to-Anthropic keeps the full configured value.
+  // A clamp can still truncate a large statement — the stop_reason guard
+  // turns that into a clear, Shield-aware error rather than a silent drop.
+  private effectiveMaxTokens(requested: number): number {
+    return this.viaGateway ? Math.min(requested, shieldMaxTokensCeiling()) : requested;
+  }
+
   // Headers for a /v1/messages call. The Vibe Shield gateway authenticates
   // with `Authorization: Bearer <vs_live_ key>`; the direct Anthropic API
   // uses `x-api-key` + `anthropic-version`. Picking the wrong one yields a
@@ -732,7 +751,7 @@ export class AnthropicProvider implements LlmProvider {
         body: JSON.stringify({
           model: this.model,
           system: SYSTEM_PROMPT,
-          max_tokens: this.maxTokens,
+          max_tokens: this.effectiveMaxTokens(this.maxTokens),
           tools: [tool],
           tool_choice: { type: 'tool', name: tool.name },
           messages,
@@ -763,10 +782,18 @@ export class AnthropicProvider implements LlmProvider {
       // with the same cap would truncate identically, so this error
       // carries no missingTopLevelFields and the retry loop skips it.
       if (body.stop_reason === 'max_tokens') {
+        const sent = this.effectiveMaxTokens(this.maxTokens);
+        // Via Shield the cap is the policy ceiling and cannot be raised
+        // past it — point the operator at the two routes that actually
+        // lift the limit: extract direct-to-Anthropic (the OCR markdown is
+        // already tokenized, so no PII egresses) or chunked extraction.
+        const guidance = this.viaGateway
+          ? `via the Vibe Shield gateway the output is capped at the policy ceiling (${sent}); a large statement cannot fit. Route extraction direct-to-Anthropic (OCR markdown is already tokenized — no PII egress) or split the statement.`
+          : `raise the admin "Max output tokens" knob (or LLM_MAX_COMPLETION_TOKENS) — statement too large for ${sent} output tokens`;
         throw new ExtractionResponseError({
-          summary: `LLM output truncated at max_tokens (${this.maxTokens})`,
+          summary: `LLM output truncated at max_tokens (${sent})`,
           rawResponse: JSON.stringify(body).slice(0, 8_000),
-          issues: `stop_reason=max_tokens; raise the admin "Max output tokens" knob (or LLM_MAX_COMPLETION_TOKENS) — statement too large for ${this.maxTokens} output tokens`,
+          issues: `stop_reason=max_tokens; ${guidance}`,
         });
       }
       const toolUse = body.content?.find(
@@ -901,7 +928,7 @@ export class AnthropicProvider implements LlmProvider {
         body: JSON.stringify({
           model: this.model,
           system: opts.systemPrompt,
-          max_tokens: opts.maxOutputTokens ?? this.maxTokens,
+          max_tokens: this.effectiveMaxTokens(opts.maxOutputTokens ?? this.maxTokens),
           tools: [tool],
           tool_choice: { type: 'tool', name: toolName },
           messages: [{ role: 'user', content: userContent }],
@@ -925,7 +952,9 @@ export class AnthropicProvider implements LlmProvider {
       };
       if (body.stop_reason === 'max_tokens') {
         throw new Error(
-          `anthropic complete: output truncated at max_tokens (${opts.maxOutputTokens ?? this.maxTokens})`,
+          `anthropic complete: output truncated at max_tokens (${this.effectiveMaxTokens(
+            opts.maxOutputTokens ?? this.maxTokens,
+          )})`,
         );
       }
       const toolUse = body.content?.find(

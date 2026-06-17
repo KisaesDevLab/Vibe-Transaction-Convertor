@@ -566,6 +566,15 @@ export function LlmProviderAdminPage() {
             the extraction fails with a truncation error. Raising this also needs a larger timeout
             (more tokens take longer to generate) and costs more per statement. Range 1000–64000.
             Blank = default ({DEFAULT_MAX_TOKENS}).
+            {provider.data.anthropicViaShield ? (
+              <span className="mt-1 block font-medium text-amber-700">
+                Extraction is routed through Vibe Shield, which caps output at the policy ceiling
+                (8192) and rejects anything higher — values above that are clamped to 8192, so a
+                large statement will still truncate. To lift the cap, route extraction
+                direct-to-Anthropic (the OCR markdown is already tokenized, so no PII leaves the
+                firm).
+              </span>
+            ) : null}
           </p>
           <MaxTokensForm
             current={provider.data.llmMaxTokens}

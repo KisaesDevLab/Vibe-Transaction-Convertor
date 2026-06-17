@@ -269,7 +269,18 @@ const resolveConfig = (opts: ShieldOcrClientOptions = {}): InternalConfig => {
         'Preserve every transaction row, date, description, and amount exactly as printed, ' +
         'including any <ENTITY_N> placeholder tokens. Do not summarize, infer, or omit rows. ' +
         'Output only the transcription.',
-    maxTokens: opts.maxTokens ?? Number(process.env.VIBE_SHIELD_MAX_OCR_TOKENS ?? 8_000),
+    // Clamp to the Shield policy ceiling when routed through the gateway:
+    // Shield 400s a request whose max_tokens exceeds `max_tokens_ceiling`
+    // (8192 as of v1.12). Direct-to-Anthropic has no such cap. The default
+    // (8000) is already under the ceiling; this only bites an operator who
+    // raised VIBE_SHIELD_MAX_OCR_TOKENS. Per-page OCR rarely needs more.
+    maxTokens:
+      baseUrl === ANTHROPIC_DIRECT
+        ? (opts.maxTokens ?? Number(process.env.VIBE_SHIELD_MAX_OCR_TOKENS ?? 8_000))
+        : Math.min(
+            opts.maxTokens ?? Number(process.env.VIBE_SHIELD_MAX_OCR_TOKENS ?? 8_000),
+            Number(process.env.VIBE_SHIELD_MAX_TOKENS_CEILING ?? 8_192),
+          ),
     apiKey,
     sessionId: opts.sessionId && opts.sessionId.length > 0 ? opts.sessionId : null,
     policyName: opts.policyName ?? process.env.VIBE_SHIELD_POLICY ?? 'cpa-converter-output',

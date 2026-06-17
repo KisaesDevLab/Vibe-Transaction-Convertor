@@ -117,6 +117,21 @@ a prerequisite fails earlier in the chain.
   normalized_desc | seq) is derived from cleartext. Best-effort: if Shield
   is unreachable at extraction time, FITIDs fall back to token-derivation
   (still unique within the statement) with a logged warning.
+- **Output-token ceiling caps statement size through Shield (8192).**
+  The `cpa-converter-output` policy enforces `max_tokens_ceiling = 8192`
+  and **hard-rejects (HTTP 400)** any `/v1/messages` above it — it does
+  not clamp. Both clients clamp their request to this value when routed
+  through the gateway (`effectiveMaxTokens` in `llm-client.ts`;
+  `resolveConfig` in `shield-ocr-client.ts`; override via
+  `VIBE_SHIELD_MAX_TOKENS_CEILING`). OCR is per-page so 8192 is ample, but
+  a large statement's **extraction** output (the whole transaction list in
+  one tool-use call) can exceed 8192 and truncates — surfaced as a
+  Shield-aware `ExtractionResponseError`, not a silent drop. Two routes
+  lift the cap: (a) run **extraction direct-to-Anthropic** — the OCR
+  markdown is already tokenized, so no PII egresses and the only ceiling is
+  the model's own (far higher); export still materializes against the OCR
+  session. (b) **chunked extraction** (per page-range), not yet built.
+  Through Shield end-to-end, large statements are bounded by this ceiling.
 - **check-payee resolution through Shield — partial, by design.**
   _Transcription_ works: Claude reads the token-overlaid `<PERSON_n>` and
   `materialize` resolves it to the real payee at export. What does **not**

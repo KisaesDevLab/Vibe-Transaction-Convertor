@@ -213,6 +213,45 @@ describe('AnthropicProvider', () => {
     expect(callCount).toBe(1);
   });
 
+  it('clamps max_tokens to the Shield ceiling when routed through a gateway', async () => {
+    // Shield 400s a /v1/messages whose max_tokens exceeds the policy
+    // ceiling (8192). When baseUrl points at the gateway, the request the
+    // provider sends must be clamped, not the configured 32000.
+    let sentMaxTokens = -1;
+    const provider = new AnthropicProvider({
+      apiKey: 'vs_live_k',
+      baseUrl: 'http://vibe-shield-gateway:8080',
+      maxTokens: 32_000,
+      fetcher: async (_url, init) => {
+        sentMaxTokens = JSON.parse((init as RequestInit).body as string).max_tokens;
+        return okJsonResponse({
+          content: [{ type: 'tool_use', name: 'emit_extraction', input: SAMPLE }],
+          usage: { input_tokens: 10, output_tokens: 10 },
+        });
+      },
+    });
+    await provider.extract('# md');
+    expect(sentMaxTokens).toBe(8192);
+  });
+
+  it('does NOT clamp max_tokens when going direct to Anthropic', async () => {
+    let sentMaxTokens = -1;
+    const provider = new AnthropicProvider({
+      apiKey: 'sk-ant-k',
+      baseUrl: 'https://api.anthropic.com',
+      maxTokens: 32_000,
+      fetcher: async (_url, init) => {
+        sentMaxTokens = JSON.parse((init as RequestInit).body as string).max_tokens;
+        return okJsonResponse({
+          content: [{ type: 'tool_use', name: 'emit_extraction', input: SAMPLE }],
+          usage: { input_tokens: 10, output_tokens: 10 },
+        });
+      },
+    });
+    await provider.extract('# md');
+    expect(sentMaxTokens).toBe(32_000);
+  });
+
   it('wraps missing-tool_use as ExtractionResponseError so the audit log captures the raw body', async () => {
     const provider = new AnthropicProvider({
       apiKey: 'k',
