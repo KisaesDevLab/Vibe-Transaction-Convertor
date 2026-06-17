@@ -20,13 +20,16 @@ const PROMPT_BUDGET_RESERVE = 4_000;
 const defaultPromptBudget = (): number => Number(process.env.LLM_MAX_PROMPT_TOKENS ?? 24_000);
 
 // Vibe Shield's `cpa-converter-output` policy enforces a hard output-token
-// ceiling (`max_tokens_ceiling`, 8192 as of Shield v1.12) and *rejects*
-// (HTTP 400) any /v1/messages whose max_tokens exceeds it — it does not
-// silently clamp. The direct Anthropic API has no such cap (Sonnet allows
-// far more), so we only clamp when routed through the gateway. Operator-
-// overridable in case Shield raises the policy ceiling. See ADR-022.
+// ceiling (`max_tokens_ceiling`) and *rejects* (HTTP 400) any /v1/messages
+// whose max_tokens exceeds it — it does not silently clamp. The ceiling was
+// raised from 8192 to 32000 on the Shield side to match the extraction
+// default, so a full statement now fits in one Shield-routed call. The
+// direct Anthropic API has no such cap, so we only clamp when routed
+// through the gateway — and the clamp still protects against the admin
+// knob's 64000 max. Operator-overridable for older/newer Shield ceilings.
+// See ADR-022.
 const shieldMaxTokensCeiling = (): number =>
-  Number(process.env.VIBE_SHIELD_MAX_TOKENS_CEILING ?? 8_192);
+  Number(process.env.VIBE_SHIELD_MAX_TOKENS_CEILING ?? 32_000);
 
 // Cleans the markdown and truncates it to fit the prompt budget. Returns
 // the cleaned text plus the token count for telemetry. When the cleaned

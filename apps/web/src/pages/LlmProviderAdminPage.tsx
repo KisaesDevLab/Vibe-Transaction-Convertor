@@ -568,11 +568,11 @@ export function LlmProviderAdminPage() {
             Blank = default ({DEFAULT_MAX_TOKENS}).
             {provider.data.anthropicViaShield ? (
               <span className="mt-1 block font-medium text-amber-700">
-                Extraction is routed through Vibe Shield, which caps output at the policy ceiling
-                (8192) and rejects anything higher — values above that are clamped to 8192, so a
-                large statement will still truncate. To lift the cap, route extraction
-                direct-to-Anthropic (the OCR markdown is already tokenized, so no PII leaves the
-                firm).
+                Extraction is routed through Vibe Shield, which hard-rejects any request above its
+                policy ceiling (32000) — values above that are clamped to fit. 32000 output tokens
+                holds most statements; a very large one can still truncate, in which case route
+                extraction direct-to-Anthropic (the OCR markdown is already tokenized, so no PII
+                leaves the firm).
               </span>
             ) : null}
           </p>
