@@ -87,6 +87,9 @@ export function StatementReviewPage() {
   const canExports = hasFeature(me.data?.features, FEATURE.exports);
   const canEnrich = hasFeature(me.data?.features, FEATURE.enrich);
   const canCheckResolve = hasFeature(me.data?.features, FEATURE.checkResolve);
+  const canAddTx = hasFeature(me.data?.features, FEATURE.addTransactions);
+  const canDeleteTx = hasFeature(me.data?.features, FEATURE.deleteTransactions);
+  const canOverride = hasFeature(me.data?.features, FEATURE.overrideVariance);
   const toast = useToast();
   const [selectedTx, setSelectedTx] = useState<TransactionRow | null>(null);
   const [splitOpen, setSplitOpen] = useState(false);
@@ -549,7 +552,7 @@ export function StatementReviewPage() {
               }
             }}
             onAdd={
-              isAdmin
+              canAddTx
                 ? async (input) => {
                     try {
                       await addTx.mutateAsync(input);
@@ -562,7 +565,7 @@ export function StatementReviewPage() {
                 : undefined
             }
             onDelete={
-              isAdmin
+              canDeleteTx
                 ? async (id) => {
                     try {
                       await deleteTx.mutateAsync(id);
@@ -645,7 +648,12 @@ export function StatementReviewPage() {
             )}
           </div>
         </div>
-        <ReconciliationWidget stmt={s} txCount={txs.length} txSumCents={txSumCents} />
+        <ReconciliationWidget
+          stmt={s}
+          txCount={txs.length}
+          txSumCents={txSumCents}
+          canOverride={canOverride}
+        />
       </div>
 
       {/* Embedded audit panel — admin-only, scoped to this statement.

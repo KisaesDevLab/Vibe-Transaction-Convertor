@@ -411,27 +411,32 @@ export const statementsRouter = (): Router => {
     }
   });
 
-  router.post('/:id/override-reconciliation', async (req, res, next) => {
-    try {
-      const id = String(req.params.id);
-      const reason = String(req.body?.reason ?? '').trim();
-      // Phase 16 #17: forensic-grade audit trail demands a real
-      // explanation. 30 chars filters out one-word "ok" overrides.
-      if (reason.length < 30) {
-        throw new ValidationError(
-          'reason must be at least 30 characters — describe what you reconciled and why',
-        );
+  router.post(
+    '/:id/override-reconciliation',
+    requireFeature('overrideVariance'),
+    async (req, res, next) => {
+      try {
+        const id = String(req.params.id);
+        const reason = String(req.body?.reason ?? '').trim();
+        // Phase 16 #17: forensic-grade audit trail demands a real
+        // explanation. 30 chars filters out one-word "ok" overrides.
+        if (reason.length < 30) {
+          throw new ValidationError(
+            'reason must be at least 30 characters — describe what you reconciled and why',
+          );
+        }
+        await overrideReconciliation(db, req.user!, id, reason);
+        res.json({ ok: true });
+      } catch (err) {
+        next(err);
       }
-      await overrideReconciliation(db, req.user!, id, reason);
-      res.json({ ok: true });
-    } catch (err) {
-      next(err);
-    }
-  });
+    },
+  );
 
-  // Admin: insert a manual transaction. Used for rescue when the LLM
-  // missed a row that's clearly on the statement. Phase 18 item 11.
-  router.post('/:id/transactions', requireAdmin, async (req, res, next) => {
+  // Insert a manual transaction. Used for rescue when the LLM missed a row
+  // that's clearly on the statement. Phase 18 item 11. Gated by the
+  // per-user 'addTransactions' feature (default-on; revoke per user).
+  router.post('/:id/transactions', requireFeature('addTransactions'), async (req, res, next) => {
     try {
       const statementId = String(req.params.id);
       const body = req.body ?? {};
@@ -501,28 +506,33 @@ export const statementsRouter = (): Router => {
     }
   });
 
-  // Admin: delete a transaction. Triggers a reconciliation recompute so
-  // the review page reflects the new sum without a manual refresh.
-  router.delete('/transactions/:txId', requireAdmin, async (req, res, next) => {
-    try {
-      const txId = String(req.params.txId);
-      const rows = await db.select().from(transactions).where(eq(transactions.id, txId));
-      const tx = rows[0];
-      if (!tx) throw new NotFoundError(`transaction ${txId}`);
-      await db.delete(transactions).where(eq(transactions.id, txId));
-      await writeAudit(db, {
-        actorUserId: req.user!.id,
-        entityType: 'transaction',
-        entityId: txId,
-        action: 'transaction.admin-delete',
-        payload: { statementId: tx.statementId, fitid: tx.fitid },
-      });
-      await recomputeReconciliation(db, tx.statementId);
-      res.status(204).end();
-    } catch (err) {
-      next(err);
-    }
-  });
+  // Delete a transaction. Triggers a reconciliation recompute so the
+  // review page reflects the new sum without a manual refresh. Gated by the
+  // per-user 'deleteTransactions' feature (default-on; revoke per user).
+  router.delete(
+    '/transactions/:txId',
+    requireFeature('deleteTransactions'),
+    async (req, res, next) => {
+      try {
+        const txId = String(req.params.txId);
+        const rows = await db.select().from(transactions).where(eq(transactions.id, txId));
+        const tx = rows[0];
+        if (!tx) throw new NotFoundError(`transaction ${txId}`);
+        await db.delete(transactions).where(eq(transactions.id, txId));
+        await writeAudit(db, {
+          actorUserId: req.user!.id,
+          entityType: 'transaction',
+          entityId: txId,
+          action: 'transaction.admin-delete',
+          payload: { statementId: tx.statementId, fitid: tx.fitid },
+        });
+        await recomputeReconciliation(db, tx.statementId);
+        res.status(204).end();
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
 
   // Phase 16 #15: explicit recompute endpoint. Useful after bulk edits
   // or when the reviewer wants to confirm the live reconciler state.

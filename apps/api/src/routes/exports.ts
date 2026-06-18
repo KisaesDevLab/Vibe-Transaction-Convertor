@@ -1,4 +1,4 @@
-import { Router } from 'express';
+import { Router, type Request } from 'express';
 import { eq, desc } from 'drizzle-orm';
 import JSZip from 'jszip';
 import { createReadStream } from 'node:fs';
@@ -25,6 +25,14 @@ const VALID: ExportFormat[] = [
   'qfx',
 ];
 
+// Exporting with ?override=true bypasses a reconciliation discrepancy —
+// that IS overriding the variance, so it requires the per-user
+// 'overrideVariance' right. Without it, the flag is ignored (allowOverride
+// stays false) and a discrepant statement fails to export, exactly as if
+// the flag were absent. A verified statement exports normally either way.
+const allowOverrideFor = (req: Request): boolean =>
+  req.query.override === 'true' && req.featureAccess?.overrideVariance !== false;
+
 export const exportsRouter = (): Router => {
   const router = Router();
 
@@ -33,7 +41,7 @@ export const exportsRouter = (): Router => {
       const statementId = String(req.params.statementId);
       const format = String(req.params.format) as ExportFormat;
       if (!VALID.includes(format)) throw new ValidationError(`unknown format ${format}`);
-      const allowOverride = req.query.override === 'true';
+      const allowOverride = allowOverrideFor(req);
       // QBO/QFX get auto-split into 200-tx chunks (Phase 22 item 9). When
       // there's only one slice we send it inline; >1 we wrap in a zip so the
       // client gets a single download.
@@ -70,7 +78,7 @@ export const exportsRouter = (): Router => {
       const statementId = String(req.params.statementId);
       const format = String(req.params.format) as ExportFormat;
       if (!VALID.includes(format)) throw new ValidationError(`unknown format ${format}`);
-      const allowOverride = req.query.override === 'true';
+      const allowOverride = allowOverrideFor(req);
       const result = await renderExport(db, statementId, format, { allowOverride });
       // Decode as utf-8 — every format we emit is text. (Some sub-formats
       // might be binary one day; if so, fall back to base64 here.)
@@ -123,7 +131,7 @@ export const exportsRouter = (): Router => {
   router.post('/:statementId/exports-bundle', async (req, res, next) => {
     try {
       const statementId = String(req.params.statementId);
-      const allowOverride = req.query.override === 'true';
+      const allowOverride = allowOverrideFor(req);
       const zip = new JSZip();
       let lastBaseName: string | null = null;
       for (const fmt of VALID) {

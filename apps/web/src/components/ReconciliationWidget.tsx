@@ -12,10 +12,14 @@ export function ReconciliationWidget({
   stmt,
   txCount,
   txSumCents,
+  canOverride = true,
 }: {
   stmt: StatementSummary;
   txCount: number;
   txSumCents: bigint;
+  // Per-user 'overrideVariance' right. When false, the Override control is
+  // hidden (the server also enforces it via requireFeature).
+  canOverride?: boolean;
 }) {
   const opening = toCents(stmt.openingBalanceCents);
   const closing = toCents(stmt.closingBalanceCents);
@@ -57,7 +61,7 @@ export function ReconciliationWidget({
         </strong>
       </p>
 
-      {stmt.reconciliationStatus === 'discrepancy' ? (
+      {stmt.reconciliationStatus === 'discrepancy' && canOverride ? (
         <button
           type="button"
           onClick={() => setOpen(true)}

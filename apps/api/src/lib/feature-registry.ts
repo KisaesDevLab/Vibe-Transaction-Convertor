@@ -60,6 +60,26 @@ export const FEATURE_DEFS: readonly FeatureDef[] = [
     area: 'core',
     description: 'Generate and download CSV / OFX / QFX / QBO export files.',
   },
+  {
+    key: 'addTransactions',
+    label: 'Add Transactions',
+    area: 'core',
+    description:
+      'Insert a manual transaction row on the review grid (rescue a row the LLM missed).',
+  },
+  {
+    key: 'deleteTransactions',
+    label: 'Delete Transactions',
+    area: 'core',
+    description: 'Remove a transaction row from a statement on the review grid.',
+  },
+  {
+    key: 'overrideVariance',
+    label: 'Override Reconciliation Variance',
+    area: 'core',
+    description:
+      'Override the Golden Rule reconciliation discrepancy so a statement that does not balance can still be exported.',
+  },
 
   // ----- admin (one key per admin sub-page) -----
   {
