@@ -7,13 +7,16 @@ import {
   analyzePdfFromBuffer,
   batchPageImages,
   detectMultiAccount,
+  detectMultiAccountFromSlices,
   extractTextLayerFromBuffer,
+  last4FromMasked,
   mergeExtractionResults,
   rasterizePdf,
   repairPromptFor,
   routePdf,
+  type AccountSlice,
   type ExtractionMethod,
-  type OcrResponse,
+  type MultiAccountAnalysis,
 } from '@vibe-tx-converter/extractor';
 import { findSuspectRows, reconcileGoldenRule, repairPass } from '@vibe-tx-converter/reconciler';
 import {
@@ -34,52 +37,12 @@ import {
   type ProviderId,
 } from '../services/llm-provider.js';
 import { resolvePdfStrategy } from '../services/pdf-strategy.js';
+import { resolveCheckPayees } from '../services/check-resolver.js';
 import { writeAudit } from '../services/audit.js';
-import { materialize, resolveShieldConn } from '../services/shield.js';
 
 import { QUEUE_EXTRACTION, getJobConnection, type ExtractionJobData } from './queues.js';
 
 type StatementStatus = NonNullable<typeof statements.$inferInsert.status>;
-
-// ADR-022 #4 — FITID/seq stability across re-uploads. Under the
-// cpa-converter-output policy, persisted descriptions are session-scoped
-// Shield tokens (<ENTITY_N>), which renumber on every re-OCR (a new
-// Shield session) and would change the derived FITID — breaking the
-// idempotent re-import QuickBooks/Quicken rely on. We derive FITID + seq
-// from the MATERIALIZED cleartext so they stay stable across re-uploads;
-// only the tokenized form is persisted at rest, and the FITID itself is a
-// non-PII hash (date | amount | normalized_desc | seq).
-const SHIELD_TOKEN_RE = /<[A-Z][A-Z0-9_]*_\d+>/;
-
-const materializeDescriptionsForFitid = async (
-  shieldSessionId: string | null,
-  descriptions: string[],
-): Promise<string[]> => {
-  if (!shieldSessionId) return descriptions;
-  if (!descriptions.some((d) => SHIELD_TOKEN_RE.test(d))) return descriptions;
-  try {
-    const conn = await resolveShieldConn(db);
-    const { materialized } = await materialize(
-      conn,
-      shieldSessionId,
-      { descriptions },
-      'fitid-derivation',
-    );
-    const arr = (materialized as { descriptions?: unknown }).descriptions;
-    if (Array.isArray(arr) && arr.length === descriptions.length) {
-      return descriptions.map((d, i) => (typeof arr[i] === 'string' ? (arr[i] as string) : d));
-    }
-  } catch (err) {
-    // Best-effort: if Shield is unreachable at extraction time, fall back
-    // to the tokenized form. FITIDs stay unique within the statement; only
-    // cross-re-upload stability degrades, and this warning flags it.
-    logger.warn(
-      { err: (err as Error).message },
-      'fitid materialize failed; FITIDs derived from tokens (re-upload stability degraded)',
-    );
-  }
-  return descriptions;
-};
 
 const setStatus = async (
   statementId: string,
@@ -92,7 +55,7 @@ const setStatus = async (
     .where(eq(statements.id, statementId));
 };
 
-class CancelledError extends Error {
+export class CancelledError extends Error {
   constructor() {
     super('extraction cancelled by operator');
     this.name = 'CancelledError';
@@ -145,7 +108,7 @@ interface ProcessedTx {
 
 type AttemptRejection = 'http' | 'malformed' | 'empty-txs' | 'discrepancy' | null;
 
-// A rasterized, Shield-redactable page image bound for vision extraction.
+// A rasterized page image bound for local vision/OCR extraction (Ollama Qwen-VL).
 type VisionImage = {
   data: Buffer;
   mediaType: 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp';
@@ -177,22 +140,17 @@ interface AttemptOutcome {
   periodEnd: string | null;
   openingBalanceCents: bigint | null;
   closingBalanceCents: bigint | null;
-  // Shield per-page document types (vision path), in global page order.
-  // null when not the vision path or no classification header was returned.
-  pageClassifications: string[] | null;
+  // Scanned multi-account analysis from the vision path (undefined otherwise).
+  ocrMultiAccount?: MultiAccountAnalysis | undefined;
 }
 
 interface AttemptContext {
   stmtId: string;
   markdown: string;
   dateFormatOverride?: 'MDY' | 'DMY' | 'YMD';
-  // The statement's Vibe Shield session, quoted on the extraction call so
-  // its PII tokens share the vault used by the OCR step. null when Shield
-  // is unconfigured (legacy / local-only).
-  sessionId?: string | undefined;
-  // v1.x — vision extraction. (Shield-redacted) page images sent directly to
-  // Claude instead of OCR'd markdown. Set for scanned/image statements;
-  // Anthropic-only (the local provider ignores them). When present the
+  // Vision/OCR — rasterized page images for scanned/image statements. Sent to
+  // the local Ollama Qwen-VL provider, which OCRs + extracts in one call and
+  // emits the same extraction JSON as the markdown path. When present the
   // extraction reads the images, not ``markdown``.
   images?: VisionImage[] | undefined;
 }
@@ -234,27 +192,27 @@ const mapLlmTxs = (txs: schemas.extraction.ExtractionResult['transactions']): Pr
     sourceLine: idx,
   }));
 
-// Vision extraction over a multi-page statement. Shield's gateway caps the
-// JSON body (MAX_REQUEST_BYTES), so we can't send every page image in one
-// /v1/messages call — we batch the pages (1–3 each, within a byte budget),
-// extract each batch, and merge the per-batch results back into one
-// statement-level extraction. The merged result is shaped exactly like a
-// single provider.extract() return so the orchestration downstream is
+// Vision/OCR extraction over a multi-page statement. To keep any single
+// /api/chat call's prompt + image payload bounded (memory + context window),
+// we batch the pages (1–3 each, within a byte budget), extract each batch on
+// the local Ollama Qwen-VL provider, and merge the per-batch results back
+// into one statement-level extraction. The merged result is shaped exactly
+// like a single provider.extract() return so the orchestration downstream is
 // unchanged. Telemetry sums across batches; rawJson keeps each batch's raw
 // for the audit trail.
 const extractFromImagesBatched = async (
   provider: Awaited<ReturnType<typeof buildProviderForId>>,
   images: VisionImage[],
   baseOpts: Parameters<typeof provider.extract>[1],
-): Promise<Awaited<ReturnType<typeof provider.extract>>> => {
+): Promise<
+  Awaited<ReturnType<typeof provider.extract>> & { ocrMultiAccount: MultiAccountAnalysis }
+> => {
   const batches = batchPageImages(images);
   const parts: Array<{ data: schemas.extraction.ExtractionResult; startPage: number }> = [];
   const rawParts: string[] = [];
-  // Shield returns one document-type per image block; concatenating the
-  // batches in page order yields the per-page classification for the whole
-  // statement (global page order). undefined when no batch reported any.
-  const classifications: string[] = [];
-  let anyClassification = false;
+  // Per-batch account identity (the number the model read on those page(s)),
+  // for scanned multi-account detection — there's no page text to regex.
+  const accountSlices: AccountSlice[] = [];
   let inputTokens = 0;
   let outputTokens = 0;
   let costMicros = 0n;
@@ -264,14 +222,13 @@ const extractFromImagesBatched = async (
     const r = await provider.extract('', { ...(baseOpts ?? {}), images: batch.images });
     parts.push({ data: r.data, startPage: batch.startPage });
     rawParts.push(r.rawJson);
-    if (r.classifications) {
-      anyClassification = true;
-      classifications.push(...r.classifications);
-    } else {
-      // Keep the array aligned with global page numbers even when one batch
-      // had no header: pad with the count of pages it covered.
-      classifications.push(...batch.images.map(() => 'unclassified'));
-    }
+    // startPage is 1-based; AccountSlice page ranges are 0-based inclusive.
+    const start0 = batch.startPage - 1;
+    accountSlices.push({
+      pageStart: start0,
+      pageEnd: start0 + batch.images.length - 1,
+      last4: last4FromMasked(r.data.account?.masked_number),
+    });
     inputTokens += r.telemetry.inputTokens ?? 0;
     outputTokens += r.telemetry.outputTokens ?? 0;
     costMicros += r.telemetry.costMicros;
@@ -283,7 +240,7 @@ const extractFromImagesBatched = async (
     data,
     rawJson: JSON.stringify({ batchCount: batches.length, batches: rawParts }).slice(0, 20_000),
     telemetry: { inputTokens, outputTokens, ms, model, costMicros },
-    ...(anyClassification ? { classifications } : {}),
+    ocrMultiAccount: detectMultiAccountFromSlices(accountSlices, images.length),
   };
 };
 
@@ -312,7 +269,6 @@ const attemptExtraction = async (
     periodEnd: null,
     openingBalanceCents: null,
     closingBalanceCents: null,
-    pageClassifications: null,
   };
 
   let provider;
@@ -329,18 +285,17 @@ const attemptExtraction = async (
     }
   }
 
-  const useVision = !!(ctx.images && ctx.images.length > 0 && provider.id === 'anthropic');
+  const useVision = !!(ctx.images && ctx.images.length > 0);
   const baseExtractOpts = {
     schema: schemas.extraction.ExtractionJsonSchema,
     ...(ctx.dateFormatOverride ? { dateFormatOverride: ctx.dateFormatOverride } : {}),
-    ...(ctx.sessionId ? { sessionId: ctx.sessionId } : {}),
   };
 
   let result: Awaited<ReturnType<typeof provider.extract>>;
   try {
-    // Vision extraction: the Anthropic provider reads the (Shield-redacted)
-    // page images directly, batched to fit the gateway body cap and merged.
-    // The local provider has no vision, so it always takes the markdown path.
+    // Vision/OCR extraction: the local Ollama Qwen-VL provider reads the page
+    // images directly (one-call OCR+extract), batched and merged. The worker
+    // forces the local provider for image runs (Anthropic is text-only).
     result = useVision
       ? await extractFromImagesBatched(provider, ctx.images!, baseExtractOpts)
       : await provider.extract(ctx.markdown, baseExtractOpts);
@@ -349,6 +304,13 @@ const attemptExtraction = async (
       err instanceof ExtractionResponseError ? 'malformed' : 'http';
     return { providerId, rejection, error: err as Error, ...empty };
   }
+
+  // Scanned multi-account analysis (vision path only); undefined for the
+  // text-layer path, which detects in produceTextMarkdown instead.
+  const ocrMultiAccount: MultiAccountAnalysis | undefined =
+    useVision && 'ocrMultiAccount' in result
+      ? (result as { ocrMultiAccount?: MultiAccountAnalysis }).ocrMultiAccount
+      : undefined;
 
   const dateFormat = result.data.source_date_format.format;
   const dateFormatConfidence = result.data.source_date_format.confidence;
@@ -382,7 +344,6 @@ const attemptExtraction = async (
     periodEnd,
     openingBalanceCents: openingCents,
     closingBalanceCents: closingCents,
-    pageClassifications: result.classifications ?? null,
     repairApplied: null,
   } as const;
 
@@ -579,7 +540,7 @@ const attemptExtraction = async (
     periodEnd,
     openingBalanceCents: openingCents,
     closingBalanceCents: closingCents,
-    pageClassifications: result.classifications ?? null,
+    ...(ocrMultiAccount ? { ocrMultiAccount } : {}),
   };
 };
 
@@ -652,29 +613,6 @@ const traceEntryFor = (
     : null,
 });
 
-const summarizeOcrDiagnostics = (ocr: OcrResponse): Record<string, unknown> => {
-  const variants: Record<string, number> = {};
-  let assumedConfidencePages = 0;
-  let emptyPages = 0;
-  const keySets = new Set<string>();
-  for (const d of ocr.parseDiagnostics) {
-    variants[d.variant] = (variants[d.variant] ?? 0) + 1;
-    if (d.confidenceSource === 'assumed-default') assumedConfidencePages += 1;
-    if (d.emptyText) emptyPages += 1;
-    if (d.bodyTopLevelKeys.length > 0) {
-      keySets.add([...d.bodyTopLevelKeys].sort().join(','));
-    }
-  }
-  return {
-    engineVersion: ocr.engineVersion,
-    pages: ocr.pages.length,
-    variants,
-    assumedConfidencePages,
-    emptyPages,
-    unknownKeySets: Array.from(keySets).slice(0, 5),
-  };
-};
-
 // Walk the error.cause chain (Node 20+) flattening into a small array
 // of {class, message} entries so the audit log captures the original
 // DOMException / undici / network error along with whatever we wrapped
@@ -743,7 +681,6 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
   let providerFallbackFired = false;
   let ocrFallbackFired = false;
   let textFallbackFired = false;
-  let lastOcrResponse: OcrResponse | null = null;
   let phaseStart = Date.now();
   // Phase tracker — updated at each transition so the failure audit
   // can say "we were in `ocr-markdown` when this fired".
@@ -802,7 +739,6 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
     markdown: {
       chars: markdown.length,
     },
-    ...(lastOcrResponse ? { ocr: summarizeOcrDiagnostics(lastOcrResponse) } : {}),
     attempts,
     timing: {
       totalMs: Date.now() - workerStartedAt,
@@ -839,9 +775,6 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
     // (after a previous AMBIGUOUS extraction), pass that through to the
     // LLM so it interprets the statement consistently.
     const stmtRows = await db.select().from(statements).where(eq(statements.id, stmtId));
-    // The Vibe Shield session opened at upload; quoted on OCR + extraction
-    // so their PII tokens share one vault.
-    const shieldSessionId = stmtRows[0]?.shieldSessionId ?? null;
     const dateFormatOverride =
       stmtRows[0]?.sourceDateFormatUserConfirmed === true &&
       (stmtRows[0]?.sourceDateFormat === 'MDY' ||
@@ -918,22 +851,20 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
       return scoped.map((p) => `# Page ${p.index + 1}\n\n${p.text}`).join('\n\n');
     };
 
-    // v1.x — vision extraction. For scanned/image statements we rasterize the
-    // pages and send the IMAGES straight to Claude (through Shield, which
-    // identity-zone-redacts them first), replacing the old OCR→markdown→
-    // extract-from-text step. rasterizePdf shells out to pdftoppm
+    // Vision/OCR extraction. For scanned/image statements we rasterize the
+    // pages and send the IMAGES to the local Ollama Qwen-VL provider, which
+    // OCRs + extracts in one call (ADR-023). Page images are processed
+    // locally and never egress. rasterizePdf shells out to pdftoppm
     // (poppler-utils): the standalone Dockerfile installs it; on host
     // machines the operator needs `brew install poppler` (or apt/choco).
-    // Rasterize to JPEG at a modest DPI (not 300-dpi PNG): page images go
-    // into the JSON body of a Shield /v1/messages call, which is bounded by
-    // the gateway's MAX_REQUEST_BYTES — base64 PNG pages blow past it. JPEG
-    // at ~150 dpi keeps statement text legible while staying small enough to
-    // batch. DPI/quality are operator-tunable for hard-to-read scans.
+    // Rasterize to JPEG: there's no gateway body cap anymore, but JPEG at
+    // ~200 dpi keeps statement text legible while staying small enough to
+    // batch and fit Ollama's context. DPI/quality are operator-tunable.
     const produceOcrImages = async (): Promise<VisionImage[]> => {
       const rasters = await rasterizePdf(data.sourcePdfPath, {
-        dpi: Number(process.env.VIBE_SHIELD_RASTER_DPI ?? 150),
+        dpi: Number(process.env.VIBETC_OCR_RASTER_DPI ?? 200),
         format: 'jpeg',
-        jpegQuality: Number(process.env.VIBE_SHIELD_RASTER_JPEG_QUALITY ?? 80),
+        jpegQuality: Number(process.env.VIBETC_OCR_RASTER_JPEG_QUALITY ?? 80),
       });
       const scopedRasters = rasters.filter((r) => inRange(r.index));
       return Promise.all(
@@ -964,7 +895,6 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
       stmtId,
       markdown,
       ...(dateFormatOverride ? { dateFormatOverride } : {}),
-      ...(shieldSessionId ? { sessionId: shieldSessionId } : {}),
       ...(ocrImages ? { images: ocrImages } : {}),
     };
 
@@ -1005,8 +935,12 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
       if (primary === undefined || secondary === undefined) {
         throw new Error('provider order not resolved before runProviderFallback (bug)');
       }
-      const resolvedPrimary = primary;
-      const resolvedSecondary = secondary;
+      // OCR/vision runs locally on Ollama Qwen-VL regardless of the
+      // configured policy — Anthropic is text-only and cannot read page
+      // images. Force the local provider (no secondary) for the image path;
+      // the text-layer path honors the operator's local/anthropic policy.
+      const resolvedPrimary: ProviderId = inputMethod === 'ocr' ? 'local' : primary;
+      const resolvedSecondary: ProviderId | null = inputMethod === 'ocr' ? null : secondary;
       const firstStart = Date.now();
       const first = await attemptExtraction(resolvedPrimary, ctx);
       attempts.push(traceEntryFor(first, inputMethod, Date.now() - firstStart));
@@ -1081,13 +1015,13 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
       });
       logger.info(
         { stmtId, reason: chosen.rejection },
-        'text-layer extraction rejected — retrying with OCR (Vibe Shield)',
+        'text-layer extraction rejected — retrying with local OCR (Ollama Qwen-VL)',
       );
       await setStatus(stmtId, 'ocr', { extractionMethod: 'hybrid' });
       currentPhase = 'ocr-fallback-images';
       const ocrMarkdownStart = Date.now();
-      // Vision fallback: rasterize and send images (through Shield) instead of
-      // OCR'd markdown — same path as the primary scanned route.
+      // Vision fallback: rasterize and send images to the local Qwen-VL
+      // provider instead of OCR'd markdown — same path as the primary scan.
       const fallbackImages = await produceOcrImages();
       timing.ocrFallbackMarkdownMs = Date.now() - ocrMarkdownStart;
       attemptCtx = { ...attemptCtx, markdown: '', images: fallbackImages };
@@ -1197,20 +1131,17 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
       });
     }
 
-    // OCR now runs through Shield→Claude (vision), so its tokens/cost
-    // count toward the statement's LLM rollup. Zero on the text-layer
-    // path (no OCR) and when usage is absent. The cast re-widens the
-    // type: lastOcrResponse is only assigned inside the produceOcrMarkdown
-    // closure, which TS can't see, so it narrows the read to `null`.
-    const ocrUsage = (lastOcrResponse as OcrResponse | null)?.usage;
+    // OCR runs in the same local Ollama vision call as extraction, so its
+    // tokens/cost are already in the chosen attempt's telemetry — no separate
+    // OCR usage to roll up.
     await db
       .update(statements)
       .set({
         llmProvider: chosen.providerId,
-        llmInputTokens: chosen.totalInputTokens + (ocrUsage?.inputTokens ?? 0),
-        llmOutputTokens: chosen.totalOutputTokens + (ocrUsage?.outputTokens ?? 0),
+        llmInputTokens: chosen.totalInputTokens,
+        llmOutputTokens: chosen.totalOutputTokens,
         llmCallCount: chosen.totalCallCount,
-        llmCostMicros: chosen.totalCostMicros + (ocrUsage?.costMicros ?? 0n),
+        llmCostMicros: chosen.totalCostMicros,
         llmModelVersion: chosen.modelVersion,
         sourceDateFormat: chosen.dateFormat,
         sourceDateFormatConfidence: chosen.dateFormatConfidence,
@@ -1226,19 +1157,14 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
     const reconciled = chosen.reconciled;
     const repairApplied = chosen.repairApplied;
 
-    // ADR-022 #4: derive seq + FITID from the materialized cleartext so
-    // they're stable across re-uploads (the stored description stays
-    // tokenized). Falls back to the tokenized form if Shield is down.
-    const fitidDescriptions = await materializeDescriptionsForFitid(
-      shieldSessionId,
-      effectiveTxs.map((t) => t.description),
-    );
-
+    // Descriptions arrive in cleartext (no Shield tokenization), so seq +
+    // FITID derive directly from them — stable across re-uploads of the same
+    // PDF (the FITID is a non-PII hash of date | amount | normalized_desc | seq).
     const seqAssigned = assignSeqInDay(
-      effectiveTxs.map((t, i) => ({
+      effectiveTxs.map((t) => ({
         postedDate: t.postedDate,
         amountCents: t.amountCents,
-        description: fitidDescriptions[i] ?? t.description,
+        description: t.description,
         sourceLine: t.sourceLine,
       })),
     );
@@ -1255,19 +1181,43 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
     await checkCancelled(stmtId);
     currentPhase = 'persisting';
 
-    // Review hold (Shield vision path). A page classified 'unknown' got
-    // fail-closed maximal redaction, so real data may have been clipped —
-    // flag it so the operator verifies before export. 'unclassified' (a
-    // batch returned no header) is NOT a hold — only an explicit 'unknown'.
-    const pageClassifications = chosen.pageClassifications;
-    const unknownPages = (pageClassifications ?? []).reduce<number[]>((acc, c, i) => {
-      if (c === 'unknown') acc.push(i + 1);
-      return acc;
-    }, []);
+    // Multi-account detection for the OCR/vision path (the text path detects in
+    // produceTextMarkdown). Persist suggested splits so the review UI can offer
+    // the split-or-acknowledge flow; whole-PDF runs only (a sliced re-extract
+    // is single-account by definition).
+    if (
+      !pageRange &&
+      (method === 'ocr' || method === 'hybrid') &&
+      chosen.ocrMultiAccount?.multiAccount
+    ) {
+      await db
+        .update(statements)
+        .set({ detectedSplits: chosen.ocrMultiAccount, updatedAt: sql`now()` })
+        .where(eq(statements.id, stmtId));
+      logger.warn(
+        { stmtId, splits: chosen.ocrMultiAccount.splits },
+        'multi-account scanned PDF detected; persisted splits for UI confirmation',
+      );
+    }
+
+    // OCR-error safety net (production). The Golden Rule catches balance-level
+    // misreads, but a row whose amount happens to tie while its date or
+    // description was misread (common on scanned pages) would otherwise export
+    // silently. Flag any extraction carrying low-confidence rows for human
+    // review before export — reusing the review-hold gate
+    // (assertNotHeldForReview) + acknowledge endpoint. Operator-tunable via
+    // VIBETC_REVIEW_CONFIDENCE_THRESHOLD; set it to 0 to disable the hold.
+    const reviewConfidenceThreshold = Number(process.env.VIBETC_REVIEW_CONFIDENCE_THRESHOLD ?? 0.7);
+    const lowConfidenceCount =
+      reviewConfidenceThreshold > 0
+        ? effectiveTxs.filter((t) => t.confidence < reviewConfidenceThreshold).length
+        : 0;
     const reviewHoldReason =
-      unknownPages.length > 0
-        ? `Vibe Shield could not classify page(s) ${unknownPages.join(', ')} and applied ` +
-          `maximal redaction — verify no transaction data was clipped before exporting.`
+      lowConfidenceCount > 0
+        ? `${lowConfidenceCount} of ${effectiveTxs.length} transaction(s) were extracted with ` +
+          `low confidence (< ${reviewConfidenceThreshold}` +
+          `${method === 'ocr' || method === 'hybrid' ? ', via OCR' : ''}). Verify their dates and ` +
+          `amounts against the source statement before exporting.`
         : null;
 
     await db.transaction(async (tx) => {
@@ -1277,8 +1227,7 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
         const fitid = computeFitid({
           postedDate: txn.postedDate,
           amountCents: txn.amountCents,
-          // Stable cleartext (ADR-022 #4), not the session-scoped token.
-          description: fitidDescriptions[i] ?? txn.description,
+          description: txn.description,
           seqInDay: seq,
         });
         const trntype = inferTrntype({
@@ -1315,8 +1264,10 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
           reconciliationStatus: reconciled.status === 'verified' ? 'verified' : 'discrepancy',
           periodBoundsViolations: reconciled.periodBoundsViolations,
           status: 'review',
-          // Reset on every (re-)extraction so a fresh classification governs.
-          pageClassifications: pageClassifications ?? null,
+          // Local OCR emits no per-page classification (Shield removed).
+          pageClassifications: null,
+          // Low-confidence rows hold the statement for human review before
+          // export; reset (cleared/re-armed) on every (re-)extraction.
           reviewHoldReason,
           reviewHoldAcknowledged: false,
           updatedAt: sql`now()`,
@@ -1333,6 +1284,28 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
     });
 
     timing.persistMs = Date.now() - phaseStart;
+
+    // Auto-resolve check payees (best-effort). The text-layer path never sees
+    // cancelled-check images, and a scanned run may have missed some — so for
+    // any check-numbered row left without a payee, read the check images on the
+    // local vision model and stamp the payee (drives the OFX <NAME>). Gated by
+    // VIBETC_CHECK_PAYEE_AUTO (default on); never fails the extraction.
+    const autoCheckPayee = process.env.VIBETC_CHECK_PAYEE_AUTO !== 'false';
+    if (autoCheckPayee && effectiveTxs.some((t) => t.checkNumber && !t.payee)) {
+      try {
+        const res = await resolveCheckPayees(db, stmtId);
+        logger.info(
+          { stmtId, matched: res.matchedCount, candidates: res.candidateCount },
+          'auto check-payee resolution complete',
+        );
+      } catch (err) {
+        logger.warn(
+          { stmtId, err: (err as Error).message },
+          'auto check-payee resolution failed (continuing)',
+        );
+      }
+    }
+
     await writeAudit(db, {
       entityType: 'statement',
       entityId: stmtId,
@@ -1347,9 +1320,10 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
         llmEmittedTxCount: chosen.llmEmittedTxCount,
         policy,
         strategy,
-        ...(pageClassifications ? { pageClassifications } : {}),
-        ...(unknownPages.length > 0 ? { reviewHold: { unknownPages } } : {}),
         ...(repairApplied ? { repairApplied } : {}),
+        ...(lowConfidenceCount > 0
+          ? { reviewHold: { lowConfidenceCount, threshold: reviewConfidenceThreshold } }
+          : {}),
         // Full processing trace — operator reads this when a successful
         // extraction looks suspect (cost surprise, slow run, fallback
         // fired silently) without having to re-run the job.
@@ -1366,8 +1340,8 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
     // Rich failure trace — same shape as the success / halted-ambiguous
     // traces, plus a fully described error (class, name, message,
     // cause chain, truncated stack). With this in place the operator
-    // sees "phase: ocr-markdown" + "Shield POST .../v1/messages
-    // timed out after 60000 ms" instead of bare DOMException.
+    // sees "phase: ocr-images" + "ollama vision POST .../api/chat
+    // timed out after 120000 ms" instead of bare DOMException.
     const e = err instanceof Error ? err : new Error(String(err));
     const failureDiagnostic: Record<string, unknown> = {
       errorClass: e.constructor?.name ?? 'Error',
@@ -1412,6 +1386,45 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
   }
 };
 
+// Job-wrapper failure handling, factored out of the Worker closure so it can
+// be unit-tested without a live BullMQ runtime. A CancelledError keeps the
+// /cancel verdict already written by the route (returns 'cancelled', no row
+// write). Any other error marks the statement `failed` with a user-facing
+// message and returns 'failed' — the caller then rethrows so BullMQ records
+// the failure and applies its retry/backoff. The rich diagnostic audit row was
+// already written inside processExtraction's own catch.
+export const finalizeJobFailure = async (
+  jobData: ExtractionJobData,
+  err: unknown,
+  jobId?: string | undefined,
+): Promise<'cancelled' | 'failed'> => {
+  if (err instanceof CancelledError) {
+    logger.info({ jobId }, 'extraction cancelled cooperatively');
+    return 'cancelled';
+  }
+  const e = err as Error;
+  logger.error(
+    {
+      err,
+      jobId,
+      errorClass: e?.constructor?.name ?? 'Error',
+      message: e?.message ?? String(err),
+    },
+    'extraction job failed',
+  );
+  // ExtractionResponseError carries a clean summary + issue list with no raw
+  // payload; other errors fall through to the message text.
+  const userMessage =
+    err instanceof ExtractionResponseError
+      ? `${err.message} — full LLM response captured in audit_log`
+      : (e?.message ?? 'extraction failed');
+  await db
+    .update(statements)
+    .set({ status: 'failed', errorMessage: userMessage, updatedAt: sql`now()` })
+    .where(eq(statements.id, jobData.statementId));
+  return 'failed';
+};
+
 export const startExtractionWorker = (): Worker<ExtractionJobData> => {
   return new Worker<ExtractionJobData>(
     QUEUE_EXTRACTION,
@@ -1419,46 +1432,9 @@ export const startExtractionWorker = (): Worker<ExtractionJobData> => {
       try {
         await processExtraction(job.data);
       } catch (err) {
-        if (err instanceof CancelledError) {
-          // The /cancel route already wrote status=failed +
-          // errorMessage; don't overwrite the cancel reason.
-          logger.info({ jobId: job.id }, 'extraction cancelled cooperatively');
-          return;
-        }
-
-        // The rich audit row was written by processExtraction's own
-        // try/catch (it has access to the phase + attempts + timing
-        // state we'd otherwise have to thread out here). All this
-        // catch needs to do is log + update the statements row +
-        // rethrow so BullMQ records the failure.
-        const e = err as Error;
-        logger.error(
-          {
-            err,
-            jobId: job.id,
-            errorClass: e?.constructor?.name ?? 'Error',
-            message: e?.message ?? String(err),
-          },
-          'extraction job failed',
-        );
-
-        // User-facing message: ExtractionResponseError carries a clean
-        // summary + issue list with no raw payload. Other errors fall
-        // through to the message text.
-        const userMessage =
-          err instanceof ExtractionResponseError
-            ? `${err.message} — full LLM response captured in audit_log`
-            : (e?.message ?? 'extraction failed');
-
-        await db
-          .update(statements)
-          .set({
-            status: 'failed',
-            errorMessage: userMessage,
-            updatedAt: sql`now()`,
-          })
-          .where(eq(statements.id, job.data.statementId));
-        throw err;
+        const verdict = await finalizeJobFailure(job.data, err, job.id);
+        // Rethrow non-cancelled failures so BullMQ records them and retries.
+        if (verdict === 'failed') throw err;
       }
     },
     {
@@ -1467,9 +1443,9 @@ export const startExtractionWorker = (): Worker<ExtractionJobData> => {
       // otherwise BullMQ marks the job as orphaned and re-queues it
       // while the worker is still processing → duplicate work + the
       // statements row gets stomped. Worst-case scenario:
-      //   * 50-page OCR run (Claude vision via Vibe Shield)
-      //   * ~50s per page worst case
-      //   * concurrency=2 → 25 sequential rounds → ~21 min
+      //   * 50-page OCR run (local Ollama Qwen-VL vision)
+      //   * ~50s per page worst case on CPU
+      //   * batched → many sequential rounds → ~21 min
       // Default 30 min (with the historical 60s buffer) covers that
       // and a noisy retry; GPU operators waste nothing because the
       // job finishes in seconds and releases the lock immediately.

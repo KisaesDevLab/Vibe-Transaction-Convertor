@@ -4,6 +4,7 @@ import { defineConfig } from 'vitest/config';
 // with each other. Run them sequentially via a single fork.
 export default defineConfig({
   test: {
+    setupFiles: ['./src/test-setup.ts'],
     fileParallelism: false,
     pool: 'forks',
     poolOptions: {

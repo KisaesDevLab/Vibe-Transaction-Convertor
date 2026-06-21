@@ -1,9 +1,8 @@
 // Phase 33 — Redis-backed cache for LLM enrichment results. Same merchant
 // shows up across many statements, so caching by
 // (raw_description, account_type, request_kind) hits frequently and
-// trims Anthropic spend dramatically. Mirrors `ocr-cache.ts`: best-effort,
-// silently falls through to a miss when REDIS_URL is unset or the
-// connection is flapping.
+// trims Anthropic spend dramatically. Best-effort: silently falls through
+// to a miss when REDIS_URL is unset or the connection is flapping.
 
 import Redis from 'ioredis';
 import { createHash } from 'node:crypto';

@@ -25,70 +25,6 @@ import {
 import { ConflictError, NotFoundError } from '../lib/errors.js';
 import type { Account, Statement, Transaction, User } from '../db/types.js';
 import { writeAudit } from './audit.js';
-import { materialize, resolveShieldConn } from './shield.js';
-
-// A Vibe Shield vault token, e.g. <PERSON_1>, <US_BANK_ACCOUNT_2>. When
-// OCR + extraction run through Shield under cpa-converter-output, the
-// transaction text columns are stored tokenized; the export path
-// materializes them back to cleartext (the single audited cleartext-
-// emission point) before writing the file.
-const SHIELD_TOKEN_RE = /<[A-Z][A-Z0-9_]*_\d+>/;
-
-// Resolve <ENTITY_N> tokens in the transaction text columns to cleartext
-// via the statement's Shield session. No-op when the statement has no
-// session or no field actually contains a token (so Shield-less / text-
-// layer flows never round-trip). Fails closed: if tokens are present but
-// materialize errors (Shield down, wrong policy → 403), the export is
-// refused rather than shipping a file full of placeholder tokens.
-const materializeTxFields = async (
-  db: Db,
-  stmt: Statement,
-  txs: Transaction[],
-): Promise<Transaction[]> => {
-  if (!stmt.shieldSessionId) return txs;
-  const fields = ['description', 'normalizedDescription', 'cleansedDescription'] as const;
-  const needs = txs.some((t) =>
-    fields.some((f) => typeof t[f] === 'string' && SHIELD_TOKEN_RE.test(t[f] as string)),
-  );
-  if (!needs) return txs;
-
-  const conn = await resolveShieldConn(db);
-  const payload = {
-    txs: txs.map((t) => ({
-      description: t.description,
-      normalizedDescription: t.normalizedDescription,
-      cleansedDescription: t.cleansedDescription,
-    })),
-  };
-  let materialized: unknown;
-  try {
-    ({ materialized } = await materialize(
-      conn,
-      stmt.shieldSessionId,
-      payload,
-      `${stmt.id}.export`,
-    ));
-  } catch (err) {
-    throw new ConflictError(
-      `Vibe Shield materialize failed — cannot export with unresolved tokens: ${(err as Error).message}`,
-    );
-  }
-  const arr = (materialized as { txs?: unknown }).txs;
-  if (!Array.isArray(arr)) return txs;
-  return txs.map((t, i) => {
-    const m = (arr[i] ?? {}) as Record<string, unknown>;
-    return {
-      ...t,
-      description: typeof m.description === 'string' ? m.description : t.description,
-      normalizedDescription:
-        typeof m.normalizedDescription === 'string'
-          ? m.normalizedDescription
-          : t.normalizedDescription,
-      cleansedDescription:
-        typeof m.cleansedDescription === 'string' ? m.cleansedDescription : t.cleansedDescription,
-    };
-  });
-};
 
 // Filenames flow through Content-Disposition headers, which Node's
 // http module rejects for any byte > 0x7E (ERR_INVALID_CHAR). Bank/FI
@@ -153,10 +89,9 @@ const fetchStatementContext = async (
     .from(transactions)
     .where(eq(transactions.statementId, statementId))
     .orderBy(transactions.postedDate, transactions.seqInDay);
-  // Resolve any Shield vault tokens to cleartext before rendering. The
-  // OFX/QFX/QBO/CSV file is the one place cleartext is allowed to surface.
-  const materializedTxs = await materializeTxFields(db, stmt, txs);
-  return { stmt, account, txs: materializedTxs };
+  // Descriptions are stored in cleartext (local OCR, no Shield tokens), so
+  // there is nothing to materialize before rendering the export file.
+  return { stmt, account, txs };
 };
 
 interface BuildOfxResult {
@@ -244,12 +179,10 @@ const buildOfxStmt = (stmt: Statement, account: Account, txs: Transaction[]): Bu
   return { stmt: ofxStmt, bankIdSource };
 };
 
-// Vibe Shield review hold: a page classified 'unknown' got fail-closed
-// maximal redaction, so data may have been clipped. Export is blocked until
-// the operator acknowledges (mirrors the reconciliation override, but a
-// separate gate — acknowledging the hold is not the same as overriding a
-// discrepancy). There is no allowOverride bypass: the operator must
-// explicitly acknowledge via the statements route.
+// Review hold: a dormant gate (local OCR no longer sets `reviewHoldReason`,
+// so this never trips today). Retained so any historical held statement, or
+// a future hold source, still blocks export until acknowledged via the
+// statements route. There is no allowOverride bypass.
 const assertNotHeldForReview = (stmt: Statement): void => {
   if (stmt.reviewHoldReason && !stmt.reviewHoldAcknowledged) {
     throw new ConflictError(`export blocked by review hold — ${stmt.reviewHoldReason}`);
@@ -301,6 +234,8 @@ export const renderExport = async (
         trntype: t.trntype,
         fitid: t.fitid,
         ...(t.checkNumber ? { checkNumber: t.checkNumber } : {}),
+        // Check payee feeds the Xero Payee column and the generic Payee column.
+        ...(t.payee ? { payee: t.payee } : {}),
         ...(tmpl === 'generic' && t.cleansedDescription
           ? { cleansedDescription: t.cleansedDescription }
           : {}),

@@ -36,6 +36,21 @@ const buildLimiter = (prefix: string, limit: number): RateLimitRequestHandler =>
 
 export const unauthRateLimiter = (): RateLimitRequestHandler => buildLimiter('rl:unauth:', 100);
 
+// Test helper: clear the express-rate-limit counters (per-IP unauth + per-user
+// auth, prefix `rl:`) so a full-suite rerun against a persistent Redis doesn't
+// accumulate request counts across files/runs within the 60s window and 429.
+// No-op until a limiter has been built (sharedClient exists); never opens a
+// connection just to reset.
+export const resetRateLimiters = async (): Promise<void> => {
+  if (!sharedClient) return;
+  try {
+    const keys = await sharedClient.keys('rl:*');
+    if (keys.length > 0) await sharedClient.del(...keys);
+  } catch {
+    /* best-effort — the limiter fails open on store errors */
+  }
+};
+
 // Authenticated limiter: a generous cap keyed per-user (not per-IP) so a
 // single admin doing legitimate bulk work — e.g. toggling many feature-
 // access rows — isn't throttled by a shared-IP budget.

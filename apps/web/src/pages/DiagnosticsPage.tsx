@@ -16,8 +16,7 @@ interface Diagnostics {
   services: {
     databaseUrl: 'configured' | 'unconfigured';
     redisUrl: 'configured' | 'unconfigured';
-    vibeShieldUrl: 'configured' | 'unconfigured';
-    llmGatewayUrl: 'configured' | 'unconfigured';
+    ollamaBaseUrl: string;
     anthropicBaseUrl: string;
   };
   counts: Record<string, number>;
@@ -214,12 +213,10 @@ export function DiagnosticsPage() {
               <Pill ok={diag.data.services.redisUrl} text={diag.data.services.redisUrl} />
             </li>
             <li className="flex items-center justify-between">
-              <span>VIBE_SHIELD_URL</span>
-              <Pill ok={diag.data.services.vibeShieldUrl} text={diag.data.services.vibeShieldUrl} />
-            </li>
-            <li className="flex items-center justify-between">
-              <span>LLM_GATEWAY_URL</span>
-              <Pill ok={diag.data.services.llmGatewayUrl} text={diag.data.services.llmGatewayUrl} />
+              <span>OLLAMA_BASE_URL</span>
+              <code className="rounded bg-surface-subtle px-1.5 py-0.5 text-xs">
+                {diag.data.services.ollamaBaseUrl}
+              </code>
             </li>
             <li className="flex items-center justify-between">
               <span>ANTHROPIC_BASE_URL</span>

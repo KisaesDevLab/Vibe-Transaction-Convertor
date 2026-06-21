@@ -65,6 +65,40 @@ describe('analyzePdf + routePdf', () => {
     expect(routePdf(analysis)).toBe('ocr');
   });
 
+  it('forces ocr when VIBETC_FORCE_OCR=true even for a clean text layer', async () => {
+    const lines = [
+      'STATEMENT OF ACCOUNT',
+      'Period 2026-01-01 to 2026-01-31',
+      'Opening balance: $1,000.00',
+      '2026-01-03 ATM Withdrawal -$60.00',
+      '2026-01-08 Direct Deposit +$3,200.00',
+      'Closing balance: $4,115.79',
+    ];
+    const pdf = await buildDigitalPdf([lines, lines]);
+    const analysis = await analyzePdfFromBuffer(pdf);
+    expect(routePdf(analysis)).toBe('text'); // baseline
+    const prev = process.env.VIBETC_FORCE_OCR;
+    process.env.VIBETC_FORCE_OCR = 'true';
+    try {
+      expect(routePdf(analysis)).toBe('ocr');
+    } finally {
+      if (prev === undefined) delete process.env.VIBETC_FORCE_OCR;
+      else process.env.VIBETC_FORCE_OCR = prev;
+    }
+  });
+
+  it('routes a zero-page analysis as ocr (degenerate PDF)', () => {
+    const analysis = {
+      pageCount: 0,
+      hasTextLayer: false,
+      textLayerCoverage: 0,
+      avgCharsPerPage: 0,
+      suspectedScan: false,
+      pages: [],
+    } as unknown as Parameters<typeof routePdf>[0];
+    expect(routePdf(analysis)).toBe('ocr');
+  });
+
   it('routes mixed-content (some pages empty, some with text) as hybrid', async () => {
     const doc = await PDFDocument.create();
     const font = await doc.embedFont(StandardFonts.Helvetica);

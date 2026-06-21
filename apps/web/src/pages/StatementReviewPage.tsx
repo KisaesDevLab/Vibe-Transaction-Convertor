@@ -298,13 +298,11 @@ export function StatementReviewPage() {
 
       {s.reviewHoldReason && !s.reviewHoldAcknowledged ? (
         <div className="rounded-md border border-amber-300 bg-amber-50 p-4 text-sm text-amber-900">
-          <h2 className="text-base font-semibold">
-            Review hold — page redaction may have clipped data
-          </h2>
+          <h2 className="text-base font-semibold">Review hold — verify the flagged page(s)</h2>
           <p className="mt-1">{s.reviewHoldReason}</p>
           {s.pageClassifications && s.pageClassifications.length > 0 ? (
             <p className="mt-2 text-xs text-amber-800">
-              Page types Vibe Shield detected:{' '}
+              Page types detected:{' '}
               {s.pageClassifications.map((c, i) => `p${i + 1}:${c}`).join(', ')}
             </p>
           ) : null}
@@ -482,7 +480,7 @@ export function StatementReviewPage() {
                   title={
                     s.sourcePdfDeleted
                       ? 'Source PDF has been deleted — re-upload to resolve check payees'
-                      : 'Read cancelled-check images via Anthropic vision and replace "CHECK" with the payee name'
+                      : 'Read cancelled-check images on the local vision model and fill in each check payee'
                   }
                   onClick={async () => {
                     try {

@@ -1,8 +1,8 @@
 # @vibe-tx-converter/extractor
 
-PDF preprocessing, Vibe Shield OCR client, LLM provider abstraction,
-prompts, and exemplars. Owns everything between "PDF on disk" and
-"validated `ExtractionResult`".
+PDF preprocessing, LLM provider abstraction (local Ollama + optional
+Anthropic), prompts, and exemplars. Owns everything between "PDF on disk"
+and "validated `ExtractionResult`".
 
 ## Purpose
 
@@ -10,21 +10,18 @@ prompts, and exemplars. Owns everything between "PDF on disk" and
   DOM, no canvas). Decides per-PDF whether to take the `text` route,
   the `ocr` route, or `hybrid`. Rasterizes via `pdftoppm` shell-out
   (Q-006 resolution) when OCR is needed.
-- **`shield-ocr-client.ts`** — HTTP client for OCR via the Vibe Shield
-  gateway (Claude vision, Anthropic Messages `/v1/messages`; ADR-022,
-  supersedes ADR-003). Concurrency-limited, retries 5xx/429 with
-  exponential backoff + circuit breaker, per-image sha256 + session
-  cache (Redis-backed via the API layer's adapter).
-- **`prompts/extract.ts`** — system prompt, user-prompt builder
-  (`userPromptFor`), repair-prompt builder (`repairPromptFor`),
-  markdown cleanup (`cleanupMarkdown`), token estimator
-  (`estimateTokens`).
+- **`prompts/extract.ts`** — system prompt, image/OCR system prompt,
+  user-prompt builders (`userPromptFor`, `imageUserPromptFor`),
+  repair-prompt builder (`repairPromptFor`), markdown cleanup
+  (`cleanupMarkdown`), token estimator (`estimateTokens`).
 - **`exemplars.ts`** — 10 sanitized in-context exemplars for the
   local provider; the Anthropic provider gets a smaller subset.
-- **`llm-client.ts`** — the `LlmProvider` interface (ADR-019). Two
-  implementations: `LocalGatewayProvider` (default, OpenAI wire
-  format) and `AnthropicProvider` (tool-use, schema as
-  `input_schema`). Downstream code never branches on provider.
+- **`llm-client.ts`** — the `LlmProvider` interface (ADR-019, ADR-023).
+  `LocalGatewayProvider` (default) drives Ollama — text via the
+  OpenAI-compatible `/v1/chat/completions`, and scanned-page OCR via
+  native `/api/chat` with a Qwen-VL model (direct vision→JSON).
+  `AnthropicProvider` is text-only (tool-use, schema as `input_schema`).
+  Downstream code never branches on provider.
 - **`multi-account-detector.ts`** — heuristic for spotting household
   statements where one PDF carries two or more accounts. Drives the
   Phase 14 split-confirm UI.
@@ -33,7 +30,6 @@ prompts, and exemplars. Owns everything between "PDF on disk" and
 
 ```ts
 export * from './preprocess.js';
-export * from './shield-ocr-client.js';
 export * from './prompts/extract.js';
 export * from './exemplars.js';
 export * from './llm-client.js';
@@ -44,8 +40,6 @@ Notable types and functions:
 
 - `analyzePdfFromPath(path)`, `routePdf(analysis)`,
   `extractTextLayer(path)`, `rasterizePdf(path, dpi)`.
-- `ocrPdfPages(images, opts)`, `probeShieldHealth(opts)` (Vibe Shield
-  OCR via Claude vision).
 - `LlmProvider`, `LocalGatewayProvider`, `AnthropicProvider`,
   `prepareMarkdown(raw, budget)`.
 - `SYSTEM_PROMPT`, `userPromptFor(markdown, opts)`,
@@ -57,11 +51,9 @@ Notable types and functions:
 ## How it's used
 
 - `apps/api/src/jobs/extraction.worker.ts` orchestrates the full
-  pipeline: `analyzePdf` → `routePdf` → (text / OCR) →
+  pipeline: `analyzePdf` → `routePdf` → (text / local vision OCR) →
   `multi-account-detector` → `LlmProvider.extract` → reconciler →
   TRNTYPE + FITID → persist.
-- `apps/api/src/scripts/shield-smoke.ts` exercises the OCR-via-Shield
-  path end-to-end as a CLI (`pnpm shield:smoke`).
 - `apps/api/src/routes/admin.ts` uses `LlmProvider.health()` to
   surface readiness on the admin page.
 
@@ -71,9 +63,10 @@ Notable types and functions:
 pnpm --filter @vibe-tx-converter/extractor test
 ```
 
-Tests cover preprocess routing, the Vibe Shield OCR client
-(request/parse, retry, cache, circuit breaker — stubbed HTTP), the
-extraction prompt builder (snapshot for fixed inputs), each exemplar
-round-tripping the Zod schema, and the multi-account detector on
-synthetic page-text inputs. The full PDF-to-FITID integration is
-exercised in `apps/api/src/api.test.ts` against the worker.
+Tests cover preprocess routing, the LLM client (local text + native
+`/api/chat` vision path, Anthropic tool-use, reminder-retry, JSON
+prose-recovery — stubbed HTTP), the extraction prompt builder (snapshot
+for fixed inputs), each exemplar round-tripping the Zod schema, and the
+multi-account detector on synthetic page-text inputs. The full
+PDF-to-FITID integration is exercised in `apps/api/src/api.test.ts`
+against the worker.

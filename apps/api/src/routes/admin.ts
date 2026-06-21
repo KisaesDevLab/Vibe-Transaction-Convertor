@@ -50,11 +50,7 @@ import {
   setRetentionDays,
 } from '../services/pdf-retention.js';
 import { clearPricing, listPricings, setPricing } from '../services/pricing.js';
-import {
-  AnthropicProvider,
-  type EnrichmentPromptMode,
-  probeShieldHealth,
-} from '@vibe-tx-converter/extractor';
+import { AnthropicProvider, type EnrichmentPromptMode } from '@vibe-tx-converter/extractor';
 import { extractionQueue } from '../jobs/queues.js';
 import { logger } from '../lib/logger.js';
 
@@ -65,6 +61,21 @@ const ANTHROPIC_BASE_URL_KEY = 'llm.anthropic.base_url';
 const LLM_TIMEOUT_KEY = 'llm.timeout_ms';
 const LLM_MAX_TOKENS_KEY = 'llm.max_tokens';
 const MONTHLY_CAP_KEY = 'llm.anthropic.monthly_cap_usd';
+// Local Ollama settings (base URL has the legacy engine.llm_gateway.url alias).
+const OLLAMA_BASE_URL_KEY = 'engine.llm_gateway.url';
+const OLLAMA_MODEL_KEY = 'llm.local.model';
+const OLLAMA_VISION_MODEL_KEY = 'llm.local.vision_model';
+const DEFAULT_OLLAMA_BASE_URL = 'http://localhost:11434';
+const DEFAULT_OLLAMA_MODEL = 'qwen3.5:35b-a3b';
+
+// Read a single plaintext system_setting value, or null when unset.
+const readSingleSetting = async (database: typeof db, key: string): Promise<string | null> => {
+  const rows = await database
+    .select({ v: systemSettings.valuePlaintext })
+    .from(systemSettings)
+    .where(eq(systemSettings.key, key));
+  return rows[0]?.v ?? null;
+};
 
 // Phase 26 #29: curated Claude family with known pricing in the
 // extractor's price table. Anything matching CLAUDE_PATTERN is also
@@ -132,18 +143,30 @@ export const adminRouter = (): Router => {
       const policy = await resolveProviderPolicy(db);
       const { primary } = providerOrderFor(policy);
       const anthropicBaseUrl = await resolveAnthropicBaseUrl(db);
-      const viaShield = isAnthropicViaGateway(anthropicBaseUrl);
+      const viaProxy = isAnthropicViaGateway(anthropicBaseUrl);
       const llmMaxTokens = await resolveLlmMaxTokens(db);
-      // What the provider will ACTUALLY send, resolved the same way
-      // constructAnthropic / AnthropicProvider do — so the admin page can
-      // show the on-the-wire request without the operator triggering a
-      // failure. The model applies the DB → env → default fallback; the
-      // max_tokens is clamped to the Shield policy ceiling when routed
-      // through the gateway (Shield 400s anything above it).
+      // What the Anthropic (text-only) provider will ACTUALLY send, resolved
+      // the same way constructAnthropic does, so the admin page can show the
+      // on-the-wire request without triggering a failure. There is no longer
+      // a gateway token-ceiling clamp (Shield removed).
       const effectiveModel =
         modelRows[0]?.valuePlaintext ?? process.env.ANTHROPIC_MODEL ?? 'claude-sonnet-4-6';
-      const shieldCeiling = Number(process.env.VIBE_SHIELD_MAX_TOKENS_CEILING ?? 32_000);
-      const effectiveMaxTokens = viaShield ? Math.min(llmMaxTokens, shieldCeiling) : llmMaxTokens;
+      const effectiveMaxTokens = llmMaxTokens;
+      // Local Ollama config (resolved DB → env → default), so the admin page
+      // can show + edit the local text/vision models alongside Anthropic.
+      const ollamaBaseUrl =
+        (await readSingleSetting(db, OLLAMA_BASE_URL_KEY)) ??
+        process.env.OLLAMA_BASE_URL ??
+        process.env.LLM_GATEWAY_URL ??
+        DEFAULT_OLLAMA_BASE_URL;
+      const ollamaModel =
+        (await readSingleSetting(db, OLLAMA_MODEL_KEY)) ??
+        process.env.LLM_MODEL_ID ??
+        DEFAULT_OLLAMA_MODEL;
+      const ollamaVisionModel =
+        (await readSingleSetting(db, OLLAMA_VISION_MODEL_KEY)) ??
+        process.env.OLLAMA_VISION_MODEL ??
+        ollamaModel;
       res.json({
         // Primary provider — what runs first when extraction starts.
         // Pre-policy clients read this field; new clients read `policy`.
@@ -154,11 +177,15 @@ export const adminRouter = (): Router => {
         anthropicKeyLastFour: lastFour,
         allowedModels: CURATED_ANTHROPIC_MODELS,
         // Effective Anthropic base URL + whether extraction is proxied
-        // (through Vibe Shield on this appliance) vs hitting Anthropic
-        // directly. Lets the admin UI surface the Shield routing that was
-        // previously env-only (ANTHROPIC_BASE_URL).
+        // through an operator-configured Messages-API proxy vs hitting
+        // Anthropic directly. (Shield removed; this is a plain proxy now.)
         anthropicBaseUrl,
-        anthropicViaShield: viaShield,
+        anthropicViaProxy: viaProxy,
+        // Local Ollama (default provider). Scanned PDFs always OCR locally on
+        // the vision model; the text model handles text-layer extraction.
+        ollamaBaseUrl,
+        ollamaModel,
+        ollamaVisionModel,
         llmTimeoutMs: await resolveLlmTimeoutMs(db),
         llmMaxTokens,
         // Resolved on-the-wire request shape (read-only; for the admin
@@ -271,11 +298,10 @@ export const adminRouter = (): Router => {
     }
   });
 
-  // Set/clear the Anthropic base URL. Point this at the Vibe Shield
-  // gateway (e.g. http://vibe-shield-gateway:8080) to route the extraction
-  // LLM through Shield — the stored "Anthropic API key" then holds the
-  // vs_live_ Shield key. An empty value clears the override (back to env /
-  // direct api.anthropic.com).
+  // Set/clear the Anthropic base URL. Optional — point this at an
+  // operator-run Messages-API proxy; an empty value clears the override
+  // (back to env / direct api.anthropic.com). Anthropic is the text-only
+  // extraction provider; page images never reach it.
   router.post('/llm-provider/anthropic-base-url', async (req, res, next) => {
     try {
       const raw = String(req.body?.baseUrl ?? '').trim();
@@ -301,22 +327,110 @@ export const adminRouter = (): Router => {
         entityType: 'system_settings',
         entityId: ANTHROPIC_BASE_URL_KEY,
         action: 'anthropic-base-url.change',
-        payload: { baseUrl: anthropicBaseUrl, viaShield: isAnthropicViaGateway(anthropicBaseUrl) },
+        payload: { baseUrl: anthropicBaseUrl, viaProxy: isAnthropicViaGateway(anthropicBaseUrl) },
       });
       res.json({
         ok: true,
         anthropicBaseUrl,
-        anthropicViaShield: isAnthropicViaGateway(anthropicBaseUrl),
+        anthropicViaProxy: isAnthropicViaGateway(anthropicBaseUrl),
       });
     } catch (err) {
       next(err);
     }
   });
 
+  // Local Ollama config: base URL + text model + vision/OCR model. Empty
+  // value clears the override (back to env / default). Page images are OCR'd
+  // by the vision model locally and never egress (ADR-023).
+  const setOllamaSetting = async (
+    key: string,
+    raw: unknown,
+    actorId: string,
+    validate?: (v: string) => void,
+  ): Promise<string | null> => {
+    const value = String(raw ?? '').trim();
+    if (value.length === 0) {
+      await db.delete(systemSettings).where(eq(systemSettings.key, key));
+    } else {
+      if (validate) validate(value);
+      await db
+        .insert(systemSettings)
+        .values({ key, valuePlaintext: value, isSecret: false })
+        .onConflictDoUpdate({
+          target: systemSettings.key,
+          set: { valuePlaintext: value, updatedAt: sql`now()`, updatedByUserId: actorId },
+        });
+    }
+    invalidateProviderCache();
+    return value.length === 0 ? null : value;
+  };
+
+  router.post('/llm-provider/ollama-base-url', async (req, res, next) => {
+    try {
+      const value = await setOllamaSetting(
+        OLLAMA_BASE_URL_KEY,
+        req.body?.baseUrl,
+        req.user!.id,
+        (v) => {
+          if (!/^https?:\/\//.test(v)) {
+            throw new ValidationError('baseUrl must start with http:// or https://');
+          }
+        },
+      );
+      await writeAudit(db, {
+        actorUserId: req.user!.id,
+        entityType: 'system_settings',
+        entityId: OLLAMA_BASE_URL_KEY,
+        action: 'ollama-base-url.change',
+        payload: { baseUrl: value },
+      });
+      res.json({ ok: true, ollamaBaseUrl: value ?? DEFAULT_OLLAMA_BASE_URL });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.post('/llm-provider/ollama-model', async (req, res, next) => {
+    try {
+      const value = await setOllamaSetting(OLLAMA_MODEL_KEY, req.body?.model, req.user!.id);
+      await writeAudit(db, {
+        actorUserId: req.user!.id,
+        entityType: 'system_settings',
+        entityId: OLLAMA_MODEL_KEY,
+        action: 'ollama-model.change',
+        payload: { model: value },
+      });
+      res.json({ ok: true, ollamaModel: value ?? DEFAULT_OLLAMA_MODEL });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.post('/llm-provider/ollama-vision-model', async (req, res, next) => {
+    try {
+      const value = await setOllamaSetting(
+        OLLAMA_VISION_MODEL_KEY,
+        req.body?.visionModel,
+        req.user!.id,
+      );
+      await writeAudit(db, {
+        actorUserId: req.user!.id,
+        entityType: 'system_settings',
+        entityId: OLLAMA_VISION_MODEL_KEY,
+        action: 'ollama-vision-model.change',
+        payload: { visionModel: value },
+      });
+      res.json({ ok: true, ollamaVisionModel: value });
+    } catch (err) {
+      next(err);
+    }
+  });
+
   // Per-call LLM timeout (ms) for extraction + enrichment, applied to both
-  // the local gateway and the Anthropic/Shield provider. Empty/0 clears the
-  // override (back to LLM_TIMEOUT_MS env / 60s default). A slow statement
-  // routed through Shield may need more than the 60s default.
+  // the local Ollama provider and the Anthropic provider. Empty/0 clears the
+  // override (back to LLM_TIMEOUT_MS env / 60s default). A slow statement may
+  // need more than the 60s default. (Local vision/OCR has its own longer
+  // budget via OLLAMA_VISION_TIMEOUT_MS.)
   router.post('/llm-provider/timeout', async (req, res, next) => {
     try {
       const raw = req.body?.timeoutMs;
@@ -356,10 +470,10 @@ export const adminRouter = (): Router => {
     }
   });
 
-  // Per-call output-token ceiling for extraction (Anthropic/Shield path).
-  // Empty/0 clears the override (back to LLM_MAX_COMPLETION_TOKENS env /
-  // 32000 default). The old 6000 cap truncated multi-page statements; a
-  // larger statement needs a larger cap *and* a larger timeout.
+  // Per-call output-token ceiling for extraction. Empty/0 clears the
+  // override (back to LLM_MAX_COMPLETION_TOKENS env / 32000 default). The old
+  // 6000 cap truncated multi-page statements; a larger statement needs a
+  // larger cap *and* a larger timeout.
   router.post('/llm-provider/max-tokens', async (req, res, next) => {
     try {
       const raw = req.body?.maxTokens;
@@ -807,10 +921,10 @@ export const adminRouter = (): Router => {
     }
   });
 
-  // DB-backed engine configuration (Vibe Shield OCR + LLM Gateway). Reads
+  // DB-backed engine configuration (the local LLM/Ollama gateway URL). Reads
   // system_settings → falls back to env. Editable from the
   // /admin/engines UI without a worker restart.
-  const ENGINE_KEYS: readonly EngineKey[] = ['vibe-shield', 'llm-gateway'];
+  const ENGINE_KEYS: readonly EngineKey[] = ['llm-gateway'];
   const isEngineKey = (s: string): s is EngineKey => (ENGINE_KEYS as readonly string[]).includes(s);
 
   router.get('/engines', async (_req, res, next) => {
@@ -853,9 +967,10 @@ export const adminRouter = (): Router => {
         input.concurrency =
           body.concurrency === null ? null : Number.parseInt(String(body.concurrency), 10) || null;
       }
-      // Health-path override — vibe-shield only. Service-layer
-      // normalisation throws on bad shapes (must start with "/"); surface
-      // that as a ValidationError so the admin UI gets a clean toast.
+      // Optional health-path override (unused by the llm-gateway engine,
+      // which only takes a URL — kept for the generic engine plumbing).
+      // Service-layer normalisation throws on bad shapes (must start with
+      // "/"); surface that as a ValidationError for a clean admin toast.
       if (body.healthPath !== undefined) {
         input.healthPath =
           body.healthPath === null || body.healthPath === ''
@@ -939,23 +1054,18 @@ export const adminRouter = (): Router => {
         res.json({ ok: false, source: cfg.source, detail: 'no URL configured' });
         return;
       }
-      if (engine === 'vibe-shield') {
-        const result = await probeShieldHealth({
-          baseUrl: cfg.url,
-          ...(cfg.healthPath ? { healthPath: cfg.healthPath } : {}),
-          ...(cfg.apiKey ? { apiKey: cfg.apiKey } : {}),
-        });
-        res.json({ ok: result.ok, source: cfg.source, detail: result.detail ?? null });
-        return;
-      }
-      // llm-gateway: hit /health directly with a 1.5s timeout.
+      // llm-gateway (Ollama): hit /api/tags with a 1.5s timeout — Ollama's
+      // native liveness/catalog endpoint (it has no /health).
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 1500);
       const start = Date.now();
       try {
-        const probe = await fetch(`${cfg.url.replace(/\/$/, '')}/health`, {
-          signal: controller.signal,
-        });
+        const probe = await fetch(
+          `${cfg.url.replace(/\/v1\/?$/, '').replace(/\/$/, '')}/api/tags`,
+          {
+            signal: controller.signal,
+          },
+        );
         res.json({
           ok: probe.ok,
           source: cfg.source,
@@ -1007,8 +1117,8 @@ export const adminRouter = (): Router => {
         services: {
           databaseUrl: process.env.DATABASE_URL ? 'configured' : 'unconfigured',
           redisUrl: process.env.REDIS_URL ? 'configured' : 'unconfigured',
-          vibeShieldUrl: process.env.VIBE_SHIELD_URL ? 'configured' : 'unconfigured',
-          llmGatewayUrl: process.env.LLM_GATEWAY_URL ? 'configured' : 'unconfigured',
+          ollamaBaseUrl:
+            process.env.OLLAMA_BASE_URL ?? process.env.LLM_GATEWAY_URL ?? DEFAULT_OLLAMA_BASE_URL,
           anthropicBaseUrl: process.env.ANTHROPIC_BASE_URL ?? 'https://api.anthropic.com',
         },
         counts: {

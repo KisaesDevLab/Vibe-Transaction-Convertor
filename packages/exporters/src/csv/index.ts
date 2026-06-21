@@ -17,6 +17,10 @@ export interface CsvRow {
   trntype?: string | undefined;
   fitid?: string | undefined;
   memo?: string | undefined;
+  // Check payee read off the cancelled-check image. Fills the Xero Payee
+  // column and a dedicated generic-CSV Payee column; falls back to the
+  // description when absent.
+  payee?: string | null | undefined;
   // Phase 33 — generic-only enrichment columns. Empty strings render as
   // a blank cell so the column always appears in the header (the
   // generic CSV is the documented power-user export and operators who
@@ -66,17 +70,18 @@ const renderQbo4 = (rows: CsvRow[]): string => {
 };
 
 // Xero: *Date, *Amount, Payee, Description, Reference (5 columns per spec).
-// Payee is the leading payee phrase; we use the description as both Payee
-// and Description (Xero deduplicates), and place the optional check number
-// or memo into Reference.
+// Payee uses the check payee when one was read off the check image, else the
+// description (Xero deduplicates Payee/Description); the optional check number
+// or memo goes into Reference.
 const renderXero = (rows: CsvRow[]): string => {
   const out: string[][] = [['*Date', '*Amount', 'Payee', 'Description', 'Reference']];
   for (const r of rows) {
     const reference = r.checkNumber ?? r.memo ?? '';
+    const payee = r.payee && r.payee.length > 0 ? r.payee : r.description;
     out.push([
       isoToMdy(r.postedDate),
       centsToDecimal(r.amountCents),
-      r.description,
+      payee,
       r.description,
       reference,
     ]);
@@ -85,7 +90,7 @@ const renderXero = (rows: CsvRow[]): string => {
 };
 
 // Generic: full denormalized row — Date, Description, Amount,
-// RunningBalance, CheckNumber, TRNTYPE, FITID, CleansedDescription,
+// RunningBalance, CheckNumber, Payee, TRNTYPE, FITID, CleansedDescription,
 // Category. Used for spreadsheet review and as the audit-friendly
 // fallback. Phase 20 item 2; Phase 33 enrichment columns.
 const renderGeneric = (rows: CsvRow[]): string => {
@@ -96,6 +101,7 @@ const renderGeneric = (rows: CsvRow[]): string => {
       'Amount',
       'RunningBalance',
       'CheckNumber',
+      'Payee',
       'TRNTYPE',
       'FITID',
       'CleansedDescription',
@@ -109,6 +115,7 @@ const renderGeneric = (rows: CsvRow[]): string => {
       centsToDecimal(r.amountCents),
       r.runningBalanceCents == null ? '' : centsToDecimal(r.runningBalanceCents),
       r.checkNumber ?? '',
+      r.payee ?? '',
       r.trntype ?? '',
       r.fitid ?? '',
       r.cleansedDescription ?? '',

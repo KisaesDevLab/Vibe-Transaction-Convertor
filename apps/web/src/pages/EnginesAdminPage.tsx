@@ -1,7 +1,6 @@
 // /admin/engines — DB-backed engine configuration with a live readiness
-// probe. Operators can edit Vibe Shield (OCR) and LLM-Gateway URLs (plus per-engine
-// timeoutMs / concurrency where applicable) without a restart; values
-// land in `system_settings`, falling back to the env vars when unset.
+// probe. Operators can edit the local Ollama gateway URL without a restart;
+// values land in `system_settings`, falling back to the env vars when unset.
 //
 // Postgres + Redis stay read-only — they're set via the boot env and
 // changing them at runtime would require reconnecting half the app.
@@ -38,7 +37,7 @@ interface EngineConfig {
   apiKeyLastFour?: string | null;
 }
 
-type EngineKey = 'vibe-shield' | 'llm-gateway';
+type EngineKey = 'llm-gateway';
 
 interface EnginesResponse {
   configs: Record<EngineKey, EngineConfig>;
@@ -120,28 +119,16 @@ export function EnginesAdminPage() {
         name="Redis 7"
         envVar="REDIS_URL"
         status={deps.redis}
-        notes="BullMQ queue + login rate-limit + OCR cache. Set via boot env only."
-      />
-
-      <EditableEngine
-        engine="vibe-shield"
-        name="Vibe Shield — OCR (vision)"
-        envVar="VIBE_SHIELD_URL"
-        status={deps.vibeShield}
-        config={cfgs?.['vibe-shield'] ?? null}
-        showAdvanced
-        showShieldFields
-        showApiKey
-        notes="Stage 1 of 2 — OCR. Scanned page images are read by Claude VISION, turning the scan into markdown text. (Stage 2 — turning that text into structured rows — is the separate LLM provider on /admin/llm-provider, which defaults to the local gateway.) DEFAULT: route through the Vibe Shield gateway (it masks PII first) — URL defaults to http://vibe-shield-gateway:8080 (leave blank to use it) and the key is your Shield tenant key (vs_live_…, appId='converter'); requires Vibe Shield ≥ v1.12 with ZDR. Run `pnpm shield:smoke` to verify. DIRECT MODE: set the URL to https://api.anthropic.com and the key to a real sk-ant key to bypass Shield — ⚠️ this egresses UNREDACTED page images to Anthropic (no PII masking) and needs outbound internet."
+        notes="BullMQ queue + login rate-limit + enrichment cache. Set via boot env only."
       />
 
       <EditableEngine
         engine="llm-gateway"
-        name="LLM Gateway (Vibe)"
-        envVar="LLM_GATEWAY_URL"
+        name="LLM Gateway (Ollama)"
+        envVar="OLLAMA_BASE_URL"
         status={deps.llmGateway}
         config={cfgs?.['llm-gateway'] ?? null}
-        notes="Default extraction provider — Qwen3-8B via Vibe LLM Gateway. Switching to Anthropic happens on /admin/llm-provider; this URL is only used when provider=local."
+        notes="Local Ollama model server — handles BOTH OCR (scanned pages, via a Qwen-VL vision model) and text extraction. Page images are processed locally and never egress (ADR-023). The text + vision model tags are set on /admin/llm-provider (defaults qwen3.5:35b-a3b for text). Only used when provider=local (the default); the optional Anthropic provider is text-only. 'Test connection' hits Ollama's /api/tags."
       />
 
       <section className="rounded-lg border border-surface-muted bg-white p-4">

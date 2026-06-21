@@ -13,7 +13,7 @@ describe('renderCsv generic — Phase 33 enrichment columns', () => {
     // Strip the leading UTF-8 BOM before splitting on the CSV record separator.
     expect(out.startsWith('﻿')).toBe(true);
     expect(out.slice(1).split('\r\n')[0]).toBe(
-      'Date,Description,Amount,RunningBalance,CheckNumber,TRNTYPE,FITID,CleansedDescription,Category',
+      'Date,Description,Amount,RunningBalance,CheckNumber,Payee,TRNTYPE,FITID,CleansedDescription,Category',
     );
   });
 
@@ -35,10 +35,10 @@ describe('renderCsv generic — Phase 33 enrichment columns', () => {
       },
     ]);
     expect(out).toContain(
-      '03/08/2026,POS DBT 0123 SQ *AMTHAUS,-42.50,,,,,Square — Amthaus,Software & Subscriptions',
+      '03/08/2026,POS DBT 0123 SQ *AMTHAUS,-42.50,,,,,,Square — Amthaus,Software & Subscriptions',
     );
-    // Note the trailing two empty cells for the null row.
-    expect(out).toContain('03/09/2026,OPAQUE LINE,1.00,,,,,,');
+    // Trailing empty cells (CheckNumber, Payee, TRNTYPE, FITID, Cleansed, Category) for the null row.
+    expect(out).toContain('03/09/2026,OPAQUE LINE,1.00,,,,,,,');
   });
 
   it('starts with a UTF-8 BOM so Excel renders em-dashes/accents correctly', () => {
@@ -54,6 +54,35 @@ describe('renderCsv generic — Phase 33 enrichment columns', () => {
     // a real U+2014, not a Windows-1252 mojibake substitute.
     expect(out.codePointAt(0)).toBe(0xfeff);
     expect(out).toContain('Square — Amthaus');
+  });
+
+  it('emits the check payee in the generic Payee column', () => {
+    const out = renderCsv('generic', [
+      {
+        postedDate: '2026-03-08',
+        description: 'CHECK 1234',
+        amountCents: -250_00n,
+        checkNumber: '1234',
+        payee: 'ACME Plumbing',
+      },
+    ]);
+    expect(out).toContain('03/08/2026,CHECK 1234,-250.00,,1234,ACME Plumbing,,,,');
+  });
+
+  it('uses the check payee for the Xero Payee column, description otherwise', () => {
+    const out = renderCsv('xero', [
+      {
+        postedDate: '2026-03-08',
+        description: 'CHECK 1234',
+        amountCents: -250_00n,
+        payee: 'ACME Plumbing',
+      },
+      { postedDate: '2026-03-09', description: 'POS COFFEE', amountCents: -5_00n },
+    ]);
+    // payee row: Payee column = ACME Plumbing, Description = CHECK 1234
+    expect(out).toContain('03/08/2026,-250.00,ACME Plumbing,CHECK 1234,');
+    // no-payee row: Payee column falls back to the description
+    expect(out).toContain('03/09/2026,-5.00,POS COFFEE,POS COFFEE,');
   });
 
   it('quotes commas in cleansed and category cells', () => {

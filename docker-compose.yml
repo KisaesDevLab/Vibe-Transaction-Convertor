@@ -1,23 +1,23 @@
 # Standalone deployment — Phase 28.
-# Brings up Postgres + Redis + LLM Gateway + Caddy + a separate worker
-# container alongside the API. OCR now runs through Vibe Shield (Claude
-# vision); bring up the Shield gateway+engine via its own compose fragment
-# (see the Vibe-Shield repo) and point VIBE_SHIELD_URL at it. Operators run
+# Brings up Postgres + Redis + Ollama + Caddy + a separate worker container
+# alongside the API. OCR + extraction run locally on Ollama (Qwen text model
+# + a Qwen-VL vision model); page images never leave the host (ADR-023).
+# Operators run
 #   docker compose --profile standalone up -d
+# then pull the models:  docker compose exec ollama ollama pull qwen3.5:35b-a3b
 
 x-api-env: &api-env
   NODE_ENV: production
   PORT: 4000
   DATABASE_URL: postgres://vibetc:vibetc@postgres:5432/vibetc?schema=vibetc
   REDIS_URL: redis://redis:6379
-  # OCR via Vibe Shield (Claude vision, PII-redacted). Point at the Shield
-  # gateway; supply the tenant key (vs_live_…) via VIBE_SHIELD_API_KEY.
-  VIBE_SHIELD_URL: ${VIBE_SHIELD_URL:-http://vibe-shield-gateway:8080}
-  VIBE_SHIELD_API_KEY: ${VIBE_SHIELD_API_KEY:-}
-  VIBE_SHIELD_POLICY: ${VIBE_SHIELD_POLICY:-cpa-converter-output}
-  LLM_GATEWAY_URL: http://llm-gateway:8000
+  # Local Ollama model server — OCR (vision) + text extraction. No egress.
+  OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
   LLM_PROVIDER: local
-  LLM_MODEL_ID: qwen3-8b
+  LLM_MODEL_ID: ${LLM_MODEL_ID:-qwen3.5:35b-a3b}
+  # Vision/OCR model for scanned PDFs (a Qwen -VL tag). Falls back to the
+  # text model when that tag is itself multimodal.
+  OLLAMA_VISION_MODEL: ${OLLAMA_VISION_MODEL:-}
   SESSION_SECRET: ${SESSION_SECRET:?SESSION_SECRET must be set}
   # Default LAN install: Caddy serves plain HTTP on :80 (the Caddyfile's
   # `tls internal` block is commented out by default), so cookies must
@@ -57,19 +57,20 @@ services:
       timeout: 3s
       retries: 30
 
-  # OCR is provided by Vibe Shield (Claude vision through the Shield
-  # gateway), which is a separate multi-container service (engine +
-  # gateway + its own Postgres schema). Bring it up from the Vibe-Shield
-  # repo's compose fragment and set VIBE_SHIELD_URL / VIBE_SHIELD_API_KEY
-  # above. It is intentionally NOT embedded here.
-
-  llm-gateway:
-    image: vibe/llm-gateway:latest
+  # Local Ollama model server — serves both the text model (OpenAI-compatible
+  # /v1) and the Qwen-VL vision model (native /api/chat) for OCR. Models are
+  # NOT baked into the image; after `up`, pull them:
+  #   docker compose exec ollama ollama pull qwen3.5:35b-a3b
+  #   docker compose exec ollama ollama pull <your -VL tag>   # for scans
+  # For GPU acceleration add a `deploy.resources.reservations.devices` NVIDIA
+  # block (host needs the NVIDIA container toolkit); CPU-only works but is slow.
+  ollama:
+    image: ollama/ollama:latest
     profiles: ['standalone']
-    environment:
-      LLM_GATEWAY_MODEL: qwen3-8b
+    volumes:
+      - vibetc-ollama:/root/.ollama
     healthcheck:
-      test: ['CMD-SHELL', 'wget -q -O - http://localhost:8000/health || exit 1']
+      test: ['CMD-SHELL', 'ollama list >/dev/null 2>&1 || exit 1']
       interval: 5s
       timeout: 5s
       retries: 30
@@ -160,5 +161,6 @@ volumes:
   vibetc-pgdata:
   vibetc-data:
   vibetc-redis:
+  vibetc-ollama:
   vibetc-caddy-data:
   vibetc-caddy-config:

@@ -61,7 +61,7 @@ export const extractionMethod = vibetc.enum('extraction_method', ['text', 'ocr',
 // time; NULL means "use the firm default".
 //   - auto               : text-layer if present, OCR if not. No retry.
 //   - force-text         : always use the text layer. Fail if absent.
-//   - force-ocr          : always run OCR (Vibe Shield), even with a text layer.
+//   - force-ocr          : always run OCR (local Ollama Qwen-VL), even with a text layer.
 //   - auto-ocr-fallback  : text-layer first; re-run extraction with OCR
 //                          when the LLM stack rejects the text-layer
 //                          input (HTTP / malformed / empty-txs /
@@ -275,11 +275,10 @@ export const statements = vibetc.table(
       .notNull()
       .default(false),
     periodBoundsViolations: integer('period_bounds_violations').notNull().default(0),
-    // Phase: Vibe Shield. The per-conversion Shield session opened at
-    // upload. OCR + extraction calls quote it so their PII tokens share
-    // one vault; the export path materializes those tokens back to
-    // cleartext against this session. NULL for statements created before
-    // the Shield integration (and when Shield is unconfigured).
+    // Legacy/dormant (ADR-023): the former per-conversion Vibe Shield
+    // session id. Shield is removed; OCR runs locally on Ollama and emits
+    // cleartext, so this is no longer written. Column kept to avoid a churny
+    // migration; always NULL on new statements.
     shieldSessionId: text('shield_session_id'),
     llmProvider: llmProvider('llm_provider'),
     llmInputTokens: integer('llm_input_tokens').notNull().default(0),
@@ -291,14 +290,13 @@ export const statements = vibetc.table(
     errorMessage: text('error_message'),
     detectedSplits: jsonb('detected_splits'),
     multiAccountAcknowledged: boolean('multi_account_acknowledged').notNull().default(false),
-    // Vibe Shield vision path: per-page document type from the
-    // `vs-page-classifications` header (bank_statement | credit_card |
-    // check | deposit | transmittal | unknown | unclassified), in page
-    // order. NULL for the text/markdown path or pre-v1.13.0 gateways.
+    // Legacy/dormant (ADR-023): per-page document classification from the
+    // former Shield vision header. Local OCR emits no classification, so this
+    // is no longer written. Column kept to avoid a churny migration.
     pageClassifications: jsonb('page_classifications'),
-    // Set when a page classified 'unknown' (Shield applied fail-closed
-    // maximal redaction, so real data may have been clipped). Blocks export
-    // until the operator acknowledges — mirrors multiAccountAcknowledged.
+    // Review hold reason. Dormant — local OCR no longer sets a hold. When
+    // present (historical rows) it blocks export until the operator
+    // acknowledges — mirrors multiAccountAcknowledged.
     reviewHoldReason: text('review_hold_reason'),
     reviewHoldAcknowledged: boolean('review_hold_acknowledged').notNull().default(false),
     // Phase 14 #6/#7: when a PDF was split per detected account, this

@@ -8,7 +8,7 @@
 // the schemaVersion.
 //
 // Run with the same env this app would in production — DATABASE_URL,
-// REDIS_URL, VIBE_SHIELD_URL, LLM_GATEWAY_URL — to get a useful answer.
+// REDIS_URL, OLLAMA_BASE_URL — to get a useful answer.
 // Missing/unset shared services come back as {configured: false}; the
 // exit code is governed only by the things that MUST work for boot
 // to succeed (db + session secret).
@@ -179,8 +179,9 @@ const main = async (): Promise<void> => {
     deps: {
       database: await checkDb(),
       redis: await checkRedis(),
-      vibeShield: await checkHttpHealth(process.env.VIBE_SHIELD_URL, ['/health']),
-      llmGateway: await checkHttpHealth(process.env.LLM_GATEWAY_URL, ['/health', '/v1/models']),
+      ollama: await checkHttpHealth(process.env.OLLAMA_BASE_URL ?? process.env.LLM_GATEWAY_URL, [
+        '/api/tags',
+      ]),
     },
     storage: {
       dataDir: await checkDataDir(),

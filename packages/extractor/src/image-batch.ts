@@ -1,13 +1,11 @@
-// Page-image batching for Shield-routed vision extraction.
+// Page-image batching for local Ollama Qwen-VL vision extraction (ADR-023).
 //
-// Shield's /v1/messages imposes no image-count cap, but the gateway's
-// MAX_REQUEST_BYTES (default 1 MB) bounds the JSON request body — and a
-// base64 page image blows past that fast. So a multi-page statement cannot
-// go in one call: we pack pages into small batches (≤ maxPagesPerBatch and
-// ≤ maxBatchBytes, measured as the base64 size that actually lands in the
-// body), extract each batch, then merge (see merge-extraction.ts). Shield's
-// own guidance is 1–3 pages per call; Anthropic's limits (≤100 images/req,
-// ≤5 MB/image) are never the binding constraint at these batch sizes.
+// A multi-page statement is not sent in one /api/chat call: a large base64
+// payload + the schema would strain the model's context window and memory.
+// So we pack pages into small batches (≤ maxPagesPerBatch and ≤ maxBatchBytes,
+// measured as the base64 size that actually lands in the JSON body), extract
+// each batch, then merge (see merge-extraction.ts). The default is 1–3 pages
+// per call, which keeps each request comfortably within Qwen-VL's context.
 
 export interface BatchImage {
   data: Buffer;
@@ -23,17 +21,17 @@ export interface ImageBatch {
 }
 
 export interface BatchPagesOptions {
-  // Hard page cap per call. Default 3 (Shield guidance: 1–3 pages).
+  // Hard page cap per call. Default 3 (keeps each vision call's prompt +
+  // image payload bounded for memory + context window).
   maxPagesPerBatch?: number;
-  // base64-size budget per call. Default from VIBE_SHIELD_IMAGE_BATCH_BYTES
-  // or DEFAULT_MAX_BATCH_BYTES — sized to sit under the gateway's default
-  // 1 MB MAX_REQUEST_BYTES with headroom for the tool schema + prompt.
+  // base64-size budget per call. Default from VIBETC_OCR_IMAGE_BATCH_BYTES
+  // or DEFAULT_MAX_BATCH_BYTES — keeps each /api/chat request modest so a
+  // batch fits comfortably in the model's context window.
   maxBatchBytes?: number;
 }
 
-// Conservative default: under the 1 MB MAX_REQUEST_BYTES default, leaving
-// ~250 KB of headroom for the tool/schema + system + text prompt JSON.
-// Operators who raise MAX_REQUEST_BYTES on the gateway can raise this.
+// Conservative default: ~750 KB of base64 per batch, leaving headroom for the
+// schema + system + text prompt in the same request. Operators can raise it.
 export const DEFAULT_MAX_BATCH_BYTES = 750_000;
 
 // base64 inflates bytes by 4/3 (plus padding) — this is what counts against
@@ -42,7 +40,7 @@ const base64Size = (rawBytes: number): number => Math.ceil(rawBytes / 3) * 4;
 
 const resolveMaxBytes = (opt?: number): number => {
   if (opt && opt > 0) return opt;
-  const fromEnv = Number(process.env.VIBE_SHIELD_IMAGE_BATCH_BYTES);
+  const fromEnv = Number(process.env.VIBETC_OCR_IMAGE_BATCH_BYTES);
   if (Number.isFinite(fromEnv) && fromEnv > 0) return fromEnv;
   return DEFAULT_MAX_BATCH_BYTES;
 };

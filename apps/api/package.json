@@ -18,8 +18,7 @@
     "db:fidir-seed": "tsx src/scripts/fidir-refresh.ts",
     "db:restore": "tsx src/scripts/restore.ts",
     "appliance:self-check": "tsx src/scripts/appliance-self-check.ts",
-    "appliance:remove": "tsx src/scripts/remove-from-appliance.ts",
-    "shield:smoke": "tsx src/scripts/shield-smoke.ts"
+    "appliance:remove": "tsx src/scripts/remove-from-appliance.ts"
   },
   "dependencies": {
     "@vibe-tx-converter/extractor": "workspace:*",

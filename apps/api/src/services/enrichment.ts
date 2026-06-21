@@ -200,18 +200,6 @@ export const enrichStatement = async (
 
   const accountType = await accountTypeForStatement(db, stmtId);
 
-  // The statement's Vibe Shield session. The cleanse/categorize call must
-  // quote it so the cleansed descriptions tokenize into the SAME vault as
-  // the OCR + extraction tokens (under cpa-converter-output, reid='none')
-  // — otherwise the response is re-identified to cleartext and stored
-  // cleartext at rest, and its tokens can't be materialized at export.
-  const stmtSessionRows = await db
-    .select({ shieldSessionId: statements.shieldSessionId })
-    .from(statements)
-    .where(eq(statements.id, stmtId))
-    .limit(1);
-  const shieldSessionId = stmtSessionRows[0]?.shieldSessionId ?? undefined;
-
   const allTxs = await db
     .select()
     .from(transactions)
@@ -315,7 +303,6 @@ export const enrichStatement = async (
       userPrompt,
       schema: jsonSchema,
       schemaName: 'transaction_enrichment',
-      ...(shieldSessionId ? { sessionId: shieldSessionId } : {}),
     });
     llmCalls = 1;
     costMicros = completion.telemetry.costMicros;

@@ -85,23 +85,21 @@ export const healthRouter = (): Router => {
   });
 
   router.get('/ready', async (_req, res) => {
-    // Resolve engine URLs through the DB-backed config so an admin
-    // editing /admin/engines flips the probe target without a restart.
-    const [shieldCfg, llmGwCfg] = await Promise.all([
-      getEngineConfig(db, 'vibe-shield').catch(() => null),
-      getEngineConfig(db, 'llm-gateway').catch(() => null),
-    ]);
-    const [postgres, redis, vibeShield, llmGateway] = await Promise.all([
+    // Resolve the local LLM gateway (Ollama) URL through the DB-backed config
+    // so an admin editing /admin/engines flips the probe target without a
+    // restart. Probe Ollama's native /api/tags (it has no /health).
+    const llmGwCfg = await getEngineConfig(db, 'llm-gateway').catch(() => null);
+    const ollamaBase = llmGwCfg?.url ?? process.env.OLLAMA_BASE_URL ?? process.env.LLM_GATEWAY_URL;
+    const [postgres, redis, llmGateway] = await Promise.all([
       checkPostgres(),
       checkRedis(),
       checkHttpHealth(
-        'vibe-shield',
-        shieldCfg?.url ?? process.env.VIBE_SHIELD_URL,
-        shieldCfg?.healthPath ?? process.env.VIBE_SHIELD_HEALTH_PATH ?? '/health',
+        'ollama',
+        ollamaBase ? ollamaBase.replace(/\/v1\/?$/, '') : undefined,
+        '/api/tags',
       ),
-      checkHttpHealth('llm-gateway', llmGwCfg?.url ?? process.env.LLM_GATEWAY_URL),
     ]);
-    const dependencies = { postgres, redis, vibeShield, llmGateway };
+    const dependencies = { postgres, redis, llmGateway };
     const failing = Object.values(dependencies).some((d) => d.status === 'fail');
     if (failing) {
       logger.warn({ dependencies }, 'readiness check failed');

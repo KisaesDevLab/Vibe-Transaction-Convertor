@@ -2,7 +2,10 @@
 
 ## Status
 
-Accepted.
+Accepted. **Amended by ADR-023:** the Anthropic provider is now **text-only** —
+the vision/image path and the Vibe Shield session/base-URL routing have been
+removed. It extracts from cleartext OCR/text-layer markdown via tool-use as
+described below; scanned-page OCR runs locally on Ollama Qwen-VL.
 
 ## Context
 

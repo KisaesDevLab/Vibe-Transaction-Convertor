@@ -2,7 +2,11 @@
 
 ## Status
 
-Accepted. Supersedes ADR-003 (GLM-OCR over HTTP).
+**Superseded by ADR-023** (local OCR + extraction via Ollama Qwen-VL; Vibe
+Shield removed). Historical record only — the Shield client, session, and
+tokenize/materialize cycle described below no longer exist in the codebase.
+
+Previously: Accepted; superseded ADR-003 (GLM-OCR over HTTP).
 
 ## Context
 

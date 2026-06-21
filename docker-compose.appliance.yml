@@ -1,6 +1,6 @@
 # Appliance overlay — Phase 29.
-# Reuses shared Postgres / Redis / Vibe Shield / LLM gateway from the
-# vibe appliance. Operators run:
+# Reuses shared Postgres / Redis / Ollama from the vibe appliance.
+# Operators run:
 #   docker compose -f docker-compose.appliance.yml up -d
 # alongside the appliance's own compose file.
 
@@ -9,12 +9,12 @@ x-api-env: &api-env
   PORT: 4000
   DATABASE_URL: ${VIBETC_DATABASE_URL:?DATABASE_URL must be set in appliance env}
   REDIS_URL: ${VIBETC_REDIS_URL:?REDIS_URL must be set}
-  VIBE_SHIELD_URL: ${VIBE_APPLIANCE_VIBE_SHIELD_URL:-http://vibe-shield-gateway:8080}
-  VIBE_SHIELD_API_KEY: ${VIBETC_VIBE_SHIELD_API_KEY:?Vibe Shield tenant key (vs_live_…) required}
-  VIBE_SHIELD_POLICY: ${VIBE_SHIELD_POLICY:-cpa-converter-output}
-  LLM_GATEWAY_URL: ${VIBE_APPLIANCE_LLM_GATEWAY_URL:?shared LLM gateway URL required}
+  # Shared appliance Ollama model server — local OCR (vision) + text
+  # extraction. Page images never egress (ADR-023).
+  OLLAMA_BASE_URL: ${VIBE_APPLIANCE_OLLAMA_URL:?shared Ollama base URL required}
   LLM_PROVIDER: local
-  LLM_MODEL_ID: qwen3-8b
+  LLM_MODEL_ID: ${LLM_MODEL_ID:-qwen3.5:35b-a3b}
+  OLLAMA_VISION_MODEL: ${OLLAMA_VISION_MODEL:-}
   SESSION_SECRET: ${SESSION_SECRET:?SESSION_SECRET must be set}
   # The appliance installer derives this from `routes[0].host` in
   # vibe-app.yaml (e.g. https://tx.<appliance-domain>) and threads it in

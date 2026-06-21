@@ -5,13 +5,13 @@
 // request to a non-allowlisted host during a normal request lifecycle.
 //
 // Allowlisted hosts (set inside the firm's perimeter):
-//   * 127.0.0.1, localhost, ::1
+//   * 127.0.0.1, localhost, ::1 — the local Ollama at :11434 lives here
 //   * postgres:// and redis:// connection URIs (handled by their own
 //     drivers, not fetch — but we allow them defensively in case a
 //     future code path proxies through fetch)
-//   * the VIBE_SHIELD_URL host (default 'vibe-shield-gateway') — the
-//     on-appliance Shield gateway the OCR/extraction calls flow through
-//   * the LLM_GATEWAY_URL host (default 'llm-gateway')
+//   * the local Ollama host: the 'ollama' docker service name and the
+//     'llm-gateway' alias (OLLAMA_BASE_URL / LLM_GATEWAY_URL). All OCR +
+//     extraction run on this local model server; page images never egress.
 //
 // Anything else (api.anthropic.com, api.intuit.com, ofxhome.com, etc.)
 // must NOT be reached by a typical request. The optional Anthropic
@@ -25,7 +25,7 @@ import { createApp } from '../server.js';
 
 const ALLOWED_HOST_PATTERNS: RegExp[] = [
   /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(:|\/|$)/i,
-  /^https?:\/\/vibe-shield-gateway(:|\/|$)/i,
+  /^https?:\/\/ollama(:|\/|$)/i,
   /^https?:\/\/llm-gateway(:|\/|$)/i,
   // pg and redis schemes — listed for completeness; pg/ioredis don't
   // route through fetch, but if some future code path did, we wouldn't
@@ -37,7 +37,7 @@ const ALLOWED_HOST_PATTERNS: RegExp[] = [
 const isAllowed = (urlLike: string): boolean =>
   ALLOWED_HOST_PATTERNS.some((re) => re.test(urlLike));
 
-const ENV_KEYS = ['DATABASE_URL', 'REDIS_URL', 'VIBE_SHIELD_URL', 'LLM_GATEWAY_URL'] as const;
+const ENV_KEYS = ['DATABASE_URL', 'REDIS_URL', 'OLLAMA_BASE_URL', 'LLM_GATEWAY_URL'] as const;
 
 describe('no-egress invariant — /api/health/ready makes no outbound requests', () => {
   const original: Partial<Record<(typeof ENV_KEYS)[number], string | undefined>> = {};
@@ -90,8 +90,8 @@ describe('no-egress invariant — /api/health/ready makes no outbound requests',
     expect(outboundAttempts).toEqual([]);
   });
 
-  it('readiness with allowlisted VIBE_SHIELD + LLM_GATEWAY hosts does not call any disallowed URL', async () => {
-    process.env.VIBE_SHIELD_URL = 'http://vibe-shield-gateway:8080';
+  it('readiness with allowlisted Ollama + LLM_GATEWAY hosts does not call any disallowed URL', async () => {
+    process.env.OLLAMA_BASE_URL = 'http://ollama:11434';
     process.env.LLM_GATEWAY_URL = 'http://llm-gateway:8081';
     const app = createApp();
     // The two configured deps will fail (no real server) but their URLs
@@ -127,7 +127,8 @@ describe('no-egress invariant — /api/health/ready makes no outbound requests',
   it('the allowlist correctly classifies common URLs', () => {
     expect(isAllowed('http://127.0.0.1:5432/x')).toBe(true);
     expect(isAllowed('http://localhost:6379/')).toBe(true);
-    expect(isAllowed('http://vibe-shield-gateway:8080/health')).toBe(true);
+    expect(isAllowed('http://localhost:11434/api/chat')).toBe(true);
+    expect(isAllowed('http://ollama:11434/api/tags')).toBe(true);
     expect(isAllowed('http://llm-gateway:8081/v1/chat/completions')).toBe(true);
     expect(isAllowed('postgres://user:pass@db:5432/vibetc')).toBe(true);
     expect(isAllowed('redis://redis:6379/0')).toBe(true);

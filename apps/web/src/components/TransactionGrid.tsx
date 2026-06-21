@@ -435,6 +435,7 @@ export function TransactionGrid({
                 </>
               ) : null}
               <th className="px-3 py-2 font-medium">Check #</th>
+              <th className="px-3 py-2 font-medium">Payee</th>
               <SortHeader
                 label="Amount"
                 active={sortField === 'amountCents'}
@@ -479,7 +480,7 @@ export function TransactionGrid({
             {rows.length === 0 ? (
               <tr>
                 <td
-                  colSpan={(isAdmin ? 10 : 8) + (categories ? 2 : 0)}
+                  colSpan={(isAdmin ? 11 : 9) + (categories ? 2 : 0)}
                   className="px-3 py-8 text-center text-sm text-ink-muted"
                 >
                   No matching transactions.
@@ -880,6 +881,15 @@ function Row({
         </>
       ) : null}
       <td className="px-3 py-2 text-xs text-ink-subtle">{tx.checkNumber ?? ''}</td>
+      {/* Check payee read off the cancelled-check image; editable inline. */}
+      <td className="px-3 py-2" onClick={(e) => e.stopPropagation()}>
+        <PayeeCell
+          tx={tx}
+          onSavePayee={async (val) => {
+            await onSave({ payee: val });
+          }}
+        />
+      </td>
       <td className="px-3 py-2 text-right tabular-nums">
         {editing ? (
           <input
@@ -1048,6 +1058,78 @@ function CleansedCell({
       {tx.enrichmentUserEdited ? (
         <span className="ml-1 text-[10px] text-ink-subtle">(edited)</span>
       ) : null}
+    </button>
+  );
+}
+
+// Check payee ("Pay to the order of"), read off the cancelled-check image on
+// the local vision model. Editable inline; drives the OFX <NAME> for check
+// rows. Mirrors CleansedCell.
+function PayeeCell({
+  tx,
+  onSavePayee,
+}: {
+  tx: TransactionRow;
+  onSavePayee: (val: string | null) => Promise<unknown>;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [value, setValue] = useState(tx.payee ?? '');
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (!editing) setValue(tx.payee ?? '');
+  }, [tx.payee, editing]);
+
+  const commit = async (): Promise<void> => {
+    const trimmed = value.trim();
+    const next = trimmed.length === 0 ? null : trimmed;
+    if (next === (tx.payee ?? null)) {
+      setEditing(false);
+      return;
+    }
+    setSaving(true);
+    try {
+      await onSavePayee(next);
+    } finally {
+      setSaving(false);
+      setEditing(false);
+    }
+  };
+
+  if (editing) {
+    return (
+      <input
+        autoFocus
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+        onBlur={() => void commit()}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            void commit();
+          }
+          if (e.key === 'Escape') {
+            setValue(tx.payee ?? '');
+            setEditing(false);
+          }
+        }}
+        disabled={saving}
+        maxLength={200}
+        className="w-full rounded-md border border-surface-muted px-2 py-1 text-xs"
+        placeholder="Payee…"
+      />
+    );
+  }
+
+  const display = tx.payee ?? '';
+  return (
+    <button
+      type="button"
+      onClick={() => setEditing(true)}
+      className="text-left text-xs hover:underline"
+      title={display || 'Click to add a check payee'}
+    >
+      {display.length > 32 ? `${display.slice(0, 32)}…` : display || '—'}
     </button>
   );
 }

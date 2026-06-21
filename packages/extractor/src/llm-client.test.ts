@@ -6,7 +6,6 @@ import {
   computeAnthropicCostMicros,
   describeAnthropicRequest,
   parseExtractionResponse,
-  parsePageClassifications,
 } from './llm-client.js';
 
 describe('describeAnthropicRequest', () => {
@@ -29,26 +28,6 @@ describe('describeAnthropicRequest', () => {
     expect(s).toContain('media=image/jpeg');
     expect(s).toContain('viaGateway=true');
     expect(s).not.toContain('secret');
-  });
-});
-
-describe('parsePageClassifications', () => {
-  it('parses a JSON string array', () => {
-    expect(parsePageClassifications('["bank_statement","check","unknown"]')).toEqual([
-      'bank_statement',
-      'check',
-      'unknown',
-    ]);
-  });
-  it('treats missing / empty as no classification', () => {
-    expect(parsePageClassifications(null)).toBeUndefined();
-    expect(parsePageClassifications(undefined)).toBeUndefined();
-    expect(parsePageClassifications('')).toBeUndefined();
-  });
-  it('rejects malformed or non-string-array values', () => {
-    expect(parsePageClassifications('not json')).toBeUndefined();
-    expect(parsePageClassifications('{"a":1}')).toBeUndefined();
-    expect(parsePageClassifications('[1,2,3]')).toBeUndefined();
   });
 });
 
@@ -178,6 +157,161 @@ describe('LocalGatewayProvider', () => {
       rawResponse: broken,
     });
   });
+
+  it('OCRs scanned pages via the native /api/chat vision path', async () => {
+    // The worker hands page images to extract({ images }); the local provider
+    // POSTs them to Ollama's native /api/chat with the schema as `format`
+    // and the vision model, then parses message.content as the extraction.
+    let calledUrl = '';
+    let body: Record<string, unknown> = {};
+    const provider = new LocalGatewayProvider({
+      baseUrl: 'http://gw.test',
+      modelId: 'qwen3.5:35b-a3b',
+      visionModelId: 'qwen2.5vl:7b',
+      fetcher: async (url, init) => {
+        calledUrl = String(url);
+        body = JSON.parse((init as RequestInit).body as string) as Record<string, unknown>;
+        return okJsonResponse({
+          message: { content: JSON.stringify(SAMPLE) },
+          prompt_eval_count: 30,
+          eval_count: 12,
+        });
+      },
+    });
+    const r = await provider.extract('', {
+      schema: { type: 'object' },
+      images: [{ data: Buffer.from('img'), mediaType: 'image/jpeg' }],
+    });
+    expect(calledUrl).toBe('http://gw.test/api/chat');
+    expect(body.model).toBe('qwen2.5vl:7b');
+    expect(body.format).toEqual({ type: 'object' });
+    const messages = body.messages as Array<{ images?: string[] }>;
+    expect(messages[1]?.images?.[0]).toBe(Buffer.from('img').toString('base64'));
+    expect(r.data.transactions[0]?.description).toBe('X');
+    expect(r.telemetry.model).toBe('qwen2.5vl:7b');
+    expect(r.telemetry.inputTokens).toBe(30);
+    expect(r.telemetry.outputTokens).toBe(12);
+    expect(r.telemetry.costMicros).toBe(0n);
+  });
+
+  it('throws on a non-2xx text response (HTTP rejection → provider fallback)', async () => {
+    const provider = new LocalGatewayProvider({
+      baseUrl: 'http://gw.test',
+      fetcher: async () => new Response('upstream boom', { status: 500 }),
+    });
+    await expect(provider.extract('# md')).rejects.toThrow(/HTTP 500/);
+  });
+
+  it('throws on a non-2xx vision response', async () => {
+    const provider = new LocalGatewayProvider({
+      baseUrl: 'http://gw.test',
+      visionModelId: 'qwen2.5vl:7b',
+      fetcher: async () => new Response('vision boom', { status: 503 }),
+    });
+    await expect(
+      provider.extract('', { images: [{ data: Buffer.from('i'), mediaType: 'image/jpeg' }] }),
+    ).rejects.toThrow(/ollama vision HTTP 503/);
+  });
+
+  it('surfaces an empty vision completion as ExtractionResponseError', async () => {
+    const provider = new LocalGatewayProvider({
+      baseUrl: 'http://gw.test',
+      fetcher: async () => okJsonResponse({ message: { content: '' } }),
+    });
+    await expect(
+      provider.extract('', { images: [{ data: Buffer.from('i'), mediaType: 'image/jpeg' }] }),
+    ).rejects.toMatchObject({
+      name: 'ExtractionResponseError',
+      summary: 'ollama vision returned an empty completion',
+    });
+  });
+
+  it('rejects malformed vision JSON with ExtractionResponseError', async () => {
+    const provider = new LocalGatewayProvider({
+      baseUrl: 'http://gw.test',
+      fetcher: async () => okJsonResponse({ message: { content: '{ not json' } }),
+    });
+    await expect(
+      provider.extract('', { images: [{ data: Buffer.from('i'), mediaType: 'image/jpeg' }] }),
+    ).rejects.toBeInstanceOf(ExtractionResponseError);
+  });
+
+  it('retries the vision call once when the first response omits transactions', async () => {
+    const partial = JSON.stringify({
+      period: { start: '2026-03-01', end: '2026-03-31' },
+      balances: { opening_cents: 100, closing_cents: 0 },
+      source_date_format: { format: 'MDY', confidence: 0.9 },
+    });
+    let callCount = 0;
+    const provider = new LocalGatewayProvider({
+      baseUrl: 'http://gw.test',
+      fetcher: async () => {
+        callCount += 1;
+        return okJsonResponse({
+          message: { content: callCount === 1 ? partial : JSON.stringify(SAMPLE) },
+          prompt_eval_count: 10,
+          eval_count: 5,
+        });
+      },
+    });
+    const r = await provider.extract('', {
+      images: [{ data: Buffer.from('i'), mediaType: 'image/jpeg' }],
+    });
+    expect(callCount).toBe(2);
+    expect(r.data.transactions[0]?.description).toBe('X');
+    expect(r.telemetry.inputTokens).toBe(20);
+  });
+
+  it('strips a trailing /v1 from the base URL so the native /api/chat path resolves', async () => {
+    let calledUrl = '';
+    const provider = new LocalGatewayProvider({
+      baseUrl: 'http://gw.test/v1',
+      fetcher: async (url) => {
+        calledUrl = String(url);
+        return okJsonResponse({ message: { content: JSON.stringify(SAMPLE) } });
+      },
+    });
+    await provider.extract('', { images: [{ data: Buffer.from('i'), mediaType: 'image/jpeg' }] });
+    expect(calledUrl).toBe('http://gw.test/api/chat');
+  });
+
+  it('completeWithImages posts images to /api/chat and returns parsed JSON (check-resolve)', async () => {
+    let calledUrl = '';
+    let body: Record<string, unknown> = {};
+    const checks = { checks: [{ check_number: '1234', payee: 'JOHN DOE', amount_cents: 5000 }] };
+    const provider = new LocalGatewayProvider({
+      baseUrl: 'http://gw.test',
+      visionModelId: 'qwen2.5vl:7b',
+      fetcher: async (url, init) => {
+        calledUrl = String(url);
+        body = JSON.parse((init as RequestInit).body as string) as Record<string, unknown>;
+        return okJsonResponse({
+          message: { content: JSON.stringify(checks) },
+          prompt_eval_count: 9,
+          eval_count: 4,
+        });
+      },
+    });
+    const r = await provider.completeWithImages({
+      systemPrompt: 'read checks',
+      userPrompt: 'emit JSON',
+      schema: { type: 'object' },
+      images: [{ data: Buffer.from('img'), mediaType: 'image/png' }],
+    });
+    expect(calledUrl).toBe('http://gw.test/api/chat');
+    expect(body.model).toBe('qwen2.5vl:7b');
+    expect(body.format).toEqual({ type: 'object' });
+    expect(r.data).toEqual(checks);
+    expect(r.telemetry.inputTokens).toBe(9);
+    expect(r.telemetry.costMicros).toBe(0n);
+  });
+
+  it('completeWithImages requires at least one image', async () => {
+    const provider = new LocalGatewayProvider({ baseUrl: 'http://gw.test' });
+    await expect(
+      provider.completeWithImages({ systemPrompt: 's', userPrompt: 'u', schema: {}, images: [] }),
+    ).rejects.toThrow(/at least one image/);
+  });
 });
 
 describe('AnthropicProvider', () => {
@@ -258,28 +392,7 @@ describe('AnthropicProvider', () => {
     expect(callCount).toBe(1);
   });
 
-  it('clamps max_tokens to the Shield ceiling (32000) when routed through a gateway', async () => {
-    // Shield 400s a /v1/messages whose max_tokens exceeds the policy
-    // ceiling (32000). A knob set above that (range allows up to 64000)
-    // must be clamped to the ceiling, not sent as-is.
-    let sentMaxTokens = -1;
-    const provider = new AnthropicProvider({
-      apiKey: 'vs_live_k',
-      baseUrl: 'http://vibe-shield-gateway:8080',
-      maxTokens: 64_000,
-      fetcher: async (_url, init) => {
-        sentMaxTokens = JSON.parse((init as RequestInit).body as string).max_tokens;
-        return okJsonResponse({
-          content: [{ type: 'tool_use', name: 'emit_extraction', input: SAMPLE }],
-          usage: { input_tokens: 10, output_tokens: 10 },
-        });
-      },
-    });
-    await provider.extract('# md');
-    expect(sentMaxTokens).toBe(32_000);
-  });
-
-  it('does NOT clamp max_tokens when going direct to Anthropic', async () => {
+  it('sends the configured max_tokens unchanged (no gateway ceiling clamp)', async () => {
     let sentMaxTokens = -1;
     const provider = new AnthropicProvider({
       apiKey: 'sk-ant-k',
@@ -297,30 +410,7 @@ describe('AnthropicProvider', () => {
     expect(sentMaxTokens).toBe(64_000);
   });
 
-  it('surfaces the vs-page-classifications header on the vision path', async () => {
-    const provider = new AnthropicProvider({
-      apiKey: 'vs_live_k',
-      baseUrl: 'http://vibe-shield-gateway:8080',
-      fetcher: async () =>
-        ({
-          ok: true,
-          headers: {
-            get: (k: string) =>
-              k === 'vs-page-classifications' ? '["bank_statement","check"]' : null,
-          },
-          json: async () => ({
-            content: [{ type: 'tool_use', name: 'emit_extraction', input: SAMPLE }],
-            usage: { input_tokens: 10, output_tokens: 10 },
-          }),
-        }) as unknown as Response,
-    });
-    const r = await provider.extract('', {
-      images: [{ data: Buffer.from('img'), mediaType: 'image/jpeg' }],
-    });
-    expect(r.classifications).toEqual(['bank_statement', 'check']);
-  });
-
-  it('leaves classifications undefined when no header is present', async () => {
+  it('rejects image inputs — Anthropic is text-only (vision/OCR is local)', async () => {
     const provider = new AnthropicProvider({
       apiKey: 'k',
       fetcher: async () =>
@@ -329,8 +419,33 @@ describe('AnthropicProvider', () => {
           usage: { input_tokens: 10, output_tokens: 10 },
         }),
     });
-    const r = await provider.extract('# md');
-    expect(r.classifications).toBeUndefined();
+    await expect(
+      provider.extract('', { images: [{ data: Buffer.from('img'), mediaType: 'image/jpeg' }] }),
+    ).rejects.toThrow(/text-only/);
+  });
+
+  it('completeWithImages rejects — Anthropic is text-only', async () => {
+    const provider = new AnthropicProvider({ apiKey: 'k' });
+    await expect(
+      provider.completeWithImages({
+        systemPrompt: 's',
+        userPrompt: 'u',
+        schema: {},
+        images: [{ data: Buffer.from('i'), mediaType: 'image/png' }],
+      }),
+    ).rejects.toThrow(/text-only/);
+  });
+
+  it('surfaces a non-2xx response body + request shape on an HTTP error', async () => {
+    const provider = new AnthropicProvider({
+      apiKey: 'sk-ant-k',
+      model: 'claude-sonnet-4-6',
+      fetcher: async () =>
+        new Response('{"error":{"type":"overloaded_error","message":"Overloaded"}}', {
+          status: 529,
+        }),
+    });
+    await expect(provider.extract('# md')).rejects.toThrow(/anthropic HTTP 529.*Overloaded/s);
   });
 
   it('wraps missing-tool_use as ExtractionResponseError so the audit log captures the raw body', async () => {

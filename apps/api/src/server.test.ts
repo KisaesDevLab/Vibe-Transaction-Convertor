@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { createApp } from './server.js';
 
-const ENV_KEYS = ['DATABASE_URL', 'REDIS_URL', 'VIBE_SHIELD_URL', 'LLM_GATEWAY_URL'] as const;
+const ENV_KEYS = ['DATABASE_URL', 'REDIS_URL', 'OLLAMA_BASE_URL', 'LLM_GATEWAY_URL'] as const;
 
 describe('createApp() — health, version, errors', () => {
   const original: Partial<Record<(typeof ENV_KEYS)[number], string | undefined>> = {};
@@ -41,7 +41,6 @@ describe('createApp() — health, version, errors', () => {
     expect(res.body.dependencies).toMatchObject({
       postgres: { status: 'unconfigured' },
       redis: { status: 'unconfigured' },
-      vibeShield: { status: 'unconfigured' },
       llmGateway: { status: 'unconfigured' },
     });
   });

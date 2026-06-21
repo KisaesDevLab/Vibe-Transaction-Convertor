@@ -21,7 +21,7 @@ removing or renaming a field is an installer-breaking change.
 | `image`               | yes      | string        | Fully qualified image reference without a tag. The installer appends the version it wants.                                                                     |
 | `image_tag_default`   | no       | string        | Tag to use when the installer doesn't pin one (`latest` is the only supported value).                                                                          |
 | `db_schema`           | yes      | string        | Postgres schema this app owns. Must be `vibetc`. Migrations refuse to create anything outside it.                                                              |
-| `shared_services`     | yes      | string[]      | Services the app expects the appliance to provision: `postgres`, `redis`, `vibe-shield`, `llm-gateway`, `caddy`.                                               |
+| `shared_services`     | yes      | string[]      | Services the app expects the appliance to provision: `postgres`, `redis`, `ollama`, `caddy`.                                                                   |
 | `routes`              | yes      | route[]       | Caddy routes the appliance configures. See below.                                                                                                              |
 | `env`                 | yes      | env-spec      | Required and optional env vars. See below.                                                                                                                     |
 | `volumes`             | yes      | volume[]      | Persistent volumes. The data volume (`/var/lib/vibetc`) holds source PDFs, exports, and the FIDIR mirror.                                                      |
@@ -54,11 +54,11 @@ env:
   required:
     - DATABASE_URL
     - REDIS_URL
-    - VIBE_SHIELD_URL
-    - LLM_GATEWAY_URL
+    - OLLAMA_BASE_URL
     - LLM_MODEL_ID
     - SESSION_SECRET
   optional:
+    - OLLAMA_VISION_MODEL
     - LOG_LEVEL
     - MAX_UPLOAD_MB
     - MAX_BATCH_SIZE

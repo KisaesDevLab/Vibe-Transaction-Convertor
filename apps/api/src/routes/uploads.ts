@@ -11,7 +11,6 @@ import { logger } from '../lib/logger.js';
 import { findByHash, ingestUpload, streamSourcePdf } from '../services/statements.js';
 import { writeAudit } from '../services/audit.js';
 import { isPdfProcessingStrategy, type PdfProcessingStrategy } from '../services/pdf-strategy.js';
-import { createSession, resolveShieldConn } from '../services/shield.js';
 import { checkFreeSpace, isPdfMagicBytes, sha256Of, storePdf } from '../services/upload-storage.js';
 import { eq } from 'drizzle-orm';
 import { accounts, statements } from '../db/schema.js';
@@ -174,24 +173,8 @@ export const uploadsByAccountRouter = (): Router => {
             processingStrategyOverride,
           });
 
-          // Open a per-conversion Vibe Shield session so the OCR
-          // (Claude-vision) and extraction calls share one token vault and
-          // the export can materialize tokens back to cleartext. Best-
-          // effort: a text-layer statement on a Shield-less deploy still
-          // works; a scanned PDF fails at OCR time if Shield is absent.
-          try {
-            const conn = await resolveShieldConn(db);
-            const sessionId = await createSession(conn, { userId: req.user!.id });
-            await db
-              .update(statements)
-              .set({ shieldSessionId: sessionId })
-              .where(eq(statements.id, result.statement.id));
-          } catch (err) {
-            logger.warn(
-              { err, statementId: result.statement.id },
-              'Vibe Shield session not opened (continuing)',
-            );
-          }
+          // OCR + extraction run locally on Ollama (ADR-023); no per-
+          // conversion session to open at upload.
 
           ingested.push({
             filename: f.originalname,

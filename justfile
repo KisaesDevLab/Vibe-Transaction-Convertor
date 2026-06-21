@@ -18,11 +18,6 @@ seed:
 fidir-refresh:
     pnpm --filter @vibe-tx-converter/api run db:fidir-seed
 
-# Live smoke test of the OCR-via-Vibe-Shield path (reachability, appId,
-# materialize gate, ZDR). Pass --no-llm to skip the tiny /v1/messages probe.
-shield-smoke *ARGS:
-    pnpm --filter @vibe-tx-converter/api run shield:smoke {{ARGS}}
-
 up:
     docker compose --profile standalone up -d
 

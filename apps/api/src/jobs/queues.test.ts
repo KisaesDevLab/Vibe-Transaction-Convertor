@@ -49,7 +49,8 @@ live('extraction queue idempotency', () => {
     const firstTs = first!.timestamp;
 
     expect(await removeExtractionJob(sample.statementId)).toBe(true);
-    expect(await extractionQueue().getJob(`extract-${sample.statementId}`)).toBeNull();
+    // BullMQ's getJob() resolves to undefined (not null) for a missing job.
+    expect(await extractionQueue().getJob(`extract-${sample.statementId}`)).toBeFalsy();
 
     // Force a measurable timestamp delta — BullMQ uses ms precision.
     await new Promise((r) => setTimeout(r, 5));

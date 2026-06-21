@@ -36,19 +36,19 @@ pdf.js's worker transfers (not copies) the buffer; subsequent renders re-issue t
 
 The export filename was built from the FI name + period and contained a non-ASCII character (curly quote, en/em dash, accented letter). Fixed by sanitizing to ASCII before the header is set.
 
-## Extraction fails with "VIBE_SHIELD_URL is not set"
+## A scanned PDF fails at OCR
 
-The PDF is scanned (no text layer) and OCR isn't configured. OCR runs through the Vibe Shield gateway (Claude vision).
+Scanned pages are OCR'd locally by a Qwen-VL vision model on Ollama (page images never leave the host).
 
-- Configure **Vibe Shield (OCR via Claude)** on `/admin/engines` (URL + `vs_live_…` key) and re-extract. Run `pnpm shield:smoke` to confirm the full path.
+- Make sure a vision (`-VL`) model tag is pulled on the Ollama host and set as the **vision model** on `/admin/llm-provider`. Pull with e.g. `ollama pull <your -VL tag>`.
 - Or, if you're sure the PDF has a text layer, the routing heuristic was wrong — open the PDF in Acrobat / Preview and select some text to verify. If text selects, the heuristic is the bug. Re-extract; the LLM may pick up the text path on retry.
 
-## Extraction fails with "LLM_GATEWAY_URL not set"
+## Extraction fails with "Ollama base URL not set" / connection refused
 
-Provider is `local` but the gateway URL is empty.
+Provider is `local` but Ollama isn't reachable.
 
-- Set `LLM_GATEWAY_URL` and restart the API, **or**
-- Switch the provider to Anthropic on `/admin/llm-provider` and set an API key.
+- Set `OLLAMA_BASE_URL` (default `http://localhost:11434`) — or the URL on `/admin/engines` — make sure Ollama is running with the text + vision models pulled, then re-extract. **or**
+- Switch the provider to Anthropic (text-only) on `/admin/llm-provider` and set an API key.
 
 ## Extraction fails with "monthly Anthropic spend cap reached"
 

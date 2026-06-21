@@ -15,12 +15,18 @@ const KEY_ANTHROPIC_MODEL = 'llm.anthropic.model';
 const KEY_ANTHROPIC_BASE_URL = 'llm.anthropic.base_url';
 const KEY_LLM_TIMEOUT = 'llm.timeout_ms';
 const KEY_LLM_MAX_TOKENS = 'llm.max_tokens';
+// Local Ollama: base URL + text/vision model tags, operator-configurable from
+// /admin/llm-provider. The base URL also has the legacy `engine.llm_gateway.url`
+// alias (kept for in-place upgrades); a value under either key wins over env.
+const KEY_OLLAMA_BASE_URL = 'engine.llm_gateway.url';
+const KEY_OLLAMA_MODEL = 'llm.local.model';
+const KEY_OLLAMA_VISION_MODEL = 'llm.local.vision_model';
 
 export const DEFAULT_LLM_TIMEOUT_MS = 60_000;
 export const DEFAULT_LLM_MAX_TOKENS = 32_000;
 
 // Per-call timeout (ms) for extraction + enrichment LLM requests, applied
-// to both the local gateway and the Anthropic/Shield provider. Operator-set
+// to both the local Ollama provider and the Anthropic provider. Operator-set
 // (system_settings) wins, then the LLM_TIMEOUT_MS env, then 60s. A slow
 // statement may take up to ~2x this (one reminder-retry).
 export const resolveLlmTimeoutMs = async (db: Db): Promise<number> => {
@@ -51,10 +57,9 @@ const DIRECT_ANTHROPIC = 'https://api.anthropic.com';
 export type ProviderId = 'local' | 'anthropic';
 
 // Effective Anthropic base URL: operator-set (system_settings) wins, then
-// the ANTHROPIC_BASE_URL env, then the direct Anthropic API. When this
-// points anywhere other than api.anthropic.com the extraction LLM is
-// routed through a gateway — for this app that's the Vibe Shield gateway,
-// which redacts PII before it reaches Claude.
+// the ANTHROPIC_BASE_URL env, then the direct Anthropic API. A non-default
+// value routes the (text-only) extraction LLM through an operator-configured
+// proxy that speaks the Messages API.
 export const resolveAnthropicBaseUrl = async (db: Db): Promise<string> => {
   const row = await readSetting(db, KEY_ANTHROPIC_BASE_URL);
   const fromDb = row?.valuePlaintext?.trim();
@@ -65,7 +70,7 @@ export const resolveAnthropicBaseUrl = async (db: Db): Promise<string> => {
 };
 
 // True when the effective base URL is NOT the direct Anthropic API, i.e.
-// extraction is proxied (through Vibe Shield on this appliance).
+// extraction is proxied through an operator-configured Messages-API proxy.
 export const isAnthropicViaGateway = (baseUrl: string): boolean =>
   baseUrl.replace(/\/$/, '') !== DIRECT_ANTHROPIC;
 
@@ -130,12 +135,20 @@ export const invalidateProviderCache = (): void => {
 };
 
 const constructLocal = async (db: Db): Promise<LlmProvider> => {
-  // engine.llm_gateway.url is operator-configurable from /admin/engines.
-  // Fall back to LLM_GATEWAY_URL env if the DB has no override.
-  const gatewayRow = await readSetting(db, 'engine.llm_gateway.url');
-  const baseUrl = gatewayRow?.valuePlaintext ?? undefined;
+  // Ollama base URL + text/vision model tags are operator-configurable from
+  // /admin/llm-provider. Each falls back to its env default in the provider
+  // constructor when the DB has no override.
+  const baseUrl = (await readSetting(db, KEY_OLLAMA_BASE_URL))?.valuePlaintext ?? undefined;
+  const modelId = (await readSetting(db, KEY_OLLAMA_MODEL))?.valuePlaintext ?? undefined;
+  const visionModelId =
+    (await readSetting(db, KEY_OLLAMA_VISION_MODEL))?.valuePlaintext ?? undefined;
   const timeoutMs = await resolveLlmTimeoutMs(db);
-  return new LocalGatewayProvider({ ...(baseUrl ? { baseUrl } : {}), timeoutMs });
+  return new LocalGatewayProvider({
+    ...(baseUrl ? { baseUrl } : {}),
+    ...(modelId ? { modelId } : {}),
+    ...(visionModelId ? { visionModelId } : {}),
+    timeoutMs,
+  });
 };
 
 const constructAnthropic = async (db: Db): Promise<LlmProvider> => {
@@ -154,9 +167,8 @@ const constructAnthropic = async (db: Db): Promise<LlmProvider> => {
   // Merge curated defaults + operator overrides so worker cost rollups
   // include any models the operator added on /admin/llm-provider.
   const priceTable = await getMergedPriceTable(db);
-  // Operator-set base URL (e.g. the Vibe Shield gateway) so routing the
-  // extraction LLM through Shield is configurable from /admin/llm-provider
-  // instead of an env-only ANTHROPIC_BASE_URL.
+  // Operator-set base URL so an optional Messages-API proxy is configurable
+  // from /admin/llm-provider instead of an env-only ANTHROPIC_BASE_URL.
   const baseUrl = await resolveAnthropicBaseUrl(db);
   const timeoutMs = await resolveLlmTimeoutMs(db);
   const maxTokens = await resolveLlmMaxTokens(db);

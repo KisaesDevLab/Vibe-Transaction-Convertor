@@ -5,12 +5,16 @@
 > **License:** PolyForm Internal Use 1.0.0 (no runtime enforcement).
 > **Scope locked for v1:** USD + en-US dates only; download-only outputs (no push integrations); minimal Companies/Accounts model (name + FI + acct type + acct #).
 
-> **⚠️ SUPERSEDED — OCR engine.** This plan describes the original local
-> **GLM-OCR** design. GLM-OCR has since been **removed**: scanned-page OCR
-> now runs through the **Vibe Shield gateway** (Claude vision, PII-redacted)
-> per **ADR-022**. Every "GLM-OCR" / `GLM_OCR_URL` / `glm-ocr` reference
-> below is historical — read it as "Vibe Shield OCR" (`VIBE_SHIELD_URL`,
-> `vibe-shield`). The client is `packages/extractor/src/shield-ocr-client.ts`.
+> **⚠️ SUPERSEDED — OCR + LLM engine.** This plan describes the original local
+> **GLM-OCR** design and a later **Vibe Shield** OCR design (ADR-022). Both are
+> **removed**. OCR + extraction now run **locally on Ollama Qwen-VL** per
+> **ADR-023**: scanned statements are OCR'd and extracted in one native
+> `/api/chat` vision call; text-layer statements use Ollama's OpenAI-compatible
+> `/v1/chat/completions`. Page images never egress. Every "GLM-OCR" / "Vibe
+> Shield" / `GLM_OCR_URL` / `VIBE_SHIELD_*` / `vibe-shield` /
+> `shield-ocr-client` reference below is historical. The optional **Anthropic**
+> provider is now **text-only** (no images, no Shield). Local model defaults:
+> text `qwen3.5:35b-a3b`, vision `OLLAMA_VISION_MODEL`.
 
 ---
 

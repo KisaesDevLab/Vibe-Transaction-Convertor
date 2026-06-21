@@ -12,7 +12,7 @@ When `BuildPlan.md` and this file disagree, `BuildPlan.md` wins. When `BuildPlan
 
 ## Product in one paragraph
 
-`vibe-tx-converter` (env prefix `VIBETC_`, DB schema `vibetc`) is a self-hosted Docker app that converts bank/credit-card PDF statements into **CSV, OFX 2.x XML, QFX, and QBO Web Connect** files for re-import into QuickBooks / Quicken / Xero. Pipeline: PDF upload → text-layer detection → (if scanned) OCR via Vibe Shield (Claude vision, PII-redacted) → Qwen3-8B JSON-Schema-constrained extraction → Golden Rule reconciliation gate → review/edit grid (PDF coord highlight) → exporter pack → file download. Two deployment modes: **standalone** (ships its own Postgres / Redis / LLM gateway; reaches a Vibe Shield gateway for OCR) and **Vibe Appliance** (uses shared services, incl. Vibe Shield).
+`vibe-tx-converter` (env prefix `VIBETC_`, DB schema `vibetc`) is a self-hosted Docker app that converts bank/credit-card PDF statements into **CSV, OFX 2.x XML, QFX, and QBO Web Connect** files for re-import into QuickBooks / Quicken / Xero. Pipeline: PDF upload → text-layer detection → (if scanned) local OCR+extraction via Ollama Qwen-VL (direct vision→JSON) / (if text-layer) Qwen JSON-Schema-constrained extraction → Golden Rule reconciliation gate → review/edit grid (PDF coord highlight) → exporter pack → file download. Two deployment modes: **standalone** (ships its own Postgres / Redis / Ollama model server) and **Vibe Appliance** (uses shared services, incl. a shared Ollama). See ADR-023.
 
 ## Hard product invariants — do not violate without explicit user approval
 
@@ -20,8 +20,8 @@ These are repeated throughout `BuildPlan.md` and are the rules most likely to bi
 
 - **Zero outbound network calls at runtime by default.** FIDIR is mirrored at build/admin time, never fetched live. The only carve-out is the optional **Anthropic API** extraction provider (Tier 2), which is opt-in, off by default, and audit-logged on every call.
 - **No telemetry, no phone-home, no analytics SDKs** — regardless of LLM provider.
-- **OCR runs through Vibe Shield (Claude vision).** Rasterized page images are sent to the on-appliance **Vibe Shield gateway** (`/v1/messages`), which masks PII (token-overlay) before Claude transcribes the page. The OCR markdown comes back **tokenized** (`<ENTITY_N>`) under the `cpa-converter-output` policy and is materialized back to cleartext only at export. This **supersedes** the former "OCR is always local (GLM-OCR)" invariant — page images now egress (to Shield, redacted). LLM extraction shares the same Shield session so its tokens land in one vault.
-- **Page images leave only via the Shield gateway, and only after PII masking.** The raw source PDF still never leaves the firm; from the Converter's perspective the only OCR/LLM egress target is the on-appliance Shield gateway (allowlisted in the no-egress invariant), which itself brokers the redacted call to Anthropic. Data preservation depends on Shield's `cpa-converter-output` policy using the **token-overlay masker** (a black-box masker would erase statement PII).
+- **OCR + extraction run locally on Ollama Qwen-VL (ADR-023).** Scanned/image statements are rasterized and sent to a locally-hosted **Ollama** vision model (native `/api/chat`, `format: <schema>`) which **OCRs and extracts in one call** (direct vision→JSON). Text-layer statements go to Ollama's OpenAI-compatible `/v1/chat/completions`. This **restores** the original "OCR is always local" invariant: Vibe Shield and GLM-OCR are removed; OCR output is **cleartext** (no `<ENTITY_N>` tokens, no materialize step).
+- **Page images never leave the firm.** They are processed on-appliance by Ollama and are never sent anywhere. The optional **Anthropic** provider is **text-only** — it receives cleartext OCR/text-layer markdown (never images) and is the single opt-in egress carve-out (Tier 2), off by default and audit-logged.
 - **Golden Rule reconciliation gates exports by default.** User can override but must type-confirm; the override is audit-logged.
 - **v1 is USD-only and en-US (MDY) on every output.** Source PDFs may be in any unambiguous date format; the LLM detects and normalizes to ISO 8601. Truly ambiguous statements halt in `awaiting-locale-confirmation` until the user picks.
 
@@ -32,8 +32,8 @@ Match the rest of the Vibe family.
 - **Frontend:** React 18, TypeScript 5.5+, Vite 5, Tailwind 3, shadcn/ui (Radix), TanStack Query 5, react-router 6, react-hook-form + zod, react-pdf for the review viewer.
 - **Backend:** Node 20 LTS, Express 4, TypeScript, **Drizzle ORM** (not Prisma), Zod, Pino, Multer, **BullMQ** on **Redis 7**, ioredis.
 - **DB:** PostgreSQL 16, schema name `vibetc`. Migrations live at `apps/api/src/db/migrations`.
-- **OCR:** Claude vision via the **Vibe Shield** gateway over HTTP (Anthropic Messages `/v1/messages`) — **never linked in-process**. (Replaces the former local GLM-OCR server.)
-- **LLM:** Qwen3-8B Q4_K_M via the Vibe LLM Gateway (OpenAI wire format), JSON-Schema-constrained generation. Optional Anthropic provider uses **tool-use** with the schema as a single tool's `input_schema`; default model `claude-sonnet-4-6`.
+- **OCR:** Local **Ollama Qwen-VL** vision over HTTP (native `/api/chat`, `format: <schema>`) — direct vision→JSON, on-appliance, zero egress. (Replaces Vibe Shield / GLM-OCR; ADR-023.)
+- **LLM:** Qwen via local **Ollama** — text extraction over the OpenAI-compatible `/v1/chat/completions` (default `qwen3.5:35b-a3b`), JSON-Schema-constrained generation. Optional **text-only** Anthropic provider uses **tool-use** with the schema as a single tool's `input_schema`; default model `claude-sonnet-4-6`.
 - **Tests:** Vitest (unit + integration), Playwright (E2E).
 - **Lint/format:** ESLint flat config, Prettier (`printWidth: 100`, `singleQuote: true`, `trailingComma: 'all'`), lint-staged + husky.
 - **Package manager:** pnpm 9 with workspaces (`apps/*`, `packages/*`). Container: multi-stage Dockerfile, distroless runtime, GHCR.

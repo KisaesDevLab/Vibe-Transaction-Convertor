@@ -2,7 +2,10 @@
 
 ## Status
 
-Accepted.
+Accepted. **Amended by ADR-023:** the `local` provider now drives **Ollama**
+directly (text via OpenAI-compat `/v1`, vision/OCR via native `/api/chat`),
+and the `anthropic` provider is **text-only** (it never receives page images).
+The `LlmProvider` contract and `local | anthropic` ids are unchanged.
 
 ## Context
 

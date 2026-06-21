@@ -1,11 +1,11 @@
-// Prompt + JSON schema for the optional "resolve check payees" pass.
-// Sends rasterized statement pages to an Anthropic vision model and
-// asks it to identify any cancelled-check images visible on the page,
-// returning the check number + payee + memo + date + amount per check.
+// Prompt + JSON schema for the "resolve check payees" pass. Sends rasterized
+// statement pages to the LOCAL Ollama Qwen-VL vision model and asks it to
+// identify any cancelled-check images visible on the page, returning the check
+// number + payee + memo + date + amount per check.
 //
 // The downstream service matches each extracted check to a statement
-// transaction by check_number and updates `cleansedDescription` so
-// the operator sees `Check #1234 → JOHN DOE` instead of bare "CHECK".
+// transaction by check number (with an amount tiebreak for reused numbers) and
+// writes the payee onto the transaction's `payee` column (the OFX <NAME> source).
 //
 // The prompt deliberately tells the model to skip non-check imagery
 // (account logos, bank seals, mailing slips) and to return an empty
@@ -44,9 +44,10 @@ Rules:
 
 export const CHECK_RESOLVE_USER_PROMPT = `The supplied images are consecutive pages from a bank statement.
 Identify every cancelled-check image visible across the pages and
-return one entry per check via the emit_checks tool.`;
+return one entry per check as JSON matching the provided schema. Do not
+add prose around the JSON.`;
 
-// JSON Schema sent to Anthropic as the tool's input_schema. Matches
+// JSON Schema passed as Ollama's `format` (structured output). Matches
 // the Zod schema in @vibe-tx-converter/shared/schemas/check-resolve.
 export const CHECK_RESOLVE_JSON_SCHEMA = {
   $schema: 'https://json-schema.org/draft/2020-12/schema',

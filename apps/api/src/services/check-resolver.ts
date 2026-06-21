@@ -1,15 +1,16 @@
 // Check-payee resolution service. Given a statement, finds every
 // transaction whose check_number was extracted, rasterizes the source
-// PDF pages, sends them as images to an Anthropic vision call with a
-// structured-output tool, and writes the resolved payee back into
-// `cleansedDescription` on matching transactions.
+// PDF pages, reads any cancelled-check images on the LOCAL Ollama Qwen-VL
+// vision model, and writes the resolved payee onto matching transactions'
+// `payee` column (the OFX <NAME> source). Page images are processed
+// locally and never egress (ADR-023).
 //
-// Why a separate service from enrichment.ts: the existing enrichment
-// pipeline is text-only (sends cleansed descriptions + business
-// categories through a normal LLM completion). Check resolution
-// requires page IMAGES and only works with the Anthropic provider —
-// the local Qwen3-8B has no vision input. Keeping it isolated avoids
-// muddling the enrichment cache and prompt-override surface.
+// Why a separate service from enrichment.ts: the enrichment pipeline is
+// text-only (cleansed descriptions + categories through a text LLM call).
+// Check resolution needs page IMAGES — it runs through the local provider's
+// completeWithImages() vision path. Text-layer statements are the key
+// beneficiary: their main extraction never sees check images, so this
+// rasterize→vision pass is the only way to read those payees.
 
 import { and, eq, isNotNull, sql } from 'drizzle-orm';
 
@@ -17,6 +18,7 @@ import {
   CHECK_RESOLVE_JSON_SCHEMA,
   CHECK_RESOLVE_SYSTEM_PROMPT,
   CHECK_RESOLVE_USER_PROMPT,
+  batchPageImages,
   rasterizePdf,
 } from '@vibe-tx-converter/extractor';
 import { schemas } from '@vibe-tx-converter/shared';
@@ -53,11 +55,11 @@ export class NoCheckTransactionsError extends Error {
   }
 }
 
-// Cap on how many page images we send in a single call. Anthropic's
-// vision API accepts up to 100 per message, but bank statements over
-// ~50 pages are vanishingly rare and we'd rather fail loud than blow
-// past the cap silently.
-const MAX_PAGES_PER_CALL = 60;
+// Total-page safety guard. Pages are batched (1–3 per vision call) so memory
+// stays bounded; this caps the whole statement so a pathological upload can't
+// fan out into hundreds of vision calls. Statements this large are vanishingly
+// rare; fail loud and tell the operator to split.
+const MAX_PAGES = 60;
 
 export const resolveCheckPayees = async (db: Db, stmtId: string): Promise<CheckResolveResult> => {
   const stmtRows = await db.select().from(statements).where(eq(statements.id, stmtId));
@@ -84,33 +86,27 @@ export const resolveCheckPayees = async (db: Db, stmtId: string): Promise<CheckR
     throw new NoCheckTransactionsError();
   }
 
-  // Provider gate. Vision-only feature; the local gateway has no
-  // image input so we refuse cleanly with a guidance message.
+  // Local vision provider. Check reading runs on the on-appliance Ollama
+  // Qwen-VL model (completeWithImages); page images never egress (ADR-023).
   let provider;
   try {
-    provider = await buildProviderForId(db, 'anthropic');
+    provider = await buildProviderForId(db, 'local');
   } catch (err) {
     throw new CheckResolveUnavailableError(
-      `Anthropic provider not configured: ${(err as Error).message}. ` +
-        'Add an API key on /admin/llm-provider before running check resolution.',
-    );
-  }
-  if (provider.id !== 'anthropic') {
-    throw new CheckResolveUnavailableError(
-      'check resolution requires the Anthropic vision API; local provider does not support image inputs',
+      `local vision provider not available: ${(err as Error).message}. ` +
+        'Ensure Ollama is reachable with a vision (-VL) model pulled (see /admin/llm-provider).',
     );
   }
 
-  // Rasterize the PDF. We reuse the same poppler-based rasterizer the
-  // extraction worker uses — same DPI (300) so the model sees the
-  // image at the same fidelity it would during a force-ocr run.
+  // Rasterize the PDF at 300 DPI PNG (small check thumbnails need the fidelity)
+  // and read them into buffers, then batch (1–3 pages per vision call).
   const rasters = await rasterizePdf(stmt.sourcePdfPath, { dpi: 300 });
   if (rasters.length === 0) {
     throw new ValidationError('PDF rasterization produced no pages');
   }
-  if (rasters.length > MAX_PAGES_PER_CALL) {
+  if (rasters.length > MAX_PAGES) {
     throw new ValidationError(
-      `statement has ${rasters.length} pages, exceeding the per-call cap of ${MAX_PAGES_PER_CALL}; ` +
+      `statement has ${rasters.length} pages, exceeding the cap of ${MAX_PAGES}; ` +
         'split the statement first or contact support to raise the cap',
     );
   }
@@ -119,75 +115,90 @@ export const resolveCheckPayees = async (db: Db, stmtId: string): Promise<CheckR
     images.push({ data: await readFile(r.pngPath), mediaType: 'image/png' as const });
   }
 
+  // A check appears on a single page, so concatenating per-batch results is
+  // correct. One bad/illegible batch must not sink the whole run — collect
+  // what parses and log the rest.
   const startedAt = Date.now();
-  const result = await provider.complete({
-    systemPrompt: CHECK_RESOLVE_SYSTEM_PROMPT,
-    userPrompt: CHECK_RESOLVE_USER_PROMPT,
-    schema: CHECK_RESOLVE_JSON_SCHEMA,
-    schemaName: 'emit_checks',
-    maxOutputTokens: 4096,
-    images,
-  });
+  const batches = batchPageImages(images);
+  const extracted: schemas.checkResolve.CheckResolveResult['checks'] = [];
+  let costMicros = 0n;
+  let model: string | null = null;
+  for (const batch of batches) {
+    const result = await provider.completeWithImages({
+      systemPrompt: CHECK_RESOLVE_SYSTEM_PROMPT,
+      userPrompt: CHECK_RESOLVE_USER_PROMPT,
+      schema: CHECK_RESOLVE_JSON_SCHEMA,
+      schemaName: 'emit_checks',
+      maxOutputTokens: 4096,
+      images: batch.images,
+    });
+    costMicros += result.telemetry.costMicros;
+    model = result.telemetry.model;
+    const parsed = schemas.checkResolve.CheckResolveResult.safeParse(result.data);
+    if (!parsed.success) {
+      logger.warn(
+        { stmtId, startPage: batch.startPage, issues: parsed.error.issues.slice(0, 3) },
+        'check-resolve batch did not match schema; skipping',
+      );
+      continue;
+    }
+    extracted.push(...parsed.data.checks);
+  }
+  const llmExtractedCount = extracted.length;
   logger.info(
     {
       stmtId,
       pages: images.length,
+      batches: batches.length,
       durationMs: Date.now() - startedAt,
-      model: result.telemetry.model,
-      inputTokens: result.telemetry.inputTokens,
-      outputTokens: result.telemetry.outputTokens,
+      model,
     },
-    'check-resolve LLM call complete',
+    'check-resolve vision pass complete',
   );
 
-  // Validate the model's output. Bad schema → surface a clean error
-  // rather than persisting half-baked data.
-  const parsed = schemas.checkResolve.CheckResolveResult.safeParse(result.data);
-  if (!parsed.success) {
-    throw new ValidationError(
-      `check-resolve response did not match schema: ${parsed.error.issues
-        .slice(0, 3)
-        .map((i) => `${i.path.join('.')}: ${i.message}`)
-        .join('; ')}`,
-    );
-  }
-  const extracted = parsed.data.checks;
-  const llmExtractedCount = extracted.length;
-
-  // Build a lookup of candidate transactions by normalized check
-  // number (trim + lowercase) so '1234' and ' 1234 ' both match.
+  // Group candidate transactions by normalized check number (trim + lowercase).
+  // A reused check number can have multiple candidate rows, so disambiguate by
+  // amount (the check amount is positive; the tx amount is a signed debit).
   const norm = (s: string): string => s.trim().toLowerCase();
-  const byCheckNumber = new Map<string, (typeof candidates)[number]>();
+  const byCheckNumber = new Map<string, (typeof candidates)[number][]>();
   for (const t of candidates) {
-    if (t.checkNumber) byCheckNumber.set(norm(t.checkNumber), t);
+    if (!t.checkNumber) continue;
+    const k = norm(t.checkNumber);
+    (byCheckNumber.get(k) ?? byCheckNumber.set(k, []).get(k)!).push(t);
   }
+  const absBig = (n: bigint): bigint => (n < 0n ? -n : n);
 
   let matchedCount = 0;
   const unmatched: string[] = [];
+  const usedTxIds = new Set<string>();
   for (const c of extracted) {
     if (!c.payee || c.payee.trim().length === 0) continue;
-    const hit = byCheckNumber.get(norm(c.check_number));
+    const cands = (byCheckNumber.get(norm(c.check_number)) ?? []).filter(
+      (t) => !usedTxIds.has(t.id),
+    );
+    if (cands.length === 0) {
+      unmatched.push(c.check_number);
+      continue;
+    }
+    // Amount tiebreak: pick the candidate whose |amount| matches the check's
+    // amount within a cent; else the sole candidate; else skip (ambiguous).
+    let hit: (typeof cands)[number] | undefined;
+    if (cands.length === 1) {
+      hit = cands[0];
+    } else if (c.amount_cents != null) {
+      const want = BigInt(Math.abs(c.amount_cents));
+      hit = cands.find((t) => absBig(absBig(t.amountCents) - want) <= 1n);
+    }
     if (!hit) {
       unmatched.push(c.check_number);
       continue;
     }
-    // Format: `Check #1234 → John Doe` with an optional memo suffix.
-    // The arrow is intentionally non-ASCII so a downstream cleanse
-    // pass can detect "already resolved by check-resolve" if needed.
-    const memo = c.memo && c.memo.trim().length > 0 ? ` (${c.memo.trim()})` : '';
-    const enriched = `Check #${c.check_number.trim()} → ${c.payee.trim()}${memo}`;
+    usedTxIds.add(hit.id);
+    // Write the payee onto the dedicated column — exports prefer it for the
+    // OFX <NAME>. Leave cleansedDescription + enrichment flags untouched.
     await db
       .update(transactions)
-      .set({
-        cleansedDescription: enriched,
-        // Flip userEdited so a later batch enrich() doesn't clobber
-        // the payee with a vanilla cleanse of "CHECK". The semantic
-        // is "this row's cleansed description was set by an out-of-
-        // band process; leave it alone".
-        enrichmentUserEdited: true,
-        enrichmentRunAt: sql`now()`,
-        updatedAt: sql`now()`,
-      })
+      .set({ payee: c.payee.trim().slice(0, 200), updatedAt: sql`now()` })
       .where(and(eq(transactions.id, hit.id), isNotNull(transactions.checkNumber)));
     matchedCount += 1;
   }
@@ -199,7 +210,7 @@ export const resolveCheckPayees = async (db: Db, stmtId: string): Promise<CheckR
     matchedCount,
     unmatchedCheckNumbers: unmatched,
     pageCount: images.length,
-    costMicros: result.telemetry.costMicros,
-    model: result.telemetry.model,
+    costMicros,
+    model,
   };
 };

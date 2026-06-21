@@ -59,6 +59,10 @@ export interface TransactionRow {
   amountCents: string;
   runningBalanceCents: string | null;
   checkNumber: string | null;
+  // Check payee ("Pay to the order of"), read off the cancelled-check image
+  // on the local vision model. Drives the OFX <NAME> for check rows; editable
+  // in the review grid. Null for non-check rows or when not yet resolved.
+  payee: string | null;
   trntype: string;
   fitid: string;
   sourcePage: number;
@@ -139,6 +143,8 @@ export interface TransactionPatch {
   // row is skipped on a subsequent batch enrichment click.
   cleansed_description?: string | null;
   business_category_id?: string | null;
+  // Check payee correction. Empty string / null clears it.
+  payee?: string | null;
 }
 
 export const useUpdateTransaction = (statementId: string) => {

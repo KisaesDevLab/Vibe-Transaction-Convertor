@@ -244,9 +244,9 @@ describe('CSV exporters', () => {
       },
     ]);
     expect(out).toContain(
-      'Date,Description,Amount,RunningBalance,CheckNumber,TRNTYPE,FITID,CleansedDescription,Category',
+      'Date,Description,Amount,RunningBalance,CheckNumber,Payee,TRNTYPE,FITID,CleansedDescription,Category',
     );
-    expect(out).toContain('03/08/2026,PAYROLL,3200.00,4125.79,,DIRECTDEP,VTC-abc1234567890def,,');
+    expect(out).toContain('03/08/2026,PAYROLL,3200.00,4125.79,,,DIRECTDEP,VTC-abc1234567890def,,');
   });
 
   it('quotes cells containing commas/quotes', () => {

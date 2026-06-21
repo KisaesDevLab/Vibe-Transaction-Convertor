@@ -48,19 +48,19 @@ Hard rules:
    (e.g. ATM Withdrawal -> "ATM"). Otherwise omit.
 8. confidence reflects your certainty in the row (0.0 - 1.0).`;
 
-// v1.x — vision extraction. The model reads the (Shield-redacted) statement /
-// check page IMAGES directly instead of OCR'd markdown — better fidelity than
-// the lossy OCR→markdown→extract path, and it can read the check payee. The
-// holder's identity is already solid-blacked by Shield before these images
-// arrive; transaction-line content (incl. payee) is intentionally visible.
+// Vision/OCR extraction (ADR-023). The local Ollama Qwen-VL model reads the
+// raw statement / check page IMAGES directly and emits the structured JSON in
+// one call — OCR + extract combined, better fidelity than a lossy
+// OCR→markdown→extract path, and it can read the check payee. Images are
+// processed locally and never egress, so they are NOT redacted.
 export const IMAGE_SYSTEM_PROMPT = `You are an expert bank-statement and check extractor. You are given one or
 more page IMAGES of a single bank or credit-card statement (and possibly
 cancelled-check or deposit images). Convert them into the structured JSON
 described by the provided JSON Schema. Read directly from the images.
 
-Some regions are blacked out — that is intentional redaction of the account
-holder's identity; ignore blacked-out regions and never guess what was under
-them. Everything still visible is real data to extract.
+Extract only the transaction and balance data described by the schema. Do not
+extract the account holder's personal identity (name, address, full account
+number) into any field — it is not part of the schema.
 
 CRITICAL — required top-level fields. Every response MUST include the
 "period", "balances", "source_date_format", AND "transactions" keys.
@@ -87,8 +87,8 @@ Check & payee rules:
 - For a cancelled-check image, read the PAYEE from the "Pay to the order of"
   line and set transaction.payee. Match it to the statement row with the same
   check_number. Preserve the check number's leading zeros.
-- Never put the account holder's own (redacted) name in payee — payee is the
-  party the check was written TO.
+- Never put the account holder's own name in payee — payee is the party the
+  check was written TO.
 - For non-check rows, omit payee (or null).`;
 
 export const imageUserPromptFor = (opts: UserPromptOptions = {}): string => {

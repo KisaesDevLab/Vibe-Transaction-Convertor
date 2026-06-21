@@ -187,6 +187,9 @@ export const statementsRouter = (): Router => {
         cleansedDescription?: string | null;
         businessCategoryId?: string | null;
         enrichmentUserEdited?: boolean;
+        // Check payee ("Pay to the order of"), read off the check image; the
+        // operator can correct it here. Drives the OFX <NAME> for check rows.
+        payee?: string | null;
       } = {};
       if (typeof body.description === 'string') {
         const d = body.description.trim();
@@ -222,6 +225,20 @@ export const statementsRouter = (): Router => {
           if (newVal !== tx.cleansedDescription) next.cleansedDescription = newVal;
         } else {
           throw new ValidationError('cleansed_description must be a string or null');
+        }
+      }
+      // payee: string | null. Empty string clears it; otherwise trim +
+      // truncate to the schema max (200).
+      if ('payee' in body) {
+        const raw = body.payee;
+        if (raw === null) {
+          if (tx.payee !== null) next.payee = null;
+        } else if (typeof raw === 'string') {
+          const trimmed = raw.trim().slice(0, 200);
+          const newVal = trimmed.length === 0 ? null : trimmed;
+          if (newVal !== tx.payee) next.payee = newVal;
+        } else {
+          throw new ValidationError('payee must be a string or null');
         }
       }
       if ('business_category_id' in body) {
@@ -688,9 +705,9 @@ export const statementsRouter = (): Router => {
     }
   });
 
-  // Acknowledge a Shield 'unknown'-page review hold: the operator confirms
-  // they've checked the maximally-redacted page(s) didn't lose real data,
-  // which unblocks export. Mirrors acknowledge-multi-account.
+  // Acknowledge a review hold (dormant: local OCR no longer sets one). The
+  // operator confirms they've checked the flagged page(s), which unblocks
+  // export. Retained for historical holds; mirrors acknowledge-multi-account.
   router.post('/:id/acknowledge-review-hold', async (req, res, next) => {
     try {
       const id = String(req.params.id);
@@ -810,12 +827,12 @@ export const statementsRouter = (): Router => {
   });
 
   // Operator-triggered "resolve check payees" pass. Rasterizes the
-  // source PDF pages and asks an Anthropic vision model to read any
-  // cancelled-check images, matching each to a transaction by
-  // check_number and writing a friendlier `cleansedDescription`
-  // ("Check #1234 → JOHN DOE"). Requires the Anthropic provider —
-  // the local Qwen3-8B can't see images. Audit row records the model
-  // used and the per-call cost.
+  // source PDF pages and reads any cancelled-check images on the LOCAL
+  // Ollama Qwen-VL vision model (page images never egress; ADR-023),
+  // matching each to a transaction by check number (with an amount
+  // tiebreak) and writing the payee onto the transaction's `payee`
+  // column (the OFX <NAME> source). Extraction also auto-runs this for
+  // check rows left without a payee; the button re-runs it on demand.
   router.post(
     '/:id/resolve-check-payees',
     requireAdmin,

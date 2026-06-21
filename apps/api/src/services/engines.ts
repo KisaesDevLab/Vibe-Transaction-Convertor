@@ -1,10 +1,10 @@
-// DB-backed configuration for the external "engines" the worker depends
-// on (Vibe Shield + LLM Gateway). Mirrors the LLM-provider pattern: each
-// setting reads from `system_settings` first, falls back to the env var,
-// and reports its `source` so the admin UI can label it.
+// DB-backed configuration for the local LLM/Ollama gateway endpoint the
+// worker depends on. Mirrors the LLM-provider pattern: the setting reads
+// from `system_settings` first, falls back to the env var, and reports its
+// `source` so the admin UI can label it.
 //
 // 60-second in-memory cache so the worker's hot path doesn't hit
-// system_settings on every OCR/extract call. Mutating routes call
+// system_settings on every extract call. Mutating routes call
 // invalidateEngineCache() to drop the cache.
 
 import { eq, sql } from 'drizzle-orm';
@@ -14,50 +14,35 @@ import { systemSettings } from '../db/schema.js';
 import { unwrapSecret, wrapSecret } from '../lib/secrets.js';
 import { invalidateProviderCache } from './llm-provider.js';
 
-export type EngineKey = 'vibe-shield' | 'llm-gateway';
+export type EngineKey = 'llm-gateway';
 
 interface EngineSettingKeys {
   url: string;
   timeoutMs?: string;
   concurrency?: string;
   healthPath?: string;
-  // Claude model id + per-page OCR prompt — only meaningful for the
-  // Vibe Shield OCR engine. Stored as plaintext.
+  // Generic optional fields kept for the engine plumbing; the llm-gateway
+  // engine only uses `url`.
   model?: string;
   prompt?: string;
-  // Optional bearer-auth key (the Shield `vs_live_…` tenant key). Stored
-  // in the encrypted secret column — see system_settings.value_secret.
   apiKey?: string;
 }
 
 const KEYS: Record<EngineKey, EngineSettingKeys> = {
-  'vibe-shield': {
-    url: 'engine.vibe_shield.url',
-    timeoutMs: 'engine.vibe_shield.timeout_ms',
-    concurrency: 'engine.vibe_shield.concurrency',
-    healthPath: 'engine.vibe_shield.health_path',
-    model: 'engine.vibe_shield.model',
-    prompt: 'engine.vibe_shield.prompt',
-    apiKey: 'engine.vibe_shield.api_key',
-  },
   'llm-gateway': {
     url: 'engine.llm_gateway.url',
   },
 };
 
 const ENV_FALLBACK: Record<EngineKey, string> = {
-  'vibe-shield': 'VIBE_SHIELD_URL',
   'llm-gateway': 'LLM_GATEWAY_URL',
 };
 
 // Built-in default URLs — the address the service is assigned on the
 // appliance / docker network. Used as the final fallback when neither a
-// DB override nor an env var is set, so OCR works out of the box on a
-// standard deploy (the operator still supplies the vs_live_ key).
-export const VIBE_SHIELD_GATEWAY_URL = 'http://vibe-shield-gateway:8080';
-const ENGINE_DEFAULTS: Partial<Record<EngineKey, string>> = {
-  'vibe-shield': VIBE_SHIELD_GATEWAY_URL,
-};
+// DB override nor an env var is set. (The local LLM provider also defaults
+// to http://localhost:11434 in its own constructor.)
+const ENGINE_DEFAULTS: Partial<Record<EngineKey, string>> = {};
 
 export interface EngineConfig {
   url: string | null;
@@ -188,11 +173,8 @@ export const getEngineConfig = async (db: Db, engine: EngineKey): Promise<Engine
 };
 
 export const getAllEngineConfigs = async (db: Db): Promise<Record<EngineKey, EngineConfig>> => {
-  const [vibeShield, llmGateway] = await Promise.all([
-    getEngineConfig(db, 'vibe-shield'),
-    getEngineConfig(db, 'llm-gateway'),
-  ]);
-  return { 'vibe-shield': vibeShield, 'llm-gateway': llmGateway };
+  const llmGateway = await getEngineConfig(db, 'llm-gateway');
+  return { 'llm-gateway': llmGateway };
 };
 
 export interface SetEngineInput {
@@ -300,8 +282,8 @@ export const setEngineConfig = async (
         });
     }
   }
-  // Engine URL is read by the LLM provider (for engine.llm_gateway.url)
-  // and the OCR client (for engine.vibe_shield.url); drop both caches.
+  // Engine URL is read by the local LLM provider (engine.llm_gateway.url);
+  // drop both the engine cache and the provider cache.
   invalidateEngineCache();
   invalidateProviderCache();
   return getEngineConfig(db, engine);

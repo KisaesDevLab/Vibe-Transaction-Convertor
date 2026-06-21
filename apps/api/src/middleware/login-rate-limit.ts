@@ -61,6 +61,22 @@ const incrementRedis = async (
   return { count, resetAt: Date.now() + (ttl > 0 ? ttl : WINDOW_MS) };
 };
 
+// Test helper: clear accumulated login-attempt counters so a full-suite rerun
+// against a persistent Redis (or a long-lived process) doesn't carry attempts
+// across files and spuriously 429 the login-based route tests. Always clears
+// the in-memory buckets; touches Redis only if a client already exists, so it
+// never opens (and leaks) a connection just to reset.
+export const resetLoginRateLimits = async (): Promise<void> => {
+  memoryBuckets.clear();
+  if (!redisClient) return;
+  try {
+    const keys = await redisClient.keys('login:attempts:*');
+    if (keys.length > 0) await redisClient.del(...keys);
+  } catch {
+    /* best-effort — the limiter fails open anyway */
+  }
+};
+
 export const loginRateLimit: RequestHandler = async (
   req: Request,
   _res: Response,

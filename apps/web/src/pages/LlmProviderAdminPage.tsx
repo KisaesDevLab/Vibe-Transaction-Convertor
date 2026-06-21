@@ -23,7 +23,7 @@ const PDF_STRATEGY_LABELS: Record<PdfProcessingStrategy, { title: string; descri
   auto: {
     title: 'Auto',
     description:
-      'Text-layer when the PDF has one; OCR (Claude vision via Vibe Shield) when it doesn’t. No retry. Current default.',
+      'Text-layer when the PDF has one; local OCR (Ollama Qwen-VL vision) when it doesn’t. No retry. Current default.',
   },
   'force-text': {
     title: 'Force text-layer',
@@ -33,17 +33,17 @@ const PDF_STRATEGY_LABELS: Record<PdfProcessingStrategy, { title: string; descri
   'force-ocr': {
     title: 'Force OCR',
     description:
-      'Always run OCR (Claude vision via Vibe Shield), even when a text layer is present. Useful when the embedded text is scrambled or hidden.',
+      'Always run local OCR (Ollama Qwen-VL vision), even when a text layer is present. Useful when the embedded text is scrambled or hidden.',
   },
   'auto-ocr-fallback': {
     title: 'Text-layer with OCR fallback',
     description:
-      'Try the text layer first; if the LLM rejects the result (HTTP error, malformed response, empty transactions, or reconciliation discrepancy), retry with OCR (Vibe Shield). Up to twice the LLM cost when triggered.',
+      'Try the text layer first; if the LLM rejects the result (HTTP error, malformed response, empty transactions, or reconciliation discrepancy), retry with local OCR. Up to twice the LLM cost when triggered.',
   },
   'auto-text-fallback': {
     title: 'OCR with text-layer fallback',
     description:
-      'Run OCR (Vibe Shield) first; if the LLM rejects the result, retry with the embedded text layer (when present). Mirror of the OCR-fallback path — useful when the text layer is unreliable (scrambled / hidden text). Up to twice the LLM cost when triggered.',
+      'Run local OCR first; if the LLM rejects the result, retry with the embedded text layer (when present). Mirror of the OCR-fallback path — useful when the text layer is unreliable (scrambled / hidden text). Up to twice the LLM cost when triggered.',
   },
 };
 
@@ -57,21 +57,23 @@ interface ProviderStatus {
   anthropicKeyConfigured: boolean;
   anthropicKeyLastFour: string | null;
   allowedModels: string[];
-  // Effective Anthropic base URL + whether extraction is proxied through a
-  // gateway (Vibe Shield on this appliance) rather than hitting Anthropic
-  // directly. Lets this page surface + configure the Shield routing that
-  // used to be env-only (ANTHROPIC_BASE_URL).
+  // Effective Anthropic base URL + whether extraction is proxied through an
+  // operator-configured Messages-API proxy rather than hitting Anthropic
+  // directly (ANTHROPIC_BASE_URL).
   anthropicBaseUrl: string;
-  anthropicViaShield: boolean;
+  anthropicViaProxy: boolean;
+  // Local Ollama config (default provider). Resolved DB → env → default.
+  ollamaBaseUrl: string;
+  ollamaModel: string;
+  ollamaVisionModel: string;
   // Per-call extraction/enrichment timeout (ms). DB-backed; falls back to
   // LLM_TIMEOUT_MS env, then 60000.
   llmTimeoutMs: number;
-  // Per-call output-token ceiling (Anthropic/Shield path). DB-backed; falls
-  // back to LLM_MAX_COMPLETION_TOKENS env, then 32000.
+  // Per-call output-token ceiling. DB-backed; falls back to
+  // LLM_MAX_COMPLETION_TOKENS env, then 32000.
   llmMaxTokens: number;
   // Resolved on-the-wire request shape — what the provider will actually
-  // send. effectiveModel applies the DB → env → default fallback;
-  // effectiveMaxTokens is clamped to the Shield ceiling when via gateway.
+  // send. effectiveModel applies the DB → env → default fallback.
   effectiveModel: string;
   effectiveMaxTokens: number;
   monthlyCapUsd: number | null;
@@ -205,6 +207,20 @@ export function LlmProviderAdminPage() {
       api.post('/api/admin/llm-provider/max-tokens', { maxTokens }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'llm-provider'] }),
   });
+  const setOllamaBaseUrl = useMutation({
+    mutationFn: (baseUrl: string) =>
+      api.post('/api/admin/llm-provider/ollama-base-url', { baseUrl }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'llm-provider'] }),
+  });
+  const setOllamaModel = useMutation({
+    mutationFn: (model: string) => api.post('/api/admin/llm-provider/ollama-model', { model }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'llm-provider'] }),
+  });
+  const setOllamaVisionModel = useMutation({
+    mutationFn: (visionModel: string) =>
+      api.post('/api/admin/llm-provider/ollama-vision-model', { visionModel }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'llm-provider'] }),
+  });
   const test = useMutation({
     mutationFn: () => api.post<TestResult>('/api/admin/llm-provider/test'),
   });
@@ -310,6 +326,19 @@ export function LlmProviderAdminPage() {
     }
   };
 
+  const onSaveOllama =
+    (kind: 'baseUrl' | 'model' | 'visionModel') =>
+    async (value: string): Promise<void> => {
+      try {
+        if (kind === 'baseUrl') await setOllamaBaseUrl.mutateAsync(value);
+        else if (kind === 'model') await setOllamaModel.mutateAsync(value);
+        else await setOllamaVisionModel.mutateAsync(value);
+        toast.success(value.length > 0 ? 'Saved.' : 'Reset to default.');
+      } catch (err) {
+        toast.error(err instanceof ApiError ? err.message : 'failed');
+      }
+    };
+
   return (
     <section className="mx-auto max-w-3xl space-y-6">
       <Link to="/admin" className="text-sm text-ink-muted hover:text-ink">
@@ -318,19 +347,20 @@ export function LlmProviderAdminPage() {
       <header>
         <h1 className="text-2xl font-semibold">LLM provider</h1>
         <p className="mt-1 rounded-md bg-surface-subtle px-3 py-2 text-xs text-ink-muted">
-          <strong>Stage 2 of 2 — extraction.</strong> This turns the OCR/text markdown into the
-          structured rows (dates, amounts, descriptions, balances). It is <em>separate</em> from
-          OCR: scanned-page OCR (image → text) is the <strong>Vibe Shield</strong> engine on{' '}
+          <strong>Extraction provider.</strong> Text-layer PDFs are turned into structured rows
+          (dates, amounts, descriptions, balances) here. Scanned PDFs are OCR’d <em>and</em>{' '}
+          extracted in one local call by the Qwen-VL vision model (set the model tags below; the
+          Ollama URL is on{' '}
           <Link to="/admin/engines" className="text-accent hover:underline">
             Engines
           </Link>
-          . Extraction defaults to the <strong>local Vibe Gateway (Qwen)</strong> — Claude is only
-          used here if you switch the provider to Anthropic below.
+          ). Page images never egress. Extraction defaults to <strong>local Ollama (Qwen)</strong> —
+          Anthropic is only used (text-only) if you switch the provider below.
         </p>
         <p className="mt-2 text-sm text-ink-subtle">
-          Anthropic is opt-in; switching to it sends OCR-extracted markdown text outbound (never raw
-          PDFs or page images). Point the “Anthropic endpoint” at Vibe Shield to route those calls
-          through Shield too.
+          Anthropic is opt-in and <strong>text-only</strong>: switching to it sends OCR-extracted /
+          text-layer markdown outbound (never raw PDFs or page images). Scanned PDFs always OCR
+          locally first.
         </p>
       </header>
 
@@ -348,24 +378,16 @@ export function LlmProviderAdminPage() {
             <dd className="font-mono">
               {provider.data.anthropicBaseUrl}{' '}
               <span className="text-xs text-ink-subtle">
-                ({provider.data.anthropicViaShield ? 'via Vibe Shield' : 'direct'})
+                ({provider.data.anthropicViaProxy ? 'via proxy' : 'direct'})
               </span>
             </dd>
             <dt className="text-ink-muted">max_tokens</dt>
-            <dd className="font-mono">
-              {provider.data.effectiveMaxTokens.toLocaleString()}
-              {provider.data.anthropicViaShield &&
-              provider.data.effectiveMaxTokens < provider.data.llmMaxTokens ? (
-                <span className="ml-1 text-xs text-amber-700">
-                  (clamped from {provider.data.llmMaxTokens.toLocaleString()} to the Shield ceiling)
-                </span>
-              ) : null}
-            </dd>
+            <dd className="font-mono">{provider.data.effectiveMaxTokens.toLocaleString()}</dd>
             <dt className="text-ink-muted">Timeout</dt>
             <dd className="font-mono">{(provider.data.llmTimeoutMs / 1000).toFixed(0)}s</dd>
             <dt className="text-ink-muted">Auth</dt>
             <dd className="font-mono">
-              {provider.data.anthropicViaShield ? 'Bearer (gateway key)' : 'x-api-key'}
+              {provider.data.anthropicViaProxy ? 'Bearer (gateway key)' : 'x-api-key'}
             </dd>
           </dl>
           {!provider.data.anthropicKeyConfigured ? (
@@ -434,9 +456,23 @@ export function LlmProviderAdminPage() {
       </section>
 
       {provider.data ? (
+        <OllamaSection
+          baseUrl={provider.data.ollamaBaseUrl}
+          model={provider.data.ollamaModel}
+          visionModel={provider.data.ollamaVisionModel}
+          disabled={
+            setOllamaBaseUrl.isPending || setOllamaModel.isPending || setOllamaVisionModel.isPending
+          }
+          onSaveBaseUrl={onSaveOllama('baseUrl')}
+          onSaveModel={onSaveOllama('model')}
+          onSaveVisionModel={onSaveOllama('visionModel')}
+        />
+      ) : null}
+
+      {provider.data ? (
         <BaseUrlSection
           baseUrl={provider.data.anthropicBaseUrl}
-          viaShield={provider.data.anthropicViaShield}
+          viaProxy={provider.data.anthropicViaProxy}
           disabled={setBaseUrl.isPending}
           onSave={onSaveBaseUrl}
         />
@@ -502,7 +538,7 @@ export function LlmProviderAdminPage() {
           {provider.data.anthropicKeyConfigured ? (
             <div className="mt-2 flex flex-wrap items-center gap-3 text-sm">
               <span className="font-mono text-ink-muted">
-                {provider.data.anthropicViaShield ? 'vs_live_' : 'sk-ant-'}…
+                {provider.data.anthropicViaProxy ? 'key' : 'sk-ant-'}…
                 {provider.data.anthropicKeyLastFour}
               </span>
               <button
@@ -523,16 +559,16 @@ export function LlmProviderAdminPage() {
               {provider.data.anthropicKeyConfigured ? 'Replace key' : 'Set key'}
             </p>
             <p className="mt-1 text-xs text-ink-subtle">
-              Stored AES-256-GCM-encrypted at rest. Only OCR-extracted markdown text egresses; raw
-              PDFs and page images NEVER leave this server.
-              {provider.data.anthropicViaShield
-                ? ' Routing via Vibe Shield — paste your vs_live_… Shield key here (not a raw sk-ant key); Shield redacts PII before forwarding to Claude.'
+              Stored AES-256-GCM-encrypted at rest. Anthropic is text-only — only OCR-extracted /
+              text-layer markdown egresses; raw PDFs and page images NEVER leave this server.
+              {provider.data.anthropicViaProxy
+                ? ' Routing via a proxy — paste that proxy’s bearer key here (not a raw sk-ant key).'
                 : ''}
             </p>
             <input
               type="password"
               autoComplete="off"
-              placeholder={provider.data.anthropicViaShield ? 'vs_live_…' : 'sk-ant-…'}
+              placeholder={provider.data.anthropicViaProxy ? 'proxy key…' : 'sk-ant-…'}
               className="mt-2 w-full rounded-md border border-surface-muted px-3 py-2 text-sm font-mono"
               value={keyInput}
               onChange={(e) => setKeyInput(e.target.value)}
@@ -591,9 +627,9 @@ export function LlmProviderAdminPage() {
         <section className="rounded-lg border border-surface-muted bg-white p-4">
           <h2 className="text-base font-medium">LLM call timeout</h2>
           <p className="mt-1 text-xs text-ink-subtle">
-            Per-call timeout for extraction + enrichment (both the local gateway and
-            Anthropic/Shield). A large statement routed through Vibe Shield can exceed the 60s
-            default. A slow statement may take up to ~2× this (one reminder retry). Range
+            Per-call timeout for extraction + enrichment (both the local Ollama provider and
+            Anthropic). Local vision/OCR has its own longer budget (OLLAMA_VISION_TIMEOUT_MS,
+            default 120s). A slow statement may take up to ~2× this (one reminder retry). Range
             1000–600000 ms. Blank = default ({DEFAULT_TIMEOUT_MS} ms).
           </p>
           <TimeoutForm
@@ -613,15 +649,6 @@ export function LlmProviderAdminPage() {
             the extraction fails with a truncation error. Raising this also needs a larger timeout
             (more tokens take longer to generate) and costs more per statement. Range 1000–64000.
             Blank = default ({DEFAULT_MAX_TOKENS}).
-            {provider.data.anthropicViaShield ? (
-              <span className="mt-1 block font-medium text-amber-700">
-                Extraction is routed through Vibe Shield, which hard-rejects any request above its
-                policy ceiling (32000) — values above that are clamped to fit. 32000 output tokens
-                holds most statements; a very large one can still truncate, in which case route
-                extraction direct-to-Anthropic (the OCR markdown is already tokenized, so no PII
-                leaves the firm).
-              </span>
-            ) : null}
           </p>
           <MaxTokensForm
             current={provider.data.llmMaxTokens}
@@ -1000,31 +1027,130 @@ function PricingSection({ currentModel }: { currentModel: string | null }) {
 // Anthropic endpoint editor. Points the extraction LLM at the Vibe Shield
 // gateway (so PII is redacted before reaching Claude) instead of calling
 // api.anthropic.com directly — the routing that used to be env-only.
+// One labelled text input + Save/Reset for a single Ollama setting. Blank
+// input clears the DB override (back to env / default).
+function OllamaField({
+  label,
+  value,
+  placeholder,
+  disabled,
+  onSave,
+}: {
+  label: string;
+  value: string;
+  placeholder: string;
+  disabled: boolean;
+  onSave: (value: string) => Promise<void>;
+}) {
+  const [val, setVal] = useState(value);
+  useEffect(() => setVal(value), [value]);
+  return (
+    <label className="block text-xs text-ink-muted">
+      {label}
+      <div className="mt-1 flex flex-wrap items-center gap-2">
+        <input
+          type="text"
+          placeholder={placeholder}
+          value={val}
+          onChange={(e) => setVal(e.target.value)}
+          className="min-w-0 flex-1 rounded-md border border-surface-muted px-3 py-1.5 text-sm font-mono"
+        />
+        <button
+          type="button"
+          onClick={() => void onSave(val.trim())}
+          disabled={disabled}
+          className="rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-accent-fg disabled:opacity-50"
+        >
+          Save
+        </button>
+      </div>
+    </label>
+  );
+}
+
+// Local Ollama (default provider): base URL + text/vision model tags. OCR
+// (scanned pages) and text extraction both run here; page images never egress.
+function OllamaSection({
+  baseUrl,
+  model,
+  visionModel,
+  disabled,
+  onSaveBaseUrl,
+  onSaveModel,
+  onSaveVisionModel,
+}: {
+  baseUrl: string;
+  model: string;
+  visionModel: string;
+  disabled: boolean;
+  onSaveBaseUrl: (value: string) => Promise<void>;
+  onSaveModel: (value: string) => Promise<void>;
+  onSaveVisionModel: (value: string) => Promise<void>;
+}) {
+  return (
+    <section className="rounded-lg border border-surface-muted bg-white p-4">
+      <h2 className="text-base font-medium">Local Ollama (default provider)</h2>
+      <p className="mt-1 text-xs text-ink-subtle">
+        Scanned PDFs are OCR’d AND extracted in one call by the vision model; text-layer PDFs use
+        the text model. Page images are processed locally and never egress. Pull the tags on the
+        Ollama host first (e.g.{' '}
+        <code className="rounded bg-surface-subtle px-1">
+          ollama pull {model || 'qwen3.5:35b-a3b'}
+        </code>
+        ). Blank = use the env / default.
+      </p>
+      <div className="mt-3 space-y-2">
+        <OllamaField
+          label="Base URL"
+          value={baseUrl}
+          placeholder="http://localhost:11434"
+          disabled={disabled}
+          onSave={onSaveBaseUrl}
+        />
+        <OllamaField
+          label="Text model"
+          value={model}
+          placeholder="qwen3.5:35b-a3b"
+          disabled={disabled}
+          onSave={onSaveModel}
+        />
+        <OllamaField
+          label="Vision / OCR model (scanned PDFs)"
+          value={visionModel}
+          placeholder="a Qwen -VL tag (defaults to the text model)"
+          disabled={disabled}
+          onSave={onSaveVisionModel}
+        />
+      </div>
+    </section>
+  );
+}
+
 function BaseUrlSection({
   baseUrl,
-  viaShield,
+  viaProxy,
   disabled,
   onSave,
 }: {
   baseUrl: string;
-  viaShield: boolean;
+  viaProxy: boolean;
   disabled: boolean;
   onSave: (baseUrl: string) => Promise<void>;
 }) {
   // Empty input == "direct api.anthropic.com". Pre-fill only when a
-  // gateway override is active so clearing is obvious.
-  const [val, setVal] = useState(viaShield ? baseUrl : '');
+  // proxy override is active so clearing is obvious.
+  const [val, setVal] = useState(viaProxy ? baseUrl : '');
   useEffect(() => {
-    setVal(viaShield ? baseUrl : '');
-  }, [baseUrl, viaShield]);
+    setVal(viaProxy ? baseUrl : '');
+  }, [baseUrl, viaProxy]);
 
   return (
     <section className="rounded-lg border border-surface-muted bg-white p-4">
       <header className="flex items-baseline justify-between gap-2">
         <h2 className="text-base font-medium">Anthropic endpoint</h2>
-        {viaShield ? (
+        {viaProxy ? (
           <span className="rounded bg-emerald-100 px-1.5 py-0.5 text-xs font-medium text-emerald-800">
-            via Vibe Shield
+            via proxy
           </span>
         ) : (
           <span className="rounded bg-surface-subtle px-1.5 py-0.5 text-xs text-ink-muted">
@@ -1033,11 +1159,11 @@ function BaseUrlSection({
         )}
       </header>
       <p className="mt-1 text-xs text-ink-subtle">
-        Point this at the Vibe Shield gateway (e.g.{' '}
-        <code className="rounded bg-surface-subtle px-1">http://vibe-shield-gateway:8080</code>) to
-        route the extraction LLM through Shield — PII is tokenized before it reaches Claude, and the
-        “Anthropic API key” below then holds your <code>vs_live_…</code> Shield key. Leave blank to
-        call <code className="rounded bg-surface-subtle px-1">api.anthropic.com</code> directly.
+        Optional. Point this at an operator-run Messages-API proxy to route the (text-only)
+        extraction LLM through it; the “Anthropic API key” below then holds that proxy’s bearer key.
+        Leave blank to call{' '}
+        <code className="rounded bg-surface-subtle px-1">api.anthropic.com</code> directly. Page
+        images are OCR’d locally on Ollama and never reach Anthropic.
       </p>
       <p className="mt-2 text-sm">
         Current: <code className="rounded bg-surface-subtle px-1 font-mono">{baseUrl}</code>
@@ -1045,7 +1171,7 @@ function BaseUrlSection({
       <div className="mt-3 flex flex-wrap items-center gap-2">
         <input
           type="url"
-          placeholder="http://vibe-shield-gateway:8080  (blank = direct)"
+          placeholder="https://your-proxy.example  (blank = direct)"
           value={val}
           onChange={(e) => setVal(e.target.value)}
           className="min-w-0 flex-1 rounded-md border border-surface-muted px-3 py-1.5 text-sm font-mono"
@@ -1058,7 +1184,7 @@ function BaseUrlSection({
         >
           {disabled ? 'Saving…' : 'Save'}
         </button>
-        {viaShield ? (
+        {viaProxy ? (
           <button
             type="button"
             onClick={() => void onSave('')}

@@ -21,24 +21,11 @@ import { exemplarsAsMessages } from './exemplars.js';
 const PROMPT_BUDGET_RESERVE = 4_000;
 const defaultPromptBudget = (): number => Number(process.env.LLM_MAX_PROMPT_TOKENS ?? 24_000);
 
-// Vibe Shield's `cpa-converter-output` policy enforces a hard output-token
-// ceiling (`max_tokens_ceiling`) and *rejects* (HTTP 400) any /v1/messages
-// whose max_tokens exceeds it — it does not silently clamp. The ceiling was
-// raised from 8192 to 32000 on the Shield side to match the extraction
-// default, so a full statement now fits in one Shield-routed call. The
-// direct Anthropic API has no such cap, so we only clamp when routed
-// through the gateway — and the clamp still protects against the admin
-// knob's 64000 max. Operator-overridable for older/newer Shield ceilings.
-// See ADR-022.
-const shieldMaxTokensCeiling = (): number =>
-  Number(process.env.VIBE_SHIELD_MAX_TOKENS_CEILING ?? 32_000);
-
 // Compact, PII-free description of an Anthropic /v1/messages request, for
-// attaching to a 4xx error. Shield masks the upstream Anthropic reason, so
-// this lets an operator diagnose a 400 from the app trace alone: it reports
-// the model, the max_tokens we actually sent, and — for the vision path —
-// how many image blocks, their total base64 size, and their media types.
-// Only counts/sizes are included; never image bytes or prompt text.
+// attaching to a 4xx error so an operator can diagnose a 400 from the app
+// trace alone: it reports the model, the max_tokens we sent, and the message
+// shape (text blocks, message count). Only counts/sizes are included; never
+// prompt text. (Anthropic is the text-only extraction path now — no images.)
 export const describeAnthropicRequest = (
   messages: Array<{ role: string; content: unknown }>,
   model: string,
@@ -162,15 +149,55 @@ export class ExtractionResponseError extends Error {
   }
 }
 
-// Carve out the first { to last } and re-parse — recovers when the model
-// wraps its JSON in prose. A false positive is impossible: any extra
-// text inside the slice makes JSON.parse fail.
+// Strip a single wrapping ```json … ``` (or bare ```) fence. Only strips
+// when the fence encloses the whole string after trim — a fence mid-prose is
+// left for the balanced scanner to find.
+const stripCodeFences = (s: string): string => {
+  const m = s.match(/^```(?:json)?\s*\n?([\s\S]*?)\n?```\s*$/i);
+  return m && m[1] != null ? m[1].trim() : s;
+};
+
+// Walk the input and return the first balanced `{…}` slice, respecting JSON
+// string semantics so a brace inside a `"…"` value doesn't close the wrong
+// scope. Ported from myBooks `json-utils.ts` — Ollama wraps its JSON in prose
+// and stray-brace-bearing descriptions more often than the old Vibe gateway,
+// and the naive first-{/last-} slice mis-parses those.
+const firstBalancedObjectSlice = (s: string): string | null => {
+  const startIdx = s.indexOf('{');
+  if (startIdx < 0) return null;
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+  for (let i = startIdx; i < s.length; i += 1) {
+    const c = s[i];
+    if (escape) {
+      escape = false;
+      continue;
+    }
+    if (inString) {
+      if (c === '\\') escape = true;
+      else if (c === '"') inString = false;
+      continue;
+    }
+    if (c === '"') inString = true;
+    else if (c === '{') depth += 1;
+    else if (c === '}') {
+      depth -= 1;
+      if (depth === 0) return s.slice(startIdx, i + 1);
+    }
+  }
+  return null;
+};
+
+// Recovers a JSON object when the model wraps it in prose or code fences.
+// A false positive is impossible: any extra text inside the slice makes
+// JSON.parse fail.
 const recoverProseWrappedJson = (raw: string): unknown | undefined => {
-  const first = raw.indexOf('{');
-  const last = raw.lastIndexOf('}');
-  if (first < 0 || last <= first) return undefined;
+  const trimmed = stripCodeFences(raw.trim());
+  const slice = firstBalancedObjectSlice(trimmed);
+  if (!slice) return undefined;
   try {
-    return JSON.parse(raw.slice(first, last + 1));
+    return JSON.parse(slice);
   } catch {
     return undefined;
   }
@@ -248,44 +275,14 @@ export interface ExtractResult {
   data: ExtractionResult;
   telemetry: ExtractCallTelemetry;
   rawJson: string;
-  // Vibe Shield `vs-page-classifications` — one document-type per image
-  // block (page) in the request, in page order (e.g. ['bank_statement',
-  // 'check']). Present only on the vision path through Shield ≥ v1.13.0;
-  // undefined for the markdown path, direct Anthropic, or when the header
-  // is absent (Shield treats a missing header as "no classification", not
-  // an error). A 'unknown' entry means Shield applied fail-closed maximal
-  // redaction to that page — the worker holds those for review.
-  classifications?: string[] | undefined;
 }
-
-// Parse the `vs-page-classifications` response header. Shield sends it as a
-// JSON string array; anything else (missing, malformed, non-string items)
-// is treated as "no classification available" rather than an error, so the
-// vision path degrades gracefully on older gateways.
-export const parsePageClassifications = (raw: string | null | undefined): string[] | undefined => {
-  if (!raw) return undefined;
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    if (Array.isArray(parsed) && parsed.every((x) => typeof x === 'string')) {
-      return parsed as string[];
-    }
-  } catch {
-    /* fall through */
-  }
-  return undefined;
-};
 
 export interface ExtractOptions extends UserPromptOptions {
   schema?: object;
-  // Vibe Shield: the per-conversion session id + policy to quote on this
-  // call (passed through to the Anthropic provider; ignored by the local
-  // gateway). Overrides any provider-level default.
-  sessionId?: string | undefined;
-  policyName?: string | undefined;
-  // v1.x — vision extraction. (Shield-redacted) page images sent directly to
-  // Claude instead of OCR'd markdown — better fidelity, and it can read the
-  // check payee. Anthropic provider only; the local gateway/Qwen has no
-  // vision input, so callers fall back to the markdown path there.
+  // Vision/OCR extraction. Rasterized page images handed to the local Ollama
+  // Qwen-VL provider, which OCRs and extracts in one call (ADR-023). Local
+  // provider only — page images never egress; the Anthropic provider is
+  // text-only and ignores this field.
   images?:
     | Array<{ data: Buffer; mediaType: 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp' }>
     | undefined;
@@ -307,15 +304,10 @@ export interface CompleteOptions {
   // in audit/logs.
   schemaName?: string | undefined;
   maxOutputTokens?: number | undefined;
-  // Vibe Shield: per-call session id + policy (Anthropic provider only).
-  sessionId?: string | undefined;
-  policyName?: string | undefined;
-  // Optional image attachments for vision-capable providers. Each
-  // becomes an Anthropic `{type:'image', source:{type:'base64',...}}`
-  // content part placed BEFORE the text prompt in the user message,
-  // matching Anthropic's recommended ordering. Local Qwen3-8B has no
-  // vision support; LocalGatewayProvider.complete() throws if any
-  // image is passed so callers don't silently lose data.
+  // Optional image attachments. Vision/OCR runs through the local Ollama
+  // provider's extract() path (native /api/chat); the generic complete()
+  // structured-output path is text-only and throws if images are passed, so
+  // callers don't silently lose data.
   images?:
     | Array<{
         data: Buffer;
@@ -334,6 +326,13 @@ export interface LlmProvider {
   readonly id: 'local' | 'anthropic';
   extract(markdown: string, opts?: ExtractOptions | object): Promise<ExtractResult>;
   complete(opts: CompleteOptions): Promise<CompleteResult>;
+  // Generic vision call: hands page images + a JSON schema to a vision-capable
+  // model and returns the parsed-but-not-validated JSON (caller validates with
+  // its own Zod schema). Used by the check-payee resolver. Local provider only
+  // — AnthropicProvider is text-only and throws. (Mirrors the extract() vision
+  // path but with a caller-supplied prompt + schema instead of the fixed
+  // statement-extraction ones.)
+  completeWithImages(opts: CompleteOptions): Promise<CompleteResult>;
   health(): Promise<{ ok: boolean; detail?: string }>;
 }
 
@@ -351,42 +350,150 @@ const coerceOpts = (arg?: ExtractOptions | object): ExtractOptions => {
   return arg as ExtractOptions;
 };
 
-// ---- Local Vibe LLM Gateway (OpenAI-compatible) ----------------------------
+// ---- Local Ollama provider (text via OpenAI-compat /v1, vision via /api/chat) ----
 
 export interface LocalGatewayProviderOptions {
   baseUrl?: string | undefined;
+  // Text-extraction model (OpenAI-compat /v1/chat/completions path).
   modelId?: string | undefined;
+  // Vision/OCR model (native /api/chat path). Falls back to modelId when the
+  // operator's text tag is itself multimodal.
+  visionModelId?: string | undefined;
   timeoutMs?: number | undefined;
+  // A 200–300 DPI page image legitimately takes a minute or more to OCR on
+  // CPU, so the vision call gets a longer budget than the text path.
+  visionTimeoutMs?: number | undefined;
   fetcher?: typeof fetch | undefined;
 }
 
+// Ollama drives both paths in the same process now (Shield + GLM-OCR removed):
+// the OpenAI-compatible /v1/chat/completions endpoint for text-layer markdown,
+// and the native /api/chat endpoint for vision/OCR of scanned pages. Native is
+// used for vision because Ollama's `format: <json-schema>` structured-output
+// support is more complete there than on the /v1 surface. Page images are
+// processed locally and never egress (ADR-023). See myBooks
+// `services/ai-providers/ollama.provider.ts` for the reference request shapes.
 export class LocalGatewayProvider implements LlmProvider {
   readonly id = 'local' as const;
   private baseUrl: string;
   private modelId: string;
+  private visionModelId: string;
   private timeoutMs: number;
+  private visionTimeoutMs: number;
+  private keepAlive: string;
+  private numCtx: number | undefined;
+  // Native /api/chat `think` toggle for the vision model. Only sent when the
+  // operator sets OLLAMA_VISION_THINK (a non-thinking model rejects `think`).
+  // Reasoning is off by default — it doubles latency and a schema-constrained
+  // OCR pass rarely needs it.
+  private visionThink: boolean | undefined;
   private fetcher: typeof fetch;
 
   constructor(opts: LocalGatewayProviderOptions = {}) {
-    this.baseUrl = (opts.baseUrl ?? process.env.LLM_GATEWAY_URL ?? '').replace(/\/$/, '');
-    this.modelId = opts.modelId ?? process.env.LLM_MODEL_ID ?? 'qwen3-8b';
+    this.baseUrl = (
+      opts.baseUrl ??
+      process.env.OLLAMA_BASE_URL ??
+      process.env.LLM_GATEWAY_URL ??
+      'http://localhost:11434'
+    )
+      // Tolerate an operator pasting the OpenAI-compat base (…/v1): the text
+      // path re-appends /v1 and the vision path needs the native root.
+      .replace(/\/v1\/?$/, '')
+      .replace(/\/$/, '');
+    this.modelId = opts.modelId ?? process.env.LLM_MODEL_ID ?? 'qwen3.5:35b-a3b';
+    this.visionModelId = opts.visionModelId ?? process.env.OLLAMA_VISION_MODEL ?? this.modelId;
     this.timeoutMs = opts.timeoutMs ?? Number(process.env.LLM_TIMEOUT_MS ?? 60_000);
+    this.visionTimeoutMs =
+      opts.visionTimeoutMs ?? Number(process.env.OLLAMA_VISION_TIMEOUT_MS ?? 120_000);
+    this.keepAlive = process.env.OLLAMA_KEEP_ALIVE ?? '30m';
+    const numCtx = Number(process.env.OLLAMA_NUM_CTX ?? '');
+    this.numCtx = Number.isFinite(numCtx) && numCtx > 0 ? numCtx : undefined;
+    const think = process.env.OLLAMA_VISION_THINK;
+    this.visionThink = think === 'on' ? true : think === 'off' ? false : undefined;
     this.fetcher = opts.fetcher ?? fetch;
   }
 
   async health(): Promise<{ ok: boolean; detail?: string }> {
-    if (!this.baseUrl) return { ok: false, detail: 'LLM_GATEWAY_URL not set' };
+    if (!this.baseUrl) return { ok: false, detail: 'Ollama base URL not set' };
     try {
       const ctl = new AbortController();
       const t = setTimeout(() => ctl.abort(), 1500);
       try {
-        const res = await this.fetcher(`${this.baseUrl}/health`, { signal: ctl.signal });
+        // Ollama's native liveness/catalog endpoint. A reachable-but-wrong
+        // base URL (404/500) must not report "connected".
+        const res = await this.fetcher(`${this.baseUrl}/api/tags`, { signal: ctl.signal });
         return res.ok ? { ok: true } : { ok: false, detail: `HTTP ${res.status}` };
       } finally {
         clearTimeout(t);
       }
     } catch (err) {
       return { ok: false, detail: (err as Error).message };
+    }
+  }
+
+  // Single native /api/chat round-trip for the vision/OCR path. Qwen-VL reads
+  // the page image(s) and emits the extraction JSON directly. `format` carries
+  // the JSON schema so Ollama constrains generation; temperature 0 for
+  // determinism. Returns raw content + telemetry so `extract` can call it
+  // twice (initial + reminder retry).
+  private async callOllamaVision(
+    images: NonNullable<ExtractOptions['images']>,
+    schema: object | undefined,
+    system: string,
+    userPrompt: string,
+  ): Promise<{ content: string; inputTokens: number; outputTokens: number; ms: number }> {
+    const ctl = new AbortController();
+    const t = setTimeout(() => ctl.abort(), this.visionTimeoutMs);
+    const start = Date.now();
+    try {
+      const res = await this.fetcher(`${this.baseUrl}/api/chat`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          model: this.visionModelId,
+          messages: [
+            { role: 'system', content: system },
+            {
+              role: 'user',
+              content: userPrompt,
+              images: images.map((img) => img.data.toString('base64')),
+            },
+          ],
+          format: schema ?? 'json',
+          stream: false,
+          ...(this.visionThink !== undefined ? { think: this.visionThink } : {}),
+          keep_alive: this.keepAlive,
+          options: { temperature: 0, ...(this.numCtx ? { num_ctx: this.numCtx } : {}) },
+        }),
+        signal: ctl.signal,
+      });
+      if (!res.ok) throw new Error(`ollama vision HTTP ${res.status}`);
+      const body = (await res.json()) as {
+        message?: { content?: string };
+        prompt_eval_count?: number;
+        eval_count?: number;
+      };
+      const content = body.message?.content ?? '';
+      if (!content) {
+        throw new ExtractionResponseError({
+          summary: 'ollama vision returned an empty completion',
+          rawResponse: JSON.stringify(body).slice(0, 8_000),
+        });
+      }
+      return {
+        content,
+        inputTokens: body.prompt_eval_count ?? 0,
+        outputTokens: body.eval_count ?? 0,
+        ms: Date.now() - start,
+      };
+    } catch (err) {
+      throw asTimeoutError(
+        err,
+        `ollama vision POST ${this.baseUrl}/api/chat`,
+        this.visionTimeoutMs,
+      );
+    } finally {
+      clearTimeout(t);
     }
   }
 
@@ -457,12 +564,64 @@ export class LocalGatewayProvider implements LlmProvider {
   }
 
   async extract(markdown: string, arg?: ExtractOptions | object): Promise<ExtractResult> {
-    if (!this.baseUrl) throw new Error('LLM_GATEWAY_URL not set');
+    if (!this.baseUrl) throw new Error('Ollama base URL not set');
     const opts = coerceOpts(arg);
-    const { text } = prepareMarkdown(markdown);
     const promptOpts: UserPromptOptions = {};
     if (opts.dateFormatOverride) promptOpts.dateFormatOverride = opts.dateFormatOverride;
     if (opts.accountTypeHint) promptOpts.accountTypeHint = opts.accountTypeHint;
+
+    // Vision/OCR path (scanned statements): Qwen-VL reads the page image(s)
+    // via native /api/chat and emits the extraction JSON in one call. Same
+    // one-shot reminder retry on a missing top-level field as the text path.
+    if (opts.images && opts.images.length > 0) {
+      let userPrompt = imageUserPromptFor(promptOpts);
+      let totalInputTokens = 0;
+      let totalOutputTokens = 0;
+      let totalMs = 0;
+      for (let attempt = 1; attempt <= 2; attempt += 1) {
+        const call = await this.callOllamaVision(
+          opts.images,
+          opts.schema,
+          IMAGE_SYSTEM_PROMPT,
+          userPrompt,
+        );
+        totalInputTokens += call.inputTokens;
+        totalOutputTokens += call.outputTokens;
+        totalMs += call.ms;
+        try {
+          const data = parseExtractionResponse(call.content);
+          return {
+            data,
+            rawJson: call.content,
+            telemetry: {
+              inputTokens: totalInputTokens,
+              outputTokens: totalOutputTokens,
+              ms: totalMs,
+              model: this.visionModelId,
+              costMicros: 0n, // local hardware
+            },
+          };
+        } catch (err) {
+          if (
+            attempt < 2 &&
+            err instanceof ExtractionResponseError &&
+            err.missingTopLevelFields.length > 0
+          ) {
+            userPrompt =
+              `Your previous response was REJECTED — missing required field(s): ` +
+              `${err.missingTopLevelFields.join(', ')}. Re-read the image(s) and emit the ` +
+              `FULL extraction JSON with period, balances, source_date_format, AND ` +
+              `transactions all present. "transactions" MUST be an array (emit [] if none). ` +
+              `Output only the JSON.`;
+            continue;
+          }
+          throw err;
+        }
+      }
+      throw new Error('ollama vision extract: retry loop exhausted unexpectedly');
+    }
+
+    const { text } = prepareMarkdown(markdown);
 
     // One-shot reminder retry. When the gateway returns valid JSON
     // missing a required top-level field (the Vibe Gateway with
@@ -515,14 +674,12 @@ export class LocalGatewayProvider implements LlmProvider {
   }
 
   async complete(opts: CompleteOptions): Promise<CompleteResult> {
-    if (!this.baseUrl) throw new Error('LLM_GATEWAY_URL not set');
+    if (!this.baseUrl) throw new Error('Ollama base URL not set');
     if (opts.images && opts.images.length > 0) {
-      // Qwen3-8B has no vision input. Fail loud so the caller routes
-      // image-bearing requests to Anthropic instead of silently losing
-      // the attachments.
-      throw new Error(
-        'local gateway (Qwen3-8B) does not support image inputs — route vision calls to Anthropic',
-      );
+      // The generic structured-output path is text-only. Vision/OCR has a
+      // dedicated path on extract() (native /api/chat); fail loud here so an
+      // image-bearing enrichment call doesn't silently drop its attachments.
+      throw new Error('ollama complete() does not accept image inputs — use extract() for vision');
     }
     const messages = [
       { role: 'system', content: opts.systemPrompt },
@@ -573,6 +730,46 @@ export class LocalGatewayProvider implements LlmProvider {
     } finally {
       clearTimeout(t);
     }
+  }
+
+  // Generic vision call (native /api/chat). Reuses callOllamaVision with the
+  // caller's system/user prompt + JSON schema; returns parsed-but-unvalidated
+  // JSON. Page images are processed locally and never egress (ADR-023).
+  async completeWithImages(opts: CompleteOptions): Promise<CompleteResult> {
+    if (!this.baseUrl) throw new Error('Ollama base URL not set');
+    if (!opts.images || opts.images.length === 0) {
+      throw new Error('completeWithImages requires at least one image');
+    }
+    const call = await this.callOllamaVision(
+      opts.images,
+      opts.schema,
+      opts.systemPrompt,
+      opts.userPrompt,
+    );
+    let data: unknown;
+    try {
+      data = JSON.parse(call.content);
+    } catch {
+      const recovered = recoverProseWrappedJson(call.content);
+      if (recovered === undefined) {
+        throw new ExtractionResponseError({
+          summary: 'ollama vision response was not valid JSON',
+          rawResponse: call.content.slice(0, 8_000),
+        });
+      }
+      data = recovered;
+    }
+    return {
+      data,
+      rawJson: call.content,
+      telemetry: {
+        inputTokens: call.inputTokens,
+        outputTokens: call.outputTokens,
+        ms: call.ms,
+        model: this.visionModelId,
+        costMicros: 0n, // local hardware
+      },
+    };
   }
 }
 
@@ -627,13 +824,6 @@ export interface AnthropicProviderOptions {
   // defaults. Used by buildProvider to pass DB-backed pricing through
   // without coupling the leaf extractor package to the API layer.
   priceTable?: AnthropicPriceTable | undefined;
-  // Vibe Shield extensions. When the provider points at a Shield gateway
-  // (baseUrl), these attach the per-conversion session + redaction policy
-  // to every /v1/messages call so the extractor's tokens share the same
-  // vault as the OCR step. Anthropic ignores unknown fields, so they're
-  // harmless when baseUrl points at api.anthropic.com directly.
-  sessionId?: string | undefined;
-  policyName?: string | undefined;
 }
 
 export class AnthropicProvider implements LlmProvider {
@@ -645,8 +835,6 @@ export class AnthropicProvider implements LlmProvider {
   private maxTokens: number;
   private fetcher: typeof fetch;
   private priceTable: AnthropicPriceTable;
-  private sessionId: string | null;
-  private policyName: string | null;
 
   constructor(opts: AnthropicProviderOptions) {
     if (!opts.apiKey) throw new Error('AnthropicProvider requires an API key');
@@ -661,60 +849,20 @@ export class AnthropicProvider implements LlmProvider {
     this.maxTokens = opts.maxTokens ?? Number(process.env.LLM_MAX_COMPLETION_TOKENS ?? 32_000);
     this.fetcher = opts.fetcher ?? fetch;
     this.priceTable = opts.priceTable ?? ANTHROPIC_PRICE_TABLE_DEFAULT;
-    this.sessionId = opts.sessionId && opts.sessionId.length > 0 ? opts.sessionId : null;
-    this.policyName =
-      opts.policyName && opts.policyName.length > 0
-        ? opts.policyName
-        : (process.env.VIBE_SHIELD_POLICY ?? null);
   }
 
-  // Shield request extensions, spread into every /v1/messages body. The
-  // session is per-call (each conversion has its own) so it must override
-  // the constructor default — the worker caches providers by id, so a
-  // constructor-baked session would leak across conversions. Empty object
-  // in direct-Anthropic mode (no session/policy).
-  private shieldFields(override?: {
-    sessionId?: string | undefined;
-    policyName?: string | undefined;
-  }): Record<string, string> {
-    const session = override?.sessionId ?? this.sessionId;
-    // Only attach Shield extensions when a session is in play. A session
-    // exists only when the request is bound for the Shield gateway, so
-    // this also keeps `session_id`/`policy_name` off requests to the real
-    // Anthropic API (which would reject the unknown fields). Shield's
-    // policy is bound to the key's appId, but policy_name on /v1/messages
-    // overrides the per-request policy — so we MUST send it explicitly,
-    // else the gateway falls back to its default policy (reid='full'),
-    // which would re-identify the response to cleartext at rest.
-    if (!session) return {};
-    return {
-      session_id: session,
-      policy_name: override?.policyName ?? this.policyName ?? 'cpa-converter-output',
-    };
-  }
-
-  // True when baseUrl is NOT the direct Anthropic API — i.e. we're routed
-  // through a gateway (the Vibe Shield gateway on this appliance), which
-  // speaks the Messages API but does not serve /v1/models and authenticates
-  // with a Bearer token instead of x-api-key.
+  // True when baseUrl is NOT the direct Anthropic API — i.e. routed through a
+  // proxy that speaks the Messages API but authenticates with a Bearer token
+  // and does not serve /v1/models. (Shield is gone; this only covers a plain
+  // operator-configured proxy via ANTHROPIC_BASE_URL.)
   private get viaGateway(): boolean {
     return this.baseUrl.replace(/\/$/, '') !== 'https://api.anthropic.com';
   }
 
-  // Output-token ceiling actually sent on the wire. Through the Vibe Shield
-  // gateway this is clamped to the policy ceiling, because Shield 400s a
-  // request whose max_tokens exceeds `max_tokens_ceiling` (it does not
-  // clamp for us). Direct-to-Anthropic keeps the full configured value.
-  // A clamp can still truncate a large statement — the stop_reason guard
-  // turns that into a clear, Shield-aware error rather than a silent drop.
-  private effectiveMaxTokens(requested: number): number {
-    return this.viaGateway ? Math.min(requested, shieldMaxTokensCeiling()) : requested;
-  }
-
-  // Headers for a /v1/messages call. The Vibe Shield gateway authenticates
-  // with `Authorization: Bearer <vs_live_ key>`; the direct Anthropic API
-  // uses `x-api-key` + `anthropic-version`. Picking the wrong one yields a
-  // 401, so this is keyed off the base URL.
+  // Headers for a /v1/messages call. A proxy authenticates with
+  // `Authorization: Bearer <key>`; the direct Anthropic API uses `x-api-key`
+  // + `anthropic-version`. Picking the wrong one yields a 401, so this is
+  // keyed off the base URL.
   private messageHeaders(): Record<string, string> {
     if (this.viaGateway) {
       return { 'content-type': 'application/json', authorization: `Bearer ${this.apiKey}` };
@@ -729,10 +877,8 @@ export class AnthropicProvider implements LlmProvider {
   async health(): Promise<{ ok: boolean; detail?: string }> {
     if (!this.apiKey) return { ok: false, detail: 'API key not set' };
     if (this.viaGateway) {
-      // Gateway (e.g. Vibe Shield): probe its liveness endpoint with the
-      // Bearer key. A 2xx means the gateway is reachable; the per-request
-      // policy / ZDR / appId checks are validated by the Shield smoke test
-      // (`pnpm shield:smoke`), not this lightweight connectivity probe.
+      // Proxy: probe its liveness endpoint with the Bearer key. A 2xx means
+      // the proxy is reachable; this is a lightweight connectivity probe.
       const ctl = new AbortController();
       const timer = setTimeout(() => ctl.abort(), 5_000);
       try {
@@ -814,11 +960,8 @@ export class AnthropicProvider implements LlmProvider {
   // call it twice (initial + reminder retry) and accumulate tokens
   // without duplicating the request-building logic.
   private async callAnthropic(
-    // ``content`` is a bare string for the OCR-markdown path or an array of
-    // Anthropic content blocks (images + text) for the vision-extraction path.
     messages: Array<{ role: 'user' | 'assistant'; content: unknown }>,
     tool: { name: string; description: string; input_schema: object },
-    shield?: { sessionId?: string | undefined; policyName?: string | undefined },
     system: string = SYSTEM_PROMPT,
   ): Promise<{
     rawJson: string;
@@ -826,12 +969,11 @@ export class AnthropicProvider implements LlmProvider {
     inputTokens: number;
     outputTokens: number;
     ms: number;
-    classifications: string[] | undefined;
   }> {
     const ctl = new AbortController();
     const t = setTimeout(() => ctl.abort(), this.timeoutMs);
     const start = Date.now();
-    const sentMaxTokens = this.effectiveMaxTokens(this.maxTokens);
+    const sentMaxTokens = this.maxTokens;
     try {
       const res = await this.fetcher(`${this.baseUrl}/v1/messages`, {
         method: 'POST',
@@ -843,18 +985,13 @@ export class AnthropicProvider implements LlmProvider {
           tools: [tool],
           tool_choice: { type: 'tool', name: tool.name },
           messages,
-          ...this.shieldFields(shield),
         }),
         signal: ctl.signal,
       });
       if (!res.ok) {
-        // Surface the gateway/API error body — a bare status hides the
-        // reason (e.g. Shield's {"error":{"type","message"}} for a wrong
-        // policy, ZDR-off, model-not-allowed, or bad session_id). Shield
-        // also MASKS the upstream Anthropic 400 reason behind a generic
-        // message + correlation_id, so we attach our own request shape
-        // (counts/sizes only — never image bytes or text) to make a 4xx
-        // diagnosable from the app trace without a Shield-side log dive.
+        // Surface the API error body — a bare status hides the reason. Attach
+        // our own request shape (counts/sizes only — never prompt text) so a
+        // 4xx is diagnosable from the app trace alone.
         const detail = await res.text().catch(() => '');
         throw new Error(
           `anthropic HTTP ${res.status} [${describeAnthropicRequest(messages, this.model, sentMaxTokens, this.viaGateway)}]${
@@ -878,18 +1015,13 @@ export class AnthropicProvider implements LlmProvider {
       // with the same cap would truncate identically, so this error
       // carries no missingTopLevelFields and the retry loop skips it.
       if (body.stop_reason === 'max_tokens') {
-        const sent = this.effectiveMaxTokens(this.maxTokens);
-        // Via Shield the cap is the policy ceiling and cannot be raised
-        // past it — point the operator at the two routes that actually
-        // lift the limit: extract direct-to-Anthropic (the OCR markdown is
-        // already tokenized, so no PII egresses) or chunked extraction.
-        const guidance = this.viaGateway
-          ? `via the Vibe Shield gateway the output is capped at the policy ceiling (${sent}); a large statement cannot fit. Route extraction direct-to-Anthropic (OCR markdown is already tokenized — no PII egress) or split the statement.`
-          : `raise the admin "Max output tokens" knob (or LLM_MAX_COMPLETION_TOKENS) — statement too large for ${sent} output tokens`;
+        const sent = sentMaxTokens;
         throw new ExtractionResponseError({
           summary: `LLM output truncated at max_tokens (${sent})`,
           rawResponse: JSON.stringify(body).slice(0, 8_000),
-          issues: `stop_reason=max_tokens; ${guidance}`,
+          issues:
+            `stop_reason=max_tokens; raise the admin "Max output tokens" knob ` +
+            `(or LLM_MAX_COMPLETION_TOKENS) — statement too large for ${sent} output tokens`,
         });
       }
       const toolUse = body.content?.find(
@@ -913,12 +1045,6 @@ export class AnthropicProvider implements LlmProvider {
         inputTokens: body.usage?.input_tokens ?? 0,
         outputTokens: body.usage?.output_tokens ?? 0,
         ms: Date.now() - start,
-        // Shield's per-page document-type header (vision path only). Headers
-        // is a standard fetch Headers object in production; guard for test
-        // doubles that return a bare { ok, json } response.
-        classifications: parsePageClassifications(
-          res.headers?.get?.('vs-page-classifications') ?? null,
-        ),
       };
     } catch (err) {
       throw asTimeoutError(err, `anthropic POST ${this.baseUrl}/v1/messages`, this.timeoutMs);
@@ -929,7 +1055,15 @@ export class AnthropicProvider implements LlmProvider {
 
   async extract(markdown: string, arg?: ExtractOptions | object): Promise<ExtractResult> {
     const opts = coerceOpts(arg);
-    const useVision = !!(opts.images && opts.images.length > 0);
+    // Anthropic is the text-only extraction provider: it receives OCR'd /
+    // text-layer markdown, never page images (those are OCR'd locally on
+    // Ollama and never egress — ADR-023). An images-bearing call is a
+    // worker bug; surface it loud rather than silently dropping the images.
+    if (opts.images && opts.images.length > 0) {
+      throw new Error(
+        'AnthropicProvider is text-only — scanned/image statements OCR locally on Ollama',
+      );
+    }
     const { text } = prepareMarkdown(markdown);
     const promptOpts: UserPromptOptions = {};
     if (opts.dateFormatOverride) promptOpts.dateFormatOverride = opts.dateFormatOverride;
@@ -940,42 +1074,22 @@ export class AnthropicProvider implements LlmProvider {
       input_schema: opts.schema ?? schemas.extraction.ExtractionJsonSchema,
     };
 
-    // Vision path sends (Shield-redacted) page images directly; markdown path
-    // sends OCR'd text. The user content is a content-block array for vision
-    // (images first, text last) or a bare string for markdown.
-    const system = useVision ? IMAGE_SYSTEM_PROMPT : SYSTEM_PROMPT;
-    const imageBlocks = useVision
-      ? (opts.images ?? []).map((img) => ({
-          type: 'image',
-          source: { type: 'base64', media_type: img.mediaType, data: img.data.toString('base64') },
-        }))
-      : [];
-    const userContentFor = (promptText: string): unknown =>
-      useVision ? [...imageBlocks, { type: 'text', text: promptText }] : promptText;
-
     // One-shot reminder retry. Anthropic tool_use almost always honors
     // input_schema strictly, but the same defensive retry that the
-    // local gateway needs applies here too — if the model returns a
+    // local provider needs applies here too — if the model returns a
     // tool_use whose input omits a required top-level field, retry
     // once with an explicit reminder before bouncing to fallback.
-    let userPrompt = useVision ? imageUserPromptFor(promptOpts) : userPromptFor(text, promptOpts);
+    let userPrompt = userPromptFor(text, promptOpts);
     let totalInputTokens = 0;
     let totalOutputTokens = 0;
     let totalMs = 0;
 
     for (let attempt = 1; attempt <= 2; attempt += 1) {
       const messages: Array<{ role: 'user' | 'assistant'; content: unknown }> = [
-        // Text-only few-shot exemplars would confuse the vision call (they
-        // reference markdown), so the image path skips them.
-        ...(useVision ? [] : exemplarsAsMessages(1)),
-        { role: 'user', content: userContentFor(userPrompt) },
+        ...exemplarsAsMessages(1),
+        { role: 'user', content: userPrompt },
       ];
-      const call = await this.callAnthropic(
-        messages,
-        tool,
-        { sessionId: opts.sessionId, policyName: opts.policyName },
-        system,
-      );
+      const call = await this.callAnthropic(messages, tool, SYSTEM_PROMPT);
       totalInputTokens += call.inputTokens;
       totalOutputTokens += call.outputTokens;
       totalMs += call.ms;
@@ -996,7 +1110,6 @@ export class AnthropicProvider implements LlmProvider {
               this.priceTable,
             ),
           },
-          ...(call.classifications ? { classifications: call.classifications } : {}),
         };
       } catch (err) {
         if (
@@ -1004,13 +1117,7 @@ export class AnthropicProvider implements LlmProvider {
           err instanceof ExtractionResponseError &&
           err.missingTopLevelFields.length > 0
         ) {
-          const fields = err.missingTopLevelFields.join(', ');
-          userPrompt = useVision
-            ? `Your previous response was REJECTED — missing required field(s): ${fields}. ` +
-              `Re-read the image(s) and emit the FULL extraction JSON with period, balances, ` +
-              `source_date_format, AND transactions all present. "transactions" MUST be an ` +
-              `array (emit [] if none). Output only the JSON.`
-            : missingFieldsReminderPromptFor(text, err.missingTopLevelFields, promptOpts);
+          userPrompt = missingFieldsReminderPromptFor(text, err.missingTopLevelFields, promptOpts);
           continue;
         }
         throw err;
@@ -1026,31 +1133,18 @@ export class AnthropicProvider implements LlmProvider {
       description: 'Emit the requested structured output.',
       input_schema: opts.schema,
     };
-    // Build the user-message content. When images are supplied, the
-    // recommended Anthropic ordering is images first, text last — the
-    // text instructs the model on what to do with the preceding
-    // images. Without images, the content is just the bare text
-    // string (kept that way to match the older transcript shape).
-    const userContent: unknown =
-      opts.images && opts.images.length > 0
-        ? [
-            ...opts.images.map((img) => ({
-              type: 'image',
-              source: {
-                type: 'base64',
-                media_type: img.mediaType,
-                data: img.data.toString('base64'),
-              },
-            })),
-            { type: 'text', text: opts.userPrompt },
-          ]
-        : opts.userPrompt;
+    // Anthropic is text-only. Image-bearing structured-output requests have
+    // no path here (vision/OCR is local on Ollama), so reject them rather
+    // than silently dropping the attachments.
+    if (opts.images && opts.images.length > 0) {
+      throw new Error('AnthropicProvider.complete() is text-only — no image inputs');
+    }
     const ctl = new AbortController();
     const t = setTimeout(() => ctl.abort(), this.timeoutMs);
     const start = Date.now();
-    const sentMaxTokens = this.effectiveMaxTokens(opts.maxOutputTokens ?? this.maxTokens);
+    const sentMaxTokens = opts.maxOutputTokens ?? this.maxTokens;
     const messages: Array<{ role: 'user'; content: unknown }> = [
-      { role: 'user', content: userContent },
+      { role: 'user', content: opts.userPrompt },
     ];
     try {
       const res = await this.fetcher(`${this.baseUrl}/v1/messages`, {
@@ -1063,7 +1157,6 @@ export class AnthropicProvider implements LlmProvider {
           tools: [tool],
           tool_choice: { type: 'tool', name: toolName },
           messages,
-          ...this.shieldFields({ sessionId: opts.sessionId, policyName: opts.policyName }),
         }),
         signal: ctl.signal,
       });
@@ -1122,5 +1215,14 @@ export class AnthropicProvider implements LlmProvider {
     } finally {
       clearTimeout(t);
     }
+  }
+
+  // Anthropic is the text-only provider — vision/OCR (incl. reading check
+  // payees off images) runs on the local Ollama provider, so page images
+  // never egress (ADR-023).
+  async completeWithImages(_opts: CompleteOptions): Promise<CompleteResult> {
+    throw new Error(
+      'AnthropicProvider.completeWithImages() is text-only — check-payee vision runs on the local Ollama provider',
+    );
   }
 }
