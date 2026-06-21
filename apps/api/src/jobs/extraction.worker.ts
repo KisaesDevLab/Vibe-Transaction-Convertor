@@ -38,6 +38,7 @@ import {
 } from '../services/llm-provider.js';
 import { resolvePdfStrategy } from '../services/pdf-strategy.js';
 import { resolveCheckPayees } from '../services/check-resolver.js';
+import { resolveAiSettings } from '../services/ai-settings.js';
 import { writeAudit } from '../services/audit.js';
 
 import { QUEUE_EXTRACTION, getJobConnection, type ExtractionJobData } from './queues.js';
@@ -771,6 +772,10 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
     const acctRows = await db.select().from(accounts).where(eq(accounts.id, data.accountId));
     const isCreditCard = acctRows[0]?.accountType === 'CREDITCARD';
 
+    // Operator-tunable OCR + safety-net settings (DB → env → default), edited
+    // live from /admin/llm-provider.
+    const aiSettings = await resolveAiSettings(db);
+
     // Phase 15 item 4b: if the operator already confirmed a date format
     // (after a previous AMBIGUOUS extraction), pass that through to the
     // LLM so it interprets the statement consistently.
@@ -862,9 +867,9 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
     // batch and fit Ollama's context. DPI/quality are operator-tunable.
     const produceOcrImages = async (): Promise<VisionImage[]> => {
       const rasters = await rasterizePdf(data.sourcePdfPath, {
-        dpi: Number(process.env.VIBETC_OCR_RASTER_DPI ?? 200),
+        dpi: aiSettings.ocrDpi,
         format: 'jpeg',
-        jpegQuality: Number(process.env.VIBETC_OCR_RASTER_JPEG_QUALITY ?? 80),
+        jpegQuality: aiSettings.ocrJpegQuality,
       });
       const scopedRasters = rasters.filter((r) => inRange(r.index));
       return Promise.all(
@@ -1206,8 +1211,8 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
     // silently. Flag any extraction carrying low-confidence rows for human
     // review before export — reusing the review-hold gate
     // (assertNotHeldForReview) + acknowledge endpoint. Operator-tunable via
-    // VIBETC_REVIEW_CONFIDENCE_THRESHOLD; set it to 0 to disable the hold.
-    const reviewConfidenceThreshold = Number(process.env.VIBETC_REVIEW_CONFIDENCE_THRESHOLD ?? 0.7);
+    // the review-confidence-threshold setting; 0 disables the hold.
+    const reviewConfidenceThreshold = aiSettings.reviewConfidence;
     const lowConfidenceCount =
       reviewConfidenceThreshold > 0
         ? effectiveTxs.filter((t) => t.confidence < reviewConfidenceThreshold).length
@@ -1289,8 +1294,8 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
     // cancelled-check images, and a scanned run may have missed some — so for
     // any check-numbered row left without a payee, read the check images on the
     // local vision model and stamp the payee (drives the OFX <NAME>). Gated by
-    // VIBETC_CHECK_PAYEE_AUTO (default on); never fails the extraction.
-    const autoCheckPayee = process.env.VIBETC_CHECK_PAYEE_AUTO !== 'false';
+    // the auto-check-payee setting (default on); never fails the extraction.
+    const autoCheckPayee = aiSettings.checkPayeeAuto;
     if (autoCheckPayee && effectiveTxs.some((t) => t.checkNumber && !t.payee)) {
       try {
         const res = await resolveCheckPayees(db, stmtId);

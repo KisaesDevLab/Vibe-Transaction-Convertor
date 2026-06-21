@@ -356,13 +356,19 @@ export interface LocalGatewayProviderOptions {
   baseUrl?: string | undefined;
   // Text-extraction model (OpenAI-compat /v1/chat/completions path).
   modelId?: string | undefined;
-  // Vision/OCR model (native /api/chat path). Falls back to modelId when the
-  // operator's text tag is itself multimodal.
+  // Vision/OCR model (native /api/chat path). Defaults to DEFAULT_VISION_MODEL
+  // (a dedicated multimodal model) when unset — never the text model.
   visionModelId?: string | undefined;
   timeoutMs?: number | undefined;
   // A 200–300 DPI page image legitimately takes a minute or more to OCR on
   // CPU, so the vision call gets a longer budget than the text path.
   visionTimeoutMs?: number | undefined;
+  // Vision tuning, normally resolved from system_settings by the factory and
+  // passed through here (each falls back to its env var / default when unset).
+  visionMaxTokens?: number | undefined;
+  keepAlive?: string | undefined;
+  numCtx?: number | undefined;
+  visionThink?: boolean | undefined;
   fetcher?: typeof fetch | undefined;
 }
 
@@ -373,6 +379,13 @@ export interface LocalGatewayProviderOptions {
 // support is more complete there than on the /v1 surface. Page images are
 // processed locally and never egress (ADR-023). See myBooks
 // `services/ai-providers/ollama.provider.ts` for the reference request shapes.
+
+// Default OCR/vision model — a dedicated multimodal model, NOT the text model.
+// (Falling back to the text tag silently broke OCR: page images went to a
+// text-only model and timed out.) Operators override via OLLAMA_VISION_MODEL /
+// the admin vision-model picker.
+export const DEFAULT_VISION_MODEL = 'minicpm-v4.5:latest';
+
 export class LocalGatewayProvider implements LlmProvider {
   readonly id = 'local' as const;
   private baseUrl: string;
@@ -382,6 +395,11 @@ export class LocalGatewayProvider implements LlmProvider {
   private visionTimeoutMs: number;
   private keepAlive: string;
   private numCtx: number | undefined;
+  // Hard output cap for the vision call (Ollama `num_predict`). Without it the
+  // model can generate unbounded JSON for a large statement and, under the
+  // grammar-constrained `format` decode on a slow/CPU host, blow past the
+  // per-call timeout. Operator-tunable via OLLAMA_VISION_MAX_TOKENS.
+  private visionMaxTokens: number;
   // Native /api/chat `think` toggle for the vision model. Only sent when the
   // operator sets OLLAMA_VISION_THINK (a non-thinking model rejects `think`).
   // Reasoning is off by default — it doubles latency and a schema-constrained
@@ -401,15 +419,22 @@ export class LocalGatewayProvider implements LlmProvider {
       .replace(/\/v1\/?$/, '')
       .replace(/\/$/, '');
     this.modelId = opts.modelId ?? process.env.LLM_MODEL_ID ?? 'qwen3.5:35b-a3b';
-    this.visionModelId = opts.visionModelId ?? process.env.OLLAMA_VISION_MODEL ?? this.modelId;
+    this.visionModelId =
+      opts.visionModelId ?? process.env.OLLAMA_VISION_MODEL ?? DEFAULT_VISION_MODEL;
     this.timeoutMs = opts.timeoutMs ?? Number(process.env.LLM_TIMEOUT_MS ?? 60_000);
+    // 300s default: a 200–300 DPI page through a large -VL model on CPU (or a
+    // cold model load on first call) legitimately exceeds the old 120s budget.
     this.visionTimeoutMs =
-      opts.visionTimeoutMs ?? Number(process.env.OLLAMA_VISION_TIMEOUT_MS ?? 120_000);
-    this.keepAlive = process.env.OLLAMA_KEEP_ALIVE ?? '30m';
-    const numCtx = Number(process.env.OLLAMA_NUM_CTX ?? '');
-    this.numCtx = Number.isFinite(numCtx) && numCtx > 0 ? numCtx : undefined;
-    const think = process.env.OLLAMA_VISION_THINK;
-    this.visionThink = think === 'on' ? true : think === 'off' ? false : undefined;
+      opts.visionTimeoutMs ?? Number(process.env.OLLAMA_VISION_TIMEOUT_MS ?? 300_000);
+    this.visionMaxTokens =
+      opts.visionMaxTokens ?? Number(process.env.OLLAMA_VISION_MAX_TOKENS ?? 8_192);
+    this.keepAlive = opts.keepAlive ?? process.env.OLLAMA_KEEP_ALIVE ?? '30m';
+    const numCtxEnv = Number(process.env.OLLAMA_NUM_CTX ?? '');
+    this.numCtx =
+      opts.numCtx ?? (Number.isFinite(numCtxEnv) && numCtxEnv > 0 ? numCtxEnv : undefined);
+    const thinkEnv = process.env.OLLAMA_VISION_THINK;
+    this.visionThink =
+      opts.visionThink ?? (thinkEnv === 'on' ? true : thinkEnv === 'off' ? false : undefined);
     this.fetcher = opts.fetcher ?? fetch;
   }
 
@@ -463,7 +488,11 @@ export class LocalGatewayProvider implements LlmProvider {
           stream: false,
           ...(this.visionThink !== undefined ? { think: this.visionThink } : {}),
           keep_alive: this.keepAlive,
-          options: { temperature: 0, ...(this.numCtx ? { num_ctx: this.numCtx } : {}) },
+          options: {
+            temperature: 0,
+            num_predict: this.visionMaxTokens,
+            ...(this.numCtx ? { num_ctx: this.numCtx } : {}),
+          },
         }),
         signal: ctl.signal,
       });

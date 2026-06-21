@@ -6,6 +6,7 @@ import {
 
 import type { Db } from '../db/client.js';
 import { unwrapSecret } from '../lib/secrets.js';
+import { resolveAiSettings } from './ai-settings.js';
 import { getMergedPriceTable } from './pricing.js';
 import { readSetting } from './system-settings.js';
 
@@ -143,11 +144,19 @@ const constructLocal = async (db: Db): Promise<LlmProvider> => {
   const visionModelId =
     (await readSetting(db, KEY_OLLAMA_VISION_MODEL))?.valuePlaintext ?? undefined;
   const timeoutMs = await resolveLlmTimeoutMs(db);
+  // Operator-tunable vision knobs (DB → env → default), passed through so the
+  // /admin/llm-provider tuning controls take effect without a restart.
+  const ai = await resolveAiSettings(db);
   return new LocalGatewayProvider({
     ...(baseUrl ? { baseUrl } : {}),
     ...(modelId ? { modelId } : {}),
     ...(visionModelId ? { visionModelId } : {}),
     timeoutMs,
+    visionTimeoutMs: ai.visionTimeoutMs,
+    visionMaxTokens: ai.visionMaxTokens,
+    keepAlive: ai.keepAlive,
+    ...(ai.numCtx != null ? { numCtx: ai.numCtx } : {}),
+    ...(ai.visionThink != null ? { visionThink: ai.visionThink } : {}),
   });
 };
 

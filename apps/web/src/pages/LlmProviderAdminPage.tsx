@@ -66,6 +66,8 @@ interface ProviderStatus {
   ollamaBaseUrl: string;
   ollamaModel: string;
   ollamaVisionModel: string;
+  // Suggested vision/OCR tags for the picker (MiniCPM-V 4.5 first).
+  curatedVisionModels: string[];
   // Per-call extraction/enrichment timeout (ms). DB-backed; falls back to
   // LLM_TIMEOUT_MS env, then 60000.
   llmTimeoutMs: number;
@@ -77,6 +79,24 @@ interface ProviderStatus {
   effectiveModel: string;
   effectiveMaxTokens: number;
   monthlyCapUsd: number | null;
+  // Operator-tunable AI knobs (vision performance / OCR fidelity / OCR safety
+  // net), rendered generically by `kind` and grouped.
+  aiSettings: AiSetting[];
+}
+
+interface AiSetting {
+  id: string;
+  group: 'vision' | 'ocr' | 'safety';
+  kind: 'int' | 'float' | 'string' | 'bool' | 'enum';
+  label: string;
+  help: string;
+  value: string;
+  source: 'db' | 'env' | 'default';
+  default: string;
+  min?: number;
+  max?: number;
+  enumValues?: string[];
+  unit?: string;
 }
 
 const POLICY_LABELS: Record<LlmProviderPolicy, { title: string; description: string }> = {
@@ -221,6 +241,11 @@ export function LlmProviderAdminPage() {
       api.post('/api/admin/llm-provider/ollama-vision-model', { visionModel }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'llm-provider'] }),
   });
+  const setAiSettingMut = useMutation({
+    mutationFn: (input: { id: string; value: string }) =>
+      api.post('/api/admin/llm-provider/ai-setting', input),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'llm-provider'] }),
+  });
   const test = useMutation({
     mutationFn: () => api.post<TestResult>('/api/admin/llm-provider/test'),
   });
@@ -338,6 +363,15 @@ export function LlmProviderAdminPage() {
         toast.error(err instanceof ApiError ? err.message : 'failed');
       }
     };
+
+  const onSaveAiSetting = async (id: string, value: string): Promise<void> => {
+    try {
+      await setAiSettingMut.mutateAsync({ id, value });
+      toast.success(value.length > 0 ? 'Saved.' : 'Reset to default.');
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : 'failed');
+    }
+  };
 
   return (
     <section className="mx-auto max-w-3xl space-y-6">
@@ -460,12 +494,21 @@ export function LlmProviderAdminPage() {
           baseUrl={provider.data.ollamaBaseUrl}
           model={provider.data.ollamaModel}
           visionModel={provider.data.ollamaVisionModel}
+          visionModels={provider.data.curatedVisionModels}
           disabled={
             setOllamaBaseUrl.isPending || setOllamaModel.isPending || setOllamaVisionModel.isPending
           }
           onSaveBaseUrl={onSaveOllama('baseUrl')}
           onSaveModel={onSaveOllama('model')}
           onSaveVisionModel={onSaveOllama('visionModel')}
+        />
+      ) : null}
+
+      {provider.data ? (
+        <AiTuningSection
+          settings={provider.data.aiSettings}
+          disabled={setAiSettingMut.isPending}
+          onSave={onSaveAiSetting}
         />
       ) : null}
 
@@ -1035,15 +1078,21 @@ function OllamaField({
   placeholder,
   disabled,
   onSave,
+  suggestions,
 }: {
   label: string;
   value: string;
   placeholder: string;
   disabled: boolean;
   onSave: (value: string) => Promise<void>;
+  // Optional autocomplete list (e.g. curated vision models). Stays free-text.
+  suggestions?: readonly string[];
 }) {
   const [val, setVal] = useState(value);
   useEffect(() => setVal(value), [value]);
+  const listId = suggestions
+    ? `ollama-field-${label.replace(/\W+/g, '-').toLowerCase()}`
+    : undefined;
   return (
     <label className="block text-xs text-ink-muted">
       {label}
@@ -1052,9 +1101,17 @@ function OllamaField({
           type="text"
           placeholder={placeholder}
           value={val}
+          {...(listId ? { list: listId } : {})}
           onChange={(e) => setVal(e.target.value)}
           className="min-w-0 flex-1 rounded-md border border-surface-muted px-3 py-1.5 text-sm font-mono"
         />
+        {suggestions ? (
+          <datalist id={listId}>
+            {suggestions.map((s) => (
+              <option key={s} value={s} />
+            ))}
+          </datalist>
+        ) : null}
         <button
           type="button"
           onClick={() => void onSave(val.trim())}
@@ -1068,6 +1125,131 @@ function OllamaField({
   );
 }
 
+// Operator-tunable AI knobs, rendered generically by `kind` and grouped. Each
+// setting falls back to its env var / default; blanking a field clears the
+// override. int/float/string commit on blur+Enter; bool/enum commit on change.
+const AI_GROUP_LABELS: Record<AiSetting['group'], string> = {
+  vision: 'Vision performance',
+  ocr: 'OCR fidelity',
+  safety: 'OCR safety net',
+};
+
+function AiTuningSection({
+  settings,
+  disabled,
+  onSave,
+}: {
+  settings: AiSetting[];
+  disabled: boolean;
+  onSave: (id: string, value: string) => Promise<void>;
+}) {
+  const groups: AiSetting['group'][] = ['vision', 'ocr', 'safety'];
+  return (
+    <section className="rounded-lg border border-surface-muted bg-white p-4">
+      <h2 className="text-base font-medium">Local model tuning</h2>
+      <p className="mt-1 text-xs text-ink-subtle">
+        Vision/OCR performance and safety knobs. Each falls back to its env var / default — blank a
+        field to reset. Changes apply on the next extraction. The <code>[db/env/default]</code> tag
+        shows where the current value comes from.
+      </p>
+      {groups.map((g) => {
+        const items = settings.filter((s) => s.group === g);
+        if (items.length === 0) return null;
+        return (
+          <div key={g} className="mt-4">
+            <h3 className="text-xs font-semibold uppercase tracking-wide text-ink-muted">
+              {AI_GROUP_LABELS[g]}
+            </h3>
+            <div className="mt-2 space-y-3">
+              {items.map((s) => (
+                <AiSettingRow key={s.id} setting={s} disabled={disabled} onSave={onSave} />
+              ))}
+            </div>
+          </div>
+        );
+      })}
+    </section>
+  );
+}
+
+function AiSettingRow({
+  setting,
+  disabled,
+  onSave,
+}: {
+  setting: AiSetting;
+  disabled: boolean;
+  onSave: (id: string, value: string) => Promise<void>;
+}) {
+  const [val, setVal] = useState(setting.value);
+  useEffect(() => setVal(setting.value), [setting.value]);
+  const commit = (v: string): void => {
+    if (v !== setting.value) void onSave(setting.id, v);
+  };
+  const cls = 'rounded-md border border-surface-muted px-2 py-1 text-sm';
+  return (
+    <label className="block">
+      <span className="text-xs text-ink-muted">
+        {setting.label}
+        {setting.unit ? ` (${setting.unit})` : ''}
+        <span className="ml-1 text-[10px] text-ink-subtle">[{setting.source}]</span>
+      </span>
+      <div className="mt-1">
+        {setting.kind === 'bool' ? (
+          <select
+            disabled={disabled}
+            value={val}
+            onChange={(e) => {
+              setVal(e.target.value);
+              commit(e.target.value);
+            }}
+            className={cls}
+          >
+            <option value="true">On</option>
+            <option value="false">Off</option>
+          </select>
+        ) : setting.kind === 'enum' ? (
+          <select
+            disabled={disabled}
+            value={val}
+            onChange={(e) => {
+              setVal(e.target.value);
+              commit(e.target.value);
+            }}
+            className={cls}
+          >
+            {(setting.enumValues ?? []).map((ev) => (
+              <option key={ev} value={ev}>
+                {ev === '' ? '(model default)' : ev}
+              </option>
+            ))}
+          </select>
+        ) : (
+          <input
+            type={setting.kind === 'int' || setting.kind === 'float' ? 'number' : 'text'}
+            value={val}
+            disabled={disabled}
+            placeholder={setting.default.length > 0 ? setting.default : 'default'}
+            {...(setting.min != null ? { min: setting.min } : {})}
+            {...(setting.max != null ? { max: setting.max } : {})}
+            {...(setting.kind === 'float' ? { step: '0.05' } : {})}
+            onChange={(e) => setVal(e.target.value)}
+            onBlur={() => commit(val.trim())}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                e.preventDefault();
+                commit(val.trim());
+              }
+            }}
+            className={`w-40 font-mono tabular-nums ${cls}`}
+          />
+        )}
+      </div>
+      <p className="mt-0.5 text-[11px] text-ink-subtle">{setting.help}</p>
+    </label>
+  );
+}
+
 // Local Ollama (default provider): base URL + text/vision model tags. OCR
 // (scanned pages) and text extraction both run here; page images never egress.
 function OllamaSection({
@@ -1075,6 +1257,7 @@ function OllamaSection({
   model,
   visionModel,
   disabled,
+  visionModels,
   onSaveBaseUrl,
   onSaveModel,
   onSaveVisionModel,
@@ -1083,6 +1266,7 @@ function OllamaSection({
   model: string;
   visionModel: string;
   disabled: boolean;
+  visionModels: string[];
   onSaveBaseUrl: (value: string) => Promise<void>;
   onSaveModel: (value: string) => Promise<void>;
   onSaveVisionModel: (value: string) => Promise<void>;
@@ -1092,10 +1276,10 @@ function OllamaSection({
       <h2 className="text-base font-medium">Local Ollama (default provider)</h2>
       <p className="mt-1 text-xs text-ink-subtle">
         Scanned PDFs are OCR’d AND extracted in one call by the vision model; text-layer PDFs use
-        the text model. Page images are processed locally and never egress. Pull the tags on the
-        Ollama host first (e.g.{' '}
+        the text model. Reading check payees off the images also uses the vision model. Page images
+        are processed locally and never egress. Pull the tags on the Ollama host first (e.g.{' '}
         <code className="rounded bg-surface-subtle px-1">
-          ollama pull {model || 'qwen3.5:35b-a3b'}
+          ollama pull {visionModels[0] ?? 'minicpm-v4.5:latest'}
         </code>
         ). Blank = use the env / default.
       </p>
@@ -1115,11 +1299,12 @@ function OllamaSection({
           onSave={onSaveModel}
         />
         <OllamaField
-          label="Vision / OCR model (scanned PDFs)"
+          label="Vision / OCR model (scanned PDFs + check payees)"
           value={visionModel}
-          placeholder="a Qwen -VL tag (defaults to the text model)"
+          placeholder={visionModels[0] ?? 'minicpm-v4.5:latest'}
           disabled={disabled}
           onSave={onSaveVisionModel}
+          suggestions={visionModels}
         />
       </div>
     </section>

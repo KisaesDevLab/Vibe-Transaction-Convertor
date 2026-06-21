@@ -32,6 +32,7 @@ import {
   resolveProviderPolicy,
   type LlmProviderPolicy,
 } from '../services/llm-provider.js';
+import { listAiSettings, setAiSetting } from '../services/ai-settings.js';
 import {
   enrichmentPromptStatus,
   enrichmentToggleStatus,
@@ -67,6 +68,15 @@ const OLLAMA_MODEL_KEY = 'llm.local.model';
 const OLLAMA_VISION_MODEL_KEY = 'llm.local.vision_model';
 const DEFAULT_OLLAMA_BASE_URL = 'http://localhost:11434';
 const DEFAULT_OLLAMA_MODEL = 'qwen3.5:35b-a3b';
+const DEFAULT_OLLAMA_VISION_MODEL = 'minicpm-v4.5:latest';
+// Suggested vision/OCR tags for the admin picker; MiniCPM-V 4.5 first. The
+// field stays free-text so any pulled tag works.
+const CURATED_VISION_MODELS = [
+  'minicpm-v4.5:latest',
+  'qwen2.5vl:7b',
+  'llama3.2-vision',
+  'llava',
+] as const;
 
 // Read a single plaintext system_setting value, or null when unset.
 const readSingleSetting = async (database: typeof db, key: string): Promise<string | null> => {
@@ -166,7 +176,7 @@ export const adminRouter = (): Router => {
       const ollamaVisionModel =
         (await readSingleSetting(db, OLLAMA_VISION_MODEL_KEY)) ??
         process.env.OLLAMA_VISION_MODEL ??
-        ollamaModel;
+        DEFAULT_OLLAMA_VISION_MODEL;
       res.json({
         // Primary provider — what runs first when extraction starts.
         // Pre-policy clients read this field; new clients read `policy`.
@@ -186,6 +196,8 @@ export const adminRouter = (): Router => {
         ollamaBaseUrl,
         ollamaModel,
         ollamaVisionModel,
+        // Suggested vision/OCR tags for the picker (MiniCPM-V 4.5 first).
+        curatedVisionModels: CURATED_VISION_MODELS,
         llmTimeoutMs: await resolveLlmTimeoutMs(db),
         llmMaxTokens,
         // Resolved on-the-wire request shape (read-only; for the admin
@@ -195,6 +207,9 @@ export const adminRouter = (): Router => {
         monthlyCapUsd: capRows[0]?.valuePlaintext
           ? Number.parseFloat(capRows[0].valuePlaintext)
           : null,
+        // Operator-tunable AI knobs (vision performance, OCR fidelity, OCR
+        // safety net) — each with its effective value + source for the UI.
+        aiSettings: await listAiSettings(db),
       });
     } catch (err) {
       next(err);
@@ -420,7 +435,29 @@ export const adminRouter = (): Router => {
         action: 'ollama-vision-model.change',
         payload: { visionModel: value },
       });
-      res.json({ ok: true, ollamaVisionModel: value });
+      res.json({ ok: true, ollamaVisionModel: value ?? DEFAULT_OLLAMA_VISION_MODEL });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // Set/clear one tunable AI setting (vision performance, OCR fidelity, OCR
+  // safety net). Empty value clears the override (back to env/default). The
+  // registry validates kind/bounds; we drop the provider cache so vision knobs
+  // take effect on the next extraction.
+  router.post('/llm-provider/ai-setting', async (req, res, next) => {
+    try {
+      const id = String(req.body?.id ?? '');
+      const updated = await setAiSetting(db, id, req.body?.value, req.user!.id);
+      invalidateProviderCache();
+      await writeAudit(db, {
+        actorUserId: req.user!.id,
+        entityType: 'system_settings',
+        entityId: updated.key,
+        action: 'ai-setting.change',
+        payload: { id: updated.id, value: updated.value, source: updated.source },
+      });
+      res.json({ ok: true, setting: updated });
     } catch (err) {
       next(err);
     }

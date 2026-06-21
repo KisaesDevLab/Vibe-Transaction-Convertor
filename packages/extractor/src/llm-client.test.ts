@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   AnthropicProvider,
+  DEFAULT_VISION_MODEL,
   ExtractionResponseError,
   LocalGatewayProvider,
   computeAnthropicCostMicros,
@@ -311,6 +312,29 @@ describe('LocalGatewayProvider', () => {
     await expect(
       provider.completeWithImages({ systemPrompt: 's', userPrompt: 'u', schema: {}, images: [] }),
     ).rejects.toThrow(/at least one image/);
+  });
+
+  it('defaults the vision model to MiniCPM-V (never the text model) when unset', async () => {
+    expect(DEFAULT_VISION_MODEL).toBe('minicpm-v4.5:latest');
+    const prev = process.env.OLLAMA_VISION_MODEL;
+    delete process.env.OLLAMA_VISION_MODEL;
+    let body: Record<string, unknown> = {};
+    const provider = new LocalGatewayProvider({
+      baseUrl: 'http://gw.test',
+      modelId: 'qwen3.5:35b-a3b', // text model — must NOT be used for vision
+      // no visionModelId → falls back to DEFAULT_VISION_MODEL
+      fetcher: async (_url, init) => {
+        body = JSON.parse((init as RequestInit).body as string) as Record<string, unknown>;
+        return okJsonResponse({ message: { content: JSON.stringify(SAMPLE) } });
+      },
+    });
+    try {
+      await provider.extract('', { images: [{ data: Buffer.from('i'), mediaType: 'image/jpeg' }] });
+    } finally {
+      if (prev === undefined) delete process.env.OLLAMA_VISION_MODEL;
+      else process.env.OLLAMA_VISION_MODEL = prev;
+    }
+    expect(body.model).toBe(DEFAULT_VISION_MODEL);
   });
 });
 
