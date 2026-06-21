@@ -179,8 +179,19 @@ const loadRaw = async (db: Db): Promise<(def: AiSettingDef) => string> => {
 
 export const resolveAiSettings = async (db: Db): Promise<ResolvedAiSettings> => {
   const raw = await loadRaw(db);
-  const intOf = (id: string): number => Number.parseInt(raw(byId(id)!), 10);
-  const floatOf = (id: string): number => Number.parseFloat(raw(byId(id)!));
+  // Guard a garbage *env var* (the DB path is validated by setAiSetting, the env
+  // path is not): an unparseable value falls back to the built-in default rather
+  // than poisoning the provider with NaN (e.g. OLLAMA_VISION_TIMEOUT_MS=abc).
+  const intOf = (id: string): number => {
+    const def = byId(id)!;
+    const n = Number.parseInt(raw(def), 10);
+    return Number.isFinite(n) ? n : Number.parseInt(def.default, 10);
+  };
+  const floatOf = (id: string): number => {
+    const def = byId(id)!;
+    const n = Number.parseFloat(raw(def));
+    return Number.isFinite(n) ? n : Number.parseFloat(def.default);
+  };
   const optIntOf = (id: string): number | undefined => {
     const v = raw(byId(id)!);
     const n = Number.parseInt(v, 10);

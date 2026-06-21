@@ -56,6 +56,7 @@ let mockExtractedData: typeof SAMPLE = SAMPLE;
 vi.mock('../services/llm-provider.js', () => ({
   resolveProviderPolicy: vi.fn(async () => 'local-only' as const),
   providerOrderFor: vi.fn(() => ({ primary: 'local' as const, secondary: null })),
+  invalidateProviderCache: vi.fn(),
   buildProviderForId: vi.fn(async () => ({
     id: 'local' as const,
     extract: vi.fn(async () => ({

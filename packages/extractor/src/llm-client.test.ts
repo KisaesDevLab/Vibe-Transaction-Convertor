@@ -336,6 +336,20 @@ describe('LocalGatewayProvider', () => {
     }
     expect(body.model).toBe(DEFAULT_VISION_MODEL);
   });
+
+  it('caps vision output via num_predict (visionMaxTokens)', async () => {
+    let body: { options?: { num_predict?: number } } = {};
+    const provider = new LocalGatewayProvider({
+      baseUrl: 'http://gw.test',
+      visionMaxTokens: 4096,
+      fetcher: async (_url, init) => {
+        body = JSON.parse((init as RequestInit).body as string) as typeof body;
+        return okJsonResponse({ message: { content: JSON.stringify(SAMPLE) } });
+      },
+    });
+    await provider.extract('', { images: [{ data: Buffer.from('i'), mediaType: 'image/jpeg' }] });
+    expect(body.options?.num_predict).toBe(4096);
+  });
 });
 
 describe('AnthropicProvider', () => {

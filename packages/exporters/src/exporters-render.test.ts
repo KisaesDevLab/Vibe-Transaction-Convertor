@@ -139,6 +139,37 @@ describe('OFX 1.x SGML — QBO/QFX', () => {
   });
 });
 
+describe('OFX escaping — adversarial NAME/MEMO from OCR (XML + SGML)', () => {
+  const evil: Stmt = {
+    ...STMT,
+    transactions: [
+      {
+        trntype: 'POS',
+        postedDate: '2026-03-08',
+        amountCents: -100n,
+        fitid: 'VTC-evil1234567890ab',
+        name: 'Bob & <Co> "Inc"',
+        memo: 'line1\r\nline2 & <x>',
+      },
+    ],
+  };
+
+  it('escapes &,<,> and collapses newlines in OFX 2.x XML', () => {
+    const out = renderOfxXml(evil);
+    expect(out).toContain('Bob &amp; &lt;Co&gt;');
+    // No raw markup leaked from the OCR string.
+    expect(out).not.toContain('<Co>');
+    expect(out).not.toContain('line1\r\nline2');
+    expect(out).toContain('line1 line2 &amp; &lt;x&gt;');
+  });
+
+  it('escapes &,<,> in OFX 1.x SGML (QBO/QFX)', () => {
+    const out = renderQbo(evil);
+    expect(out).toContain('Bob &amp; &lt;Co&gt;');
+    expect(out).not.toContain('<Co>');
+  });
+});
+
 describe('SGML transliteration (Phase 22 #8 — CHARSET 1252)', () => {
   it('strips diacritics and folds smart quotes/dashes in QBO output', () => {
     const out = renderQbo({

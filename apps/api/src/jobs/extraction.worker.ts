@@ -32,6 +32,7 @@ import { accounts, statements, systemSettings, transactions } from '../db/schema
 import { logger } from '../lib/logger.js';
 import {
   buildProviderForId,
+  invalidateProviderCache,
   providerOrderFor,
   resolveProviderPolicy,
   type ProviderId,
@@ -44,6 +45,12 @@ import { writeAudit } from '../services/audit.js';
 import { QUEUE_EXTRACTION, getJobConnection, type ExtractionJobData } from './queues.js';
 
 type StatementStatus = NonNullable<typeof statements.$inferInsert.status>;
+
+// Hard page cap for the scanned/vision extraction path. All page image buffers
+// are held resident at once (and expand as base64 per batch), so this bounds
+// worst-case worker memory on a pathological upload. Mirrors check-resolver's
+// MAX_PAGES. Operators split larger statements.
+const MAX_OCR_PAGES = 100;
 
 const setStatus = async (
   statementId: string,
@@ -767,6 +774,13 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
     await setStatus(stmtId, 'preprocessing');
     currentPhase = 'preprocessing';
 
+    // Drop any cached provider before each job. The provider cache lives in this
+    // (worker) process and never sees the API process's invalidateProviderCache()
+    // call, so without this an operator's just-saved settings change (vision
+    // model, timeout, num_predict, base URL) wouldn't reach a freshly-resubmitted
+    // extraction. Rebuilding reads a handful of settings rows — negligible.
+    invalidateProviderCache();
+
     // Look up the account up front so TRNTYPE inference can apply the
     // credit-card sign convention (Phase 17 — `isCreditCard` flag).
     const acctRows = await db.select().from(accounts).where(eq(accounts.id, data.accountId));
@@ -872,6 +886,16 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
         jpegQuality: aiSettings.ocrJpegQuality,
       });
       const scopedRasters = rasters.filter((r) => inRange(r.index));
+      // Hard page cap. All page buffers are held resident at once here (and
+      // expand ~4/3× as base64 per batch), so at operator-tunable DPI a
+      // pathological upload could otherwise OOM the worker. Statements this large
+      // are vanishingly rare; fail loud and tell the operator to split.
+      if (scopedRasters.length > MAX_OCR_PAGES) {
+        throw new ExtractionResponseError({
+          summary: `scanned statement has ${scopedRasters.length} pages, exceeding the OCR cap of ${MAX_OCR_PAGES}; split it into smaller statements`,
+          rawResponse: '',
+        });
+      }
       return Promise.all(
         scopedRasters.map(async (r) => ({ data: await readFile(r.path), mediaType: r.mediaType })),
       );

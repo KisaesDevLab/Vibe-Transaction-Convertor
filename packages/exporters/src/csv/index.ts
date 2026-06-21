@@ -29,9 +29,20 @@ export interface CsvRow {
   category?: string | null | undefined;
 }
 
+// A cell that begins with one of these makes Excel / Google Sheets / LibreOffice
+// evaluate it as a formula on open (CSV-injection / CVE class). description,
+// payee, memo, etc. are OCR-derived from untrusted PDFs, so neutralize them.
+const FORMULA_LEAD = /^[=+\-@\t\r]/;
+// …but a plain signed decimal (e.g. a negative Amount "-42.50") is a number, not
+// a formula — never prefix those, or QuickBooks/Xero numeric import breaks.
+const PLAIN_NUMBER = /^[-+]?\d+(\.\d+)?$/;
+
 const escapeCell = (s: string): string => {
-  if (/[",\r\n]/.test(s)) return `"${s.replaceAll('"', '""')}"`;
-  return s;
+  // Prefix a leading formula trigger with a single quote so the value renders
+  // literally; skip genuine numbers so signed amounts stay numeric.
+  const guarded = FORMULA_LEAD.test(s) && !PLAIN_NUMBER.test(s) ? `'${s}` : s;
+  if (/[",\r\n]/.test(guarded)) return `"${guarded.replaceAll('"', '""')}"`;
+  return guarded;
 };
 
 const toCsv = (rows: string[][]): string =>

@@ -29,9 +29,10 @@ schema>`. Qwen-VL **OCRs and extracts in one call** (direct vision→JSON);
     there is no intermediate OCR-markdown step. `temperature: 0`, a longer
     (120 s) per-call budget than text, and the same one-shot
     missing-field reminder retry as the text path.
-  - Models default to `qwen3.5:35b-a3b` (text) and `OLLAMA_VISION_MODEL`
-    (vision; falls back to the text tag when it is itself multimodal), both
-    operator-overridable from `/admin/llm-provider`.
+  - Models default to `qwen3.5:35b-a3b` (text) and `minicpm-v4.5:latest`
+    (vision/OCR — a dedicated multimodal model, never the text tag), both
+    operator-overridable from `/admin/llm-provider`. (Superseded note: the
+    original 120 s vision budget is now 300 s with an output cap; see v0.1.27.)
 - **Anthropic is text-only.** The optional `AnthropicProvider` keeps the
   tool-use JSON-schema extraction from OCR/text-layer **markdown** and now
   **rejects image inputs**. It talks to `https://api.anthropic.com`

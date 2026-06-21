@@ -739,8 +739,31 @@ export class LocalGatewayProvider implements LlmProvider {
         usage?: { prompt_tokens?: number; completion_tokens?: number };
       };
       const content = body.choices?.[0]?.message?.content ?? '';
+      // Mirror the extract/vision paths: guard an empty completion and recover
+      // prose-wrapped JSON, surfacing failures as a diagnosable
+      // ExtractionResponseError (with the raw response) instead of a bare
+      // SyntaxError. An empty 200 (e.g. finish_reason='length') is common.
+      if (content.trim().length === 0) {
+        throw new ExtractionResponseError({
+          summary: 'ollama complete() returned an empty completion',
+          rawResponse: '',
+        });
+      }
+      let data: unknown;
+      try {
+        data = JSON.parse(content);
+      } catch {
+        const recovered = recoverProseWrappedJson(content);
+        if (recovered === undefined) {
+          throw new ExtractionResponseError({
+            summary: 'ollama complete() response was not valid JSON',
+            rawResponse: content.slice(0, 8_000),
+          });
+        }
+        data = recovered;
+      }
       return {
-        data: JSON.parse(content),
+        data,
         rawJson: content,
         telemetry: {
           inputTokens: body.usage?.prompt_tokens ?? 0,

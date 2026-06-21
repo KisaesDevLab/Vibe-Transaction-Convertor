@@ -196,6 +196,10 @@ export const resolveCheckPayees = async (db: Db, stmtId: string): Promise<CheckR
     usedTxIds.add(hit.id);
     // Write the payee onto the dedicated column — exports prefer it for the
     // OFX <NAME>. Leave cleansedDescription + enrichment flags untouched.
+    // The write is scoped to this exact transaction id (a generation-specific
+    // UUID), so if the statement was deleted or re-extracted during the (minutes-
+    // long) vision pass, the row id no longer exists and this simply updates 0
+    // rows — it can never stamp a payee onto a superseding extraction's rows.
     await db
       .update(transactions)
       .set({ payee: c.payee.trim().slice(0, 200), updatedAt: sql`now()` })

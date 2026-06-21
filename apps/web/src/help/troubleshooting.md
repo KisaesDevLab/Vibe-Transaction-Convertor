@@ -38,9 +38,9 @@ The export filename was built from the FI name + period and contained a non-ASCI
 
 ## A scanned PDF fails at OCR
 
-Scanned pages are OCR'd locally by a Qwen-VL vision model on Ollama (page images never leave the host).
+Scanned pages are OCR'd locally by a multimodal vision model on Ollama (page images never leave the host).
 
-- Make sure a vision (`-VL`) model tag is pulled on the Ollama host and set as the **vision model** on `/admin/llm-provider`. Pull with e.g. `ollama pull <your -VL tag>`.
+- Make sure the vision model is pulled on the Ollama host. The default is `minicpm-v4.5:latest` — pull it with `ollama pull minicpm-v4.5:latest`. To use a different vision model, set it as the **vision model** on `/admin/llm-provider` (the picker suggests common tags).
 - Or, if you're sure the PDF has a text layer, the routing heuristic was wrong — open the PDF in Acrobat / Preview and select some text to verify. If text selects, the heuristic is the bug. Re-extract; the LLM may pick up the text path on retry.
 
 ## Extraction fails with "Ollama base URL not set" / connection refused

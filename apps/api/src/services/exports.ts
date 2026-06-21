@@ -179,10 +179,11 @@ const buildOfxStmt = (stmt: Statement, account: Account, txs: Transaction[]): Bu
   return { stmt: ofxStmt, bankIdSource };
 };
 
-// Review hold: a dormant gate (local OCR no longer sets `reviewHoldReason`,
-// so this never trips today). Retained so any historical held statement, or
-// a future hold source, still blocks export until acknowledged via the
-// statements route. There is no allowOverride bypass.
+// Review hold: a LIVE gate. The extraction worker sets `reviewHoldReason`
+// whenever any row is below the review-confidence threshold (OCR-error safety
+// net), so this fires for low-confidence statements and blocks export until the
+// operator acknowledges via the statements route. There is no allowOverride
+// bypass — acknowledgement is the only way through.
 const assertNotHeldForReview = (stmt: Statement): void => {
   if (stmt.reviewHoldReason && !stmt.reviewHoldAcknowledged) {
     throw new ConflictError(`export blocked by review hold — ${stmt.reviewHoldReason}`);
@@ -205,8 +206,20 @@ export const renderExport = async (
   opts: { allowOverride?: boolean } = {},
 ): Promise<RenderedExport> => {
   const { stmt, account, txs } = await fetchStatementContext(db, statementId);
-  if (stmt.reconciliationStatus === 'discrepancy' && !opts.allowOverride) {
-    throw new ConflictError('reconciliation discrepancy — export requires override');
+  // Golden Rule gate — DENY by default (ADR-010). Export is allowed only when
+  // the statement reconciled (`verified`) or the operator already type-confirmed
+  // an override (`overridden`), or it's a `discrepancy` exported with an explicit
+  // override this call. Anything else (`pending`, `failed`, null) is blocked, so
+  // a new code path that leaves a statement un-reconciled can't silently export.
+  const status = stmt.reconciliationStatus;
+  const overrideOk = status === 'discrepancy' && opts.allowOverride === true;
+  if (status !== 'verified' && status !== 'overridden' && !overrideOk) {
+    if (status === 'discrepancy') {
+      throw new ConflictError('reconciliation discrepancy — export requires override');
+    }
+    throw new ConflictError(
+      `export blocked — statement is not reconciled (status: ${status ?? 'pending'})`,
+    );
   }
   assertNotHeldForReview(stmt);
 
@@ -303,8 +316,20 @@ export const renderExportSlices = async (
     return [await renderExport(db, statementId, format, opts)];
   }
   const { stmt, account, txs } = await fetchStatementContext(db, statementId);
-  if (stmt.reconciliationStatus === 'discrepancy' && !opts.allowOverride) {
-    throw new ConflictError('reconciliation discrepancy — export requires override');
+  // Golden Rule gate — DENY by default (ADR-010). Export is allowed only when
+  // the statement reconciled (`verified`) or the operator already type-confirmed
+  // an override (`overridden`), or it's a `discrepancy` exported with an explicit
+  // override this call. Anything else (`pending`, `failed`, null) is blocked, so
+  // a new code path that leaves a statement un-reconciled can't silently export.
+  const status = stmt.reconciliationStatus;
+  const overrideOk = status === 'discrepancy' && opts.allowOverride === true;
+  if (status !== 'verified' && status !== 'overridden' && !overrideOk) {
+    if (status === 'discrepancy') {
+      throw new ConflictError('reconciliation discrepancy — export requires override');
+    }
+    throw new ConflictError(
+      `export blocked — statement is not reconciled (status: ${status ?? 'pending'})`,
+    );
   }
   assertNotHeldForReview(stmt);
   if (txs.length <= QBO_SPLIT_THRESHOLD) {
