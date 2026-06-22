@@ -149,6 +149,13 @@ export const FEATURE_DEFS: readonly FeatureDef[] = [
     area: 'admin',
     description: 'Tune the enrichment toggles and the cleanse/categorize system prompt.',
   },
+  {
+    key: 'admin.extractionPrompt',
+    label: 'Extraction Prompt',
+    area: 'admin',
+    description:
+      'Tune the transaction-extraction system prompt (additional rules or full override).',
+  },
 ] as const;
 
 export type FeatureKey = (typeof FEATURE_DEFS)[number]['key'];

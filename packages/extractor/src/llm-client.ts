@@ -279,6 +279,11 @@ export interface ExtractResult {
 
 export interface ExtractOptions extends UserPromptOptions {
   schema?: object;
+  // Operator-overridable extraction system prompt (resolved DB → default by the
+  // worker via extraction-prompt service). When set it replaces the built-in
+  // SYSTEM_PROMPT for this call; unset falls back to SYSTEM_PROMPT. Applies to
+  // the text/markdown path on both providers (the vision path is unused now).
+  systemPromptOverride?: string | undefined;
   // Vision/OCR extraction. Rasterized page images handed to the local Ollama
   // Qwen-VL provider, which OCRs and extracts in one call (ADR-023). Local
   // provider only — page images never egress; the Anthropic provider is
@@ -684,7 +689,7 @@ export class LocalGatewayProvider implements LlmProvider {
 
     for (let attempt = 1; attempt <= 2; attempt += 1) {
       const messages = [
-        { role: 'system', content: SYSTEM_PROMPT },
+        { role: 'system', content: opts.systemPromptOverride ?? SYSTEM_PROMPT },
         ...exemplarsAsMessages(),
         { role: 'user', content: userPrompt },
       ];
@@ -1190,7 +1195,11 @@ export class AnthropicProvider implements LlmProvider {
         ...exemplarsAsMessages(1),
         { role: 'user', content: userPrompt },
       ];
-      const call = await this.callAnthropic(messages, tool, SYSTEM_PROMPT);
+      const call = await this.callAnthropic(
+        messages,
+        tool,
+        opts.systemPromptOverride ?? SYSTEM_PROMPT,
+      );
       totalInputTokens += call.inputTokens;
       totalOutputTokens += call.outputTokens;
       totalMs += call.ms;

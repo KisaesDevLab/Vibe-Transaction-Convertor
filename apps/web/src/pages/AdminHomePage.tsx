@@ -183,6 +183,11 @@ export function AdminHomePage() {
               Enrichment prompt →
             </Link>
           ) : null}
+          {hasFeature(features, FEATURE.adminExtractionPrompt) ? (
+            <Link to="/admin/extraction-prompt" className="text-accent hover:underline">
+              Extraction prompt →
+            </Link>
+          ) : null}
         </nav>
       </header>
 

@@ -36,6 +36,7 @@ import {
 import { resolvePdfStrategy } from '../services/pdf-strategy.js';
 import { resolveCheckPayees } from '../services/check-resolver.js';
 import { resolveAiSettings } from '../services/ai-settings.js';
+import { resolveExtractionSystemPrompt } from '../services/extraction-prompt.js';
 import { writeAudit } from '../services/audit.js';
 
 import { QUEUE_EXTRACTION, getJobConnection, type ExtractionJobData } from './queues.js';
@@ -157,6 +158,9 @@ interface AttemptContext {
   // extraction (stage 2) reads markdown — no images reach this stage.
   markdown: string;
   dateFormatOverride?: 'MDY' | 'DMY' | 'YMD';
+  // Effective extraction system prompt (operator override resolved DB → default).
+  // Passed to provider.extract so the main + repair calls use the same prompt.
+  systemPromptOverride?: string | undefined;
 }
 
 const checkAnthropicMonthlyCap = async (stmtId: string): Promise<string | null> => {
@@ -287,6 +291,7 @@ const attemptExtraction = async (
   const baseExtractOpts = {
     schema: schemas.extraction.ExtractionJsonSchema,
     ...(ctx.dateFormatOverride ? { dateFormatOverride: ctx.dateFormatOverride } : {}),
+    ...(ctx.systemPromptOverride ? { systemPromptOverride: ctx.systemPromptOverride } : {}),
   };
 
   let result: Awaited<ReturnType<typeof provider.extract>>;
@@ -406,6 +411,7 @@ const attemptExtraction = async (
       const repairResult = await provider.extract(repairPrompt, {
         schema: schemas.extraction.ExtractionJsonSchema,
         ...(ctx.dateFormatOverride ? { dateFormatOverride: ctx.dateFormatOverride } : {}),
+        ...(ctx.systemPromptOverride ? { systemPromptOverride: ctx.systemPromptOverride } : {}),
       });
       const repairedTxs = mapLlmTxs(repairResult.data.transactions);
       const verifyAfterLlmRepair = reconcileGoldenRule({
@@ -770,6 +776,10 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
     // live from /admin/llm-provider.
     const aiSettings = await resolveAiSettings(db);
 
+    // Effective extraction system prompt (operator override resolved DB →
+    // built-in default), edited live from /admin/extraction-prompt.
+    const extractionSystemPrompt = await resolveExtractionSystemPrompt(db);
+
     // Phase 15 item 4b: if the operator already confirmed a date format
     // (after a previous AMBIGUOUS extraction), pass that through to the
     // LLM so it interprets the statement consistently.
@@ -926,6 +936,7 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
       stmtId,
       markdown,
       ...(dateFormatOverride ? { dateFormatOverride } : {}),
+      systemPromptOverride: extractionSystemPrompt,
     };
 
     const persistAmbiguousHalt = async (a: AttemptOutcome): Promise<void> => {

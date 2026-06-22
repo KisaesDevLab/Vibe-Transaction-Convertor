@@ -74,6 +74,27 @@ describe('LocalGatewayProvider', () => {
     expect(provider.id).toBe('local');
   });
 
+  it('sends systemPromptOverride as the system message (text path); falls back to default', async () => {
+    let body: { messages?: Array<{ role: string; content: string }> } = {};
+    const provider = new LocalGatewayProvider({
+      baseUrl: 'http://gw.test',
+      modelId: 'qwen3-8b',
+      fetcher: async (_url, init) => {
+        body = JSON.parse((init as RequestInit).body as string) as typeof body;
+        return okJsonResponse({ choices: [{ message: { content: JSON.stringify(SAMPLE) } }] });
+      },
+    });
+    await provider.extract('# md', { systemPromptOverride: 'CUSTOM EXTRACTION PROMPT' });
+    expect(body.messages?.[0]).toMatchObject({
+      role: 'system',
+      content: 'CUSTOM EXTRACTION PROMPT',
+    });
+
+    await provider.extract('# md'); // no override → built-in default
+    expect(body.messages?.[0]?.content).not.toBe('CUSTOM EXTRACTION PROMPT');
+    expect(body.messages?.[0]?.content).toMatch(/bank-statement extractor/i);
+  });
+
   it('rejects schema-mismatch payloads with ExtractionResponseError carrying the raw response', async () => {
     // The exact shape the operator hit on the appliance: gateway returned
     // valid JSON but the `transactions` field was missing entirely. The
@@ -465,6 +486,23 @@ describe('AnthropicProvider', () => {
     });
     await provider.extract('# md');
     expect(sentMaxTokens).toBe(64_000);
+  });
+
+  it('sends systemPromptOverride as the Anthropic system field', async () => {
+    let body: { system?: string } = {};
+    const provider = new AnthropicProvider({
+      apiKey: 'sk-ant-test',
+      model: 'claude-sonnet-4-6',
+      fetcher: async (_url, init) => {
+        body = JSON.parse((init as RequestInit).body as string) as typeof body;
+        return okJsonResponse({
+          content: [{ type: 'tool_use', name: 'emit_extraction', input: SAMPLE }],
+          usage: { input_tokens: 1, output_tokens: 1 },
+        });
+      },
+    });
+    await provider.extract('# md', { systemPromptOverride: 'CUSTOM ANTHROPIC PROMPT' });
+    expect(body.system).toBe('CUSTOM ANTHROPIC PROMPT');
   });
 
   it('rejects image inputs — Anthropic is text-only (vision/OCR is local)', async () => {

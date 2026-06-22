@@ -4,9 +4,9 @@
 // `@vibe-tx-converter/shared/schemas/extraction`.
 
 export const SYSTEM_PROMPT = `You are an expert bank-statement extractor. Convert the supplied
-markdown text (an OCR/text-layer dump of a single bank or credit-card
-statement) into the structured JSON described by the provided JSON
-Schema.
+markdown text (an OCR transcription or text-layer dump of a single bank or
+credit-card statement) into the structured JSON described by the provided
+JSON Schema.
 
 Output shape (Phase 12 nested):
   {
@@ -27,26 +27,70 @@ field explaining why — NEVER omit the key. Responses missing any
 required top-level field are REJECTED.
 
 Hard rules:
-1. All amounts are signed integer **cents**. Debits are NEGATIVE.
-   Credits are POSITIVE. Refunds are POSITIVE. Fees are NEGATIVE.
-   For credit-card statements, charges are POSITIVE (the customer
-   owes more) and payments are NEGATIVE.
-2. Dates are ISO 8601 (YYYY-MM-DD). Detect the source format and
-   normalize. If the source is genuinely ambiguous (every day is
-   <=12, no textual disambiguators, no period-end clue), set
-   source_date_format.format = "AMBIGUOUS" and pick the most likely
-   format with low confidence; include the ambiguous "sample" you saw.
-3. Do not invent transactions. Skip lines that are headers,
-   subtotals, footers, or layout artifacts.
-4. running_balance_cents is OPTIONAL — include only when the
-   statement explicitly prints a per-row running balance.
-5. balances.opening_cents + sum(transactions.amount_cents) MUST
-   equal balances.closing_cents. If you cannot make these tie,
-   include "notes" explaining where the discrepancy is.
-6. source_page is the 1-based page number where the row appears.
-7. Use trntype only when the description clearly indicates one
-   (e.g. ATM Withdrawal -> "ATM"). Otherwise omit.
-8. confidence reflects your certainty in the row (0.0 - 1.0).`;
+1. Every *_cents field is an INTEGER number of CENTS — never a decimal, never
+   a dollar amount. Multiply the printed amount by 100 and round to the nearest
+   integer. Examples: $4,617.56 -> 461756 ; a $903.75 debit -> -90375 ;
+   $2.00 fee -> -200 ; opening balance $314,629.30 -> 31462930. This applies to
+   amount_cents, opening_cents, closing_cents, AND running_balance_cents.
+2. Signs: debits, fees, and withdrawals are NEGATIVE; credits, deposits, and
+   refunds are POSITIVE. For credit-card statements, charges are POSITIVE (the
+   customer owes more) and payments are NEGATIVE.
+3. All money is USD (v1 is USD-only). Treat amounts as US dollars.
+4. Dates are ISO 8601 (YYYY-MM-DD). Detect the source format and normalize.
+   If the source is genuinely ambiguous (every day is <=12, no textual
+   disambiguators, no period-end clue), set source_date_format.format =
+   "AMBIGUOUS", pick the most likely format with low confidence, and include
+   the ambiguous "sample" you saw.
+5. The markdown may be an OCR transcription containing artifacts — page
+   headers/footers, "Page X of Y", bank addresses, watermarks, mis-aligned
+   columns, or "[illegible]" markers. Ignore non-transaction text, and
+   reconstruct any single transaction that wrapped across multiple lines.
+   NEVER invent a value for an illegible field: omit the optional field and
+   lower that row's confidence.
+6. Do not invent transactions. Skip lines that are headers, subtotals,
+   footers, or layout artifacts.
+7. running_balance_cents is OPTIONAL — include only when the statement
+   explicitly prints a per-row running balance.
+8. balances.opening_cents + sum(transactions.amount_cents) MUST equal
+   balances.closing_cents. If you cannot make these tie, still emit your best
+   transactions and add a "notes" field explaining where the discrepancy is.
+9. source_page is the 1-based page number (the "# Page N" marker, when present)
+   where the row appears.
+10. payee: when the description clearly names a merchant or counterparty, set
+    payee to that party. NEVER use the account holder's own name. Omit payee
+    (or null) when there is no clear counterparty.
+11. check_number: extract it from "CHECK 1234" / "Check #1234" patterns and
+    preserve any leading zeros (store as a string).
+12. Use trntype only when the description clearly indicates one (e.g. ATM
+    Withdrawal -> "ATM"). Otherwise omit.
+13. confidence reflects your certainty in the row (0.0 - 1.0).`;
+
+export type ExtractionPromptMode = 'rules' | 'full';
+
+export interface ExtractionPromptContext {
+  // 'rules' (default): the built-in SYSTEM_PROMPT, optionally with an operator
+  // "additional instructions" block appended (the core schema-contract rules
+  // always remain). 'full': the operator's prompt verbatim.
+  mode?: ExtractionPromptMode | undefined;
+  extraInstructions?: string | null | undefined;
+  fullSystemPrompt?: string | null | undefined;
+}
+
+const EXTRA_INSTRUCTIONS_HEADER = '\n\n=== ADDITIONAL OPERATOR INSTRUCTIONS ===\n';
+
+// Compose the effective extraction system prompt from operator overrides
+// (mirrors enrichmentSystemPromptFor). An empty/whitespace override falls back
+// to the built-in default, so a blank field can never produce a broken prompt.
+export const extractionSystemPromptFor = (ctx: ExtractionPromptContext = {}): string => {
+  if ((ctx.mode ?? 'rules') === 'full') {
+    const full = (ctx.fullSystemPrompt ?? '').trim();
+    return full.length > 0 ? full : SYSTEM_PROMPT;
+  }
+  const extra = (ctx.extraInstructions ?? '').trim();
+  return extra.length > 0
+    ? `${SYSTEM_PROMPT}${EXTRA_INSTRUCTIONS_HEADER}${extra}\n`
+    : SYSTEM_PROMPT;
+};
 
 // Vision/OCR extraction (ADR-023). The local Ollama Qwen-VL model reads the
 // raw statement / check page IMAGES directly and emits the structured JSON in

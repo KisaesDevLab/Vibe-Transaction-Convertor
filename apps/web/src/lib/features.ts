@@ -27,6 +27,7 @@ export const FEATURE = {
   adminBackup: 'admin.backup',
   adminCategories: 'admin.categories',
   adminEnrichmentPrompt: 'admin.enrichmentPrompt',
+  adminExtractionPrompt: 'admin.extractionPrompt',
 } as const;
 
 export type FeatureKey = (typeof FEATURE)[keyof typeof FEATURE];

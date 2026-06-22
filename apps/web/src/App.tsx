@@ -22,6 +22,7 @@ import { ExportPage } from './pages/ExportPage';
 import { GlobalStatementsPage } from './pages/GlobalStatementsPage';
 import { HelpPage } from './pages/HelpPage';
 import { EnrichmentPromptAdminPage } from './pages/EnrichmentPromptAdminPage';
+import { ExtractionPromptAdminPage } from './pages/ExtractionPromptAdminPage';
 import { LlmProviderAdminPage } from './pages/LlmProviderAdminPage';
 import { MaintenanceAdminPage } from './pages/MaintenanceAdminPage';
 import { StatementReviewPage } from './pages/StatementReviewPage';
@@ -205,6 +206,16 @@ export function App() {
                     <AdminGate>
                       <FeatureGate feature={FEATURE.adminEnrichmentPrompt}>
                         <EnrichmentPromptAdminPage />
+                      </FeatureGate>
+                    </AdminGate>
+                  }
+                />
+                <Route
+                  path="/admin/extraction-prompt"
+                  element={
+                    <AdminGate>
+                      <FeatureGate feature={FEATURE.adminExtractionPrompt}>
+                        <ExtractionPromptAdminPage />
                       </FeatureGate>
                     </AdminGate>
                   }

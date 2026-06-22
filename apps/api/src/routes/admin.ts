@@ -51,7 +51,12 @@ import {
   setRetentionDays,
 } from '../services/pdf-retention.js';
 import { clearPricing, listPricings, setPricing } from '../services/pricing.js';
-import { AnthropicProvider, type EnrichmentPromptMode } from '@vibe-tx-converter/extractor';
+import {
+  AnthropicProvider,
+  type EnrichmentPromptMode,
+  type ExtractionPromptMode,
+} from '@vibe-tx-converter/extractor';
+import { extractionPromptStatus, setExtractionPrompt } from '../services/extraction-prompt.js';
 import { extractionQueue } from '../jobs/queues.js';
 import { logger } from '../lib/logger.js';
 
@@ -120,6 +125,7 @@ export const adminRouter = (): Router => {
   router.use('/diagnostics', requireFeature('admin.diagnostics'));
   router.use('/enrichment', requireFeature('admin.enrichmentPrompt'));
   router.use('/enrichment-prompt', requireFeature('admin.enrichmentPrompt'));
+  router.use('/extraction-prompt', requireFeature('admin.extractionPrompt'));
   router.use('/categories', requireFeature('admin.categories'));
 
   router.get('/llm-provider', async (_req, res, next) => {
@@ -1334,6 +1340,62 @@ export const adminRouter = (): Router => {
             : {}),
           ...(body.categorizeRules !== undefined
             ? { categorizeRules: validateText(body.categorizeRules, 'categorizeRules') }
+            : {}),
+          ...(body.fullSystemPrompt !== undefined
+            ? { fullSystemPrompt: validateText(body.fullSystemPrompt, 'fullSystemPrompt') }
+            : {}),
+        },
+        req.user!.id,
+      );
+      res.json(status);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // Extraction prompt: operator-editable system prompt for transaction
+  // extraction. GET returns current + defaults (so the SPA shows "current" vs
+  // "default" without duplicating the strings). PUT is a partial update — fields
+  // left undefined are unchanged; empty-string or null clears that override.
+  router.get('/extraction-prompt', async (_req, res, next) => {
+    try {
+      res.json(await extractionPromptStatus(db));
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.put('/extraction-prompt', async (req, res, next) => {
+    try {
+      const body = (req.body ?? {}) as {
+        mode?: unknown;
+        extraInstructions?: unknown;
+        fullSystemPrompt?: unknown;
+      };
+
+      const validateText = (v: unknown, label: string): string | null | undefined => {
+        if (v === undefined) return undefined;
+        if (v === null) return null;
+        if (typeof v !== 'string') {
+          throw new ValidationError(`${label} must be a string, null, or omitted`);
+        }
+        return v;
+      };
+
+      let mode: ExtractionPromptMode | undefined;
+      if (body.mode !== undefined) {
+        if (body.mode !== 'rules' && body.mode !== 'full') {
+          throw new ValidationError("mode must be 'rules' or 'full'");
+        }
+        mode = body.mode;
+      }
+
+      const status = await setExtractionPrompt(
+        db,
+        {
+          ...(mode !== undefined ? { mode } : {}),
+          ...(body.extraInstructions !== undefined
+            ? { extraInstructions: validateText(body.extraInstructions, 'extraInstructions') }
             : {}),
           ...(body.fullSystemPrompt !== undefined
             ? { fullSystemPrompt: validateText(body.fullSystemPrompt, 'fullSystemPrompt') }

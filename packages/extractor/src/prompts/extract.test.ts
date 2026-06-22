@@ -1,6 +1,41 @@
 import { describe, expect, it } from 'vitest';
 
 import { prepareMarkdown } from '../llm-client.js';
+import { SYSTEM_PROMPT, extractionSystemPromptFor } from './extract.js';
+
+describe('extractionSystemPromptFor', () => {
+  it('returns the built-in default in rules mode with no extra instructions', () => {
+    expect(extractionSystemPromptFor()).toBe(SYSTEM_PROMPT);
+    expect(extractionSystemPromptFor({ mode: 'rules' })).toBe(SYSTEM_PROMPT);
+    expect(extractionSystemPromptFor({ mode: 'rules', extraInstructions: '   ' })).toBe(
+      SYSTEM_PROMPT,
+    );
+  });
+
+  it('appends operator instructions after the default in rules mode', () => {
+    const out = extractionSystemPromptFor({ mode: 'rules', extraInstructions: 'Bank X quirk.' });
+    expect(out.startsWith(SYSTEM_PROMPT)).toBe(true);
+    expect(out).toContain('ADDITIONAL OPERATOR INSTRUCTIONS');
+    expect(out).toContain('Bank X quirk.');
+  });
+
+  it('uses the full override verbatim in full mode', () => {
+    const out = extractionSystemPromptFor({ mode: 'full', fullSystemPrompt: 'ONLY THIS PROMPT' });
+    expect(out).toBe('ONLY THIS PROMPT');
+  });
+
+  it('falls back to the default when full mode override is blank', () => {
+    expect(extractionSystemPromptFor({ mode: 'full', fullSystemPrompt: '   ' })).toBe(
+      SYSTEM_PROMPT,
+    );
+    expect(extractionSystemPromptFor({ mode: 'full' })).toBe(SYSTEM_PROMPT);
+  });
+
+  it('default prompt states integer-cents with a worked example', () => {
+    expect(SYSTEM_PROMPT).toMatch(/461756/);
+    expect(SYSTEM_PROMPT).toMatch(/INTEGER number of CENTS/i);
+  });
+});
 
 describe('prepareMarkdown truncation', () => {
   it('returns full text and truncated=false when input fits the budget', () => {
