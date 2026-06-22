@@ -33,7 +33,7 @@ Match the rest of the Vibe family.
 - **Backend:** Node 20 LTS, Express 4, TypeScript, **Drizzle ORM** (not Prisma), Zod, Pino, Multer, **BullMQ** on **Redis 7**, ioredis.
 - **DB:** PostgreSQL 16, schema name `vibetc`. Migrations live at `apps/api/src/db/migrations`.
 - **OCR:** Local **Ollama Qwen-VL** vision over HTTP (native `/api/chat`, `format: <schema>`) — direct vision→JSON, on-appliance, zero egress. (Replaces Vibe Shield / GLM-OCR; ADR-023.)
-- **LLM:** Qwen via local **Ollama** — text extraction over the OpenAI-compatible `/v1/chat/completions` (default `qwen3.5:35b-a3b`), JSON-Schema-constrained generation. Optional **text-only** Anthropic provider uses **tool-use** with the schema as a single tool's `input_schema`; default model `claude-sonnet-4-6`.
+- **LLM:** Qwen via local **Ollama** — text extraction over the OpenAI-compatible `/v1/chat/completions` (default `qwen2.5:32b-instruct`, a non-thinking instruct model — see ADR-024), JSON-Schema-constrained generation. Schemas sent to Ollama are stripped of `pattern` (regex) keywords, which silently disable its grammar engine; Zod re-validates after parsing (ADR-024). Optional **text-only** Anthropic provider uses **tool-use** with the schema as a single tool's `input_schema`; default model `claude-sonnet-4-6`.
 - **Tests:** Vitest (unit + integration), Playwright (E2E).
 - **Lint/format:** ESLint flat config, Prettier (`printWidth: 100`, `singleQuote: true`, `trailingComma: 'all'`), lint-staged + husky.
 - **Package manager:** pnpm 9 with workspaces (`apps/*`, `packages/*`). Container: multi-stage Dockerfile, distroless runtime, GHCR.

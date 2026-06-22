@@ -7,7 +7,59 @@ import {
   computeAnthropicCostMicros,
   describeAnthropicRequest,
   parseExtractionResponse,
+  sanitizeSchemaForOllama,
 } from './llm-client.js';
+
+describe('sanitizeSchemaForOllama', () => {
+  it('strips `pattern` at every depth while preserving all other keywords', () => {
+    const schema = {
+      type: 'object',
+      required: ['period', 'transactions'],
+      properties: {
+        period: {
+          type: 'object',
+          properties: {
+            start: { type: 'string', pattern: '^\\d{4}-\\d{2}-\\d{2}$' },
+            end: { type: 'string', pattern: '^\\d{4}-\\d{2}-\\d{2}$' },
+          },
+        },
+        transactions: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              posted_date: { type: 'string', pattern: '^\\d{4}-\\d{2}-\\d{2}$' },
+              trntype: { type: 'string', enum: ['CREDIT', 'DEBIT'] },
+            },
+          },
+        },
+      },
+    };
+    const out = sanitizeSchemaForOllama(schema);
+    expect(JSON.stringify(out)).not.toContain('pattern');
+    // Non-`pattern` constraints survive untouched.
+    const o = out as typeof schema;
+    expect(o.required).toEqual(['period', 'transactions']);
+    expect(o.properties.transactions.items.properties.trntype.enum).toEqual(['CREDIT', 'DEBIT']);
+    expect(o.properties.period.properties.start.type).toBe('string');
+  });
+
+  it('does not mutate the input schema (returns a deep copy)', () => {
+    const schema = { type: 'string', pattern: 'x' };
+    const out = sanitizeSchemaForOllama(schema);
+    expect(schema.pattern).toBe('x'); // original untouched
+    expect((out as { pattern?: string }).pattern).toBeUndefined();
+  });
+
+  it('passes through primitives, arrays, null, and undefined', () => {
+    expect(sanitizeSchemaForOllama(undefined)).toBeUndefined();
+    expect(sanitizeSchemaForOllama(null)).toBeNull();
+    expect(sanitizeSchemaForOllama([{ pattern: 'a' }, { type: 'integer' }])).toEqual([
+      {},
+      { type: 'integer' },
+    ]);
+  });
+});
 
 describe('describeAnthropicRequest', () => {
   it('summarizes a vision request without leaking content', () => {
@@ -72,6 +124,37 @@ describe('LocalGatewayProvider', () => {
     expect(r.telemetry.outputTokens).toBe(22);
     expect(r.telemetry.costMicros).toBe(0n);
     expect(provider.id).toBe('local');
+  });
+
+  it('strips `pattern` from the schema sent to the gateway (Ollama grammar safety)', async () => {
+    let body: { response_format?: { json_schema?: { schema?: unknown } } } = {};
+    const provider = new LocalGatewayProvider({
+      baseUrl: 'http://gw.test',
+      modelId: 'qwen2.5:32b-instruct',
+      fetcher: async (_url, init) => {
+        body = JSON.parse((init as RequestInit).body as string) as typeof body;
+        return okJsonResponse({ choices: [{ message: { content: JSON.stringify(SAMPLE) } }] });
+      },
+    });
+    await provider.extract('# md', {
+      schema: {
+        type: 'object',
+        properties: { posted_date: { type: 'string', pattern: '^\\d{4}-\\d{2}-\\d{2}$' } },
+      },
+    });
+    // The regex `pattern` (which silently disables Ollama's grammar) is gone…
+    expect(JSON.stringify(body.response_format?.json_schema?.schema)).not.toContain('pattern');
+    // …but Zod still enforces the date format after parsing — a bad date is
+    // rejected even though the gateway grammar never saw the pattern.
+    const bad = JSON.stringify({
+      ...SAMPLE,
+      transactions: [{ ...SAMPLE.transactions[0], posted_date: '03/03/2026' }],
+    });
+    const strict = new LocalGatewayProvider({
+      baseUrl: 'http://gw.test',
+      fetcher: async () => okJsonResponse({ choices: [{ message: { content: bad } }] }),
+    });
+    await expect(strict.extract('# md')).rejects.toBeInstanceOf(ExtractionResponseError);
   });
 
   it('sends systemPromptOverride as the system message (text path); falls back to default', async () => {
@@ -221,7 +304,9 @@ describe('LocalGatewayProvider', () => {
       baseUrl: 'http://gw.test',
       fetcher: async () => new Response('upstream boom', { status: 500 }),
     });
-    await expect(provider.extract('# md')).rejects.toThrow(/HTTP 500/);
+    // The Ollama error body (model-not-pulled / OOM / grammar-compile failure)
+    // is surfaced into the message so a 500 is diagnosable from the audit trace.
+    await expect(provider.extract('# md')).rejects.toThrow(/HTTP 500: upstream boom/);
   });
 
   it('throws on a non-2xx vision response', async () => {
@@ -232,7 +317,7 @@ describe('LocalGatewayProvider', () => {
     });
     await expect(
       provider.extract('', { images: [{ data: Buffer.from('i'), mediaType: 'image/jpeg' }] }),
-    ).rejects.toThrow(/ollama vision HTTP 503/);
+    ).rejects.toThrow(/ollama vision HTTP 503: vision boom/);
   });
 
   it('surfaces an empty vision completion as ExtractionResponseError', async () => {

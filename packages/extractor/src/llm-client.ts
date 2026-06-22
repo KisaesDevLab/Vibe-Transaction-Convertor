@@ -125,6 +125,42 @@ const asTimeoutError = (err: unknown, label: string, timeoutMs: number): Error =
   return err as Error;
 };
 
+// Read a non-2xx HTTP body for diagnostics, truncated and best-effort. Ollama
+// returns a JSON `{"error":"…"}` on its /v1 and /api/chat surfaces (model not
+// pulled, OOM during load, grammar-compile failure on a `format`/`json_schema`
+// request); without it a bare `HTTP 500` is undiagnosable from the audit trace.
+// Mirrors the Anthropic path, which already surfaces `res.text()`. Returns a
+// `: <body>` suffix (empty string when the body is empty/unreadable) so callers
+// append it directly to the status message.
+const readErrorBodySuffix = async (res: { text(): Promise<string> }): Promise<string> => {
+  const body = await res.text().catch(() => '');
+  return body ? `: ${body.slice(0, 500)}` : '';
+};
+
+// Ollama's structured-output grammar engine (llama.cpp GBNF, used for both the
+// /v1 `response_format.json_schema` and the native `format` paths) does not
+// support JSON-Schema `pattern` (regex) constraints. When a `pattern` is present
+// it silently DROPS grammar enforcement for that schema, so the model free-
+// writes prose — we observed qwen return a markdown summary instead of JSON for
+// the date-`pattern` extraction schema, which then fails Zod and bounces the
+// statement to the Anthropic fallback. Strip every `pattern` from any schema
+// bound for Ollama; the Zod layer still enforces the regex after parsing
+// (parseExtractionResponse → ExtractionResult), so validation is unchanged. The
+// Anthropic provider keeps the full schema (its tool input_schema honors
+// `pattern`). Returns a deep copy — the caller's schema object is not mutated.
+export const sanitizeSchemaForOllama = (schema: unknown): unknown => {
+  if (Array.isArray(schema)) return schema.map(sanitizeSchemaForOllama);
+  if (schema && typeof schema === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(schema as Record<string, unknown>)) {
+      if (key === 'pattern') continue;
+      out[key] = sanitizeSchemaForOllama(value);
+    }
+    return out;
+  }
+  return schema;
+};
+
 export class ExtractionResponseError extends Error {
   readonly rawResponse: string;
   readonly summary: string;
@@ -440,7 +476,12 @@ export class LocalGatewayProvider implements LlmProvider {
       // path re-appends /v1 and the vision path needs the native root.
       .replace(/\/v1\/?$/, '')
       .replace(/\/$/, '');
-    this.modelId = opts.modelId ?? process.env.LLM_MODEL_ID ?? 'qwen3.5:35b-a3b';
+    // Default text-extraction model. qwen2.5-instruct (non-thinking) is a more
+    // reliable schema-constrained extractor than the thinking qwen3.5 MoE, which
+    // burned a reasoning pass per call and free-wrote prose under grammar
+    // constraints. Operators override via the admin LLM-provider page (DB) or
+    // LLM_MODEL_ID.
+    this.modelId = opts.modelId ?? process.env.LLM_MODEL_ID ?? 'qwen2.5:32b-instruct';
     this.visionModelId =
       opts.visionModelId ?? process.env.OLLAMA_VISION_MODEL ?? DEFAULT_VISION_MODEL;
     this.timeoutMs = opts.timeoutMs ?? Number(process.env.LLM_TIMEOUT_MS ?? 60_000);
@@ -509,7 +550,7 @@ export class LocalGatewayProvider implements LlmProvider {
               images: images.map((img) => img.data.toString('base64')),
             },
           ],
-          ...(sendFormat ? { format: schema ?? 'json' } : {}),
+          ...(sendFormat ? { format: schema ? sanitizeSchemaForOllama(schema) : 'json' } : {}),
           stream: false,
           ...(this.visionThink !== undefined ? { think: this.visionThink } : {}),
           keep_alive: this.keepAlive,
@@ -521,7 +562,9 @@ export class LocalGatewayProvider implements LlmProvider {
         }),
         signal: ctl.signal,
       });
-      if (!res.ok) throw new Error(`ollama vision HTTP ${res.status}`);
+      if (!res.ok) {
+        throw new Error(`ollama vision HTTP ${res.status}${await readErrorBodySuffix(res)}`);
+      }
       const body = (await res.json()) as {
         message?: { content?: string };
         prompt_eval_count?: number;
@@ -570,14 +613,19 @@ export class LocalGatewayProvider implements LlmProvider {
           model: this.modelId,
           messages,
           response_format: schema
-            ? { type: 'json_schema', json_schema: { name: 'extraction', schema } }
+            ? {
+                type: 'json_schema',
+                json_schema: { name: 'extraction', schema: sanitizeSchemaForOllama(schema) },
+              }
             : { type: 'json_object' },
           temperature: 0,
           max_tokens: Number(process.env.LLM_MAX_COMPLETION_TOKENS ?? 6000),
         }),
         signal: ctl.signal,
       });
-      if (!res.ok) throw new Error(`local gateway HTTP ${res.status}`);
+      if (!res.ok) {
+        throw new Error(`local gateway HTTP ${res.status}${await readErrorBodySuffix(res)}`);
+      }
       const body = (await res.json()) as {
         choices?: Array<{
           message?: { content?: string };
@@ -751,14 +799,19 @@ export class LocalGatewayProvider implements LlmProvider {
           messages,
           response_format: {
             type: 'json_schema',
-            json_schema: { name: opts.schemaName ?? 'structured_output', schema: opts.schema },
+            json_schema: {
+              name: opts.schemaName ?? 'structured_output',
+              schema: sanitizeSchemaForOllama(opts.schema),
+            },
           },
           temperature: 0,
           max_tokens: opts.maxOutputTokens ?? Number(process.env.LLM_MAX_COMPLETION_TOKENS ?? 6000),
         }),
         signal: ctl.signal,
       });
-      if (!res.ok) throw new Error(`local gateway HTTP ${res.status}`);
+      if (!res.ok) {
+        throw new Error(`local gateway HTTP ${res.status}${await readErrorBodySuffix(res)}`);
+      }
       const body = (await res.json()) as {
         choices?: Array<{ message?: { content?: string } }>;
         usage?: { prompt_tokens?: number; completion_tokens?: number };
