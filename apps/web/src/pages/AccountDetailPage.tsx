@@ -4,6 +4,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom';
 import { ACCOUNT_TYPE_LABELS, type AccountTypeCode } from '@vibe-tx-converter/shared';
 
 import { EntityAuditLog } from '../components/EntityAuditLog';
+import { ProcessingStepper, isInFlight } from '../components/ProcessingStepper';
 import { StatusBadge, ReconciliationBadge } from '../components/StatusBadge';
 import { UploadDropzone } from '../components/UploadDropzone';
 import { useToast } from '../components/Toast';
@@ -349,7 +350,17 @@ export function AccountDetailPage() {
                       </p>
                     </div>
                     <div className="flex items-center gap-2">
-                      <StatusBadge status={s.status} />
+                      {isInFlight(s.status) ? (
+                        <ProcessingStepper
+                          compact
+                          status={s.status}
+                          method={s.extractionMethod}
+                          provider={s.llmProvider}
+                          model={s.llmModelVersion}
+                        />
+                      ) : (
+                        <StatusBadge status={s.status} />
+                      )}
                       {s.status === 'review' || s.status === 'exported' ? (
                         <ReconciliationBadge status={s.reconciliationStatus} />
                       ) : null}

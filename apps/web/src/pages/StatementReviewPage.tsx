@@ -6,6 +6,7 @@ import { EntityAuditLog } from '../components/EntityAuditLog';
 import { LocaleConfirmBanner } from '../components/LocaleConfirmBanner';
 import { ReExtractDialog } from '../components/ReExtractDialog';
 import { ReconciliationBadge, StatusBadge } from '../components/StatusBadge';
+import { ProcessingStepper, isInFlight } from '../components/ProcessingStepper';
 import { ReconciliationWidget } from '../components/ReconciliationWidget';
 import { TransactionGrid } from '../components/TransactionGrid';
 import { PdfViewer } from '../components/PdfViewer';
@@ -188,6 +189,16 @@ export function StatementReviewPage() {
               ? `${s.periodStart} → ${s.periodEnd}`
               : `Statement ${s.id.slice(0, 8)}`}
           </h1>
+          {isInFlight(s.status) ? (
+            <div className="mt-2">
+              <ProcessingStepper
+                status={s.status}
+                method={s.extractionMethod}
+                provider={s.llmProvider}
+                model={s.llmModelVersion}
+              />
+            </div>
+          ) : null}
           <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-ink-subtle">
             <StatusBadge status={s.status} />
             <ReconciliationBadge

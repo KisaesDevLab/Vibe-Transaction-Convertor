@@ -8,6 +8,7 @@ import { useQuery } from '@tanstack/react-query';
 import { Link, useSearchParams } from 'react-router-dom';
 
 import { DeleteConfirmDialog } from '../components/DeleteConfirmDialog';
+import { ProcessingStepper, isInFlight } from '../components/ProcessingStepper';
 import { ReconciliationBadge, StatusBadge } from '../components/StatusBadge';
 import { useToast } from '../components/Toast';
 import { useCompanies } from '../hooks/useCompanies';
@@ -27,6 +28,11 @@ interface StatementListRow {
   status: string;
   reconciliationStatus: string;
   createdAt: string;
+  // Method + provider/model the worker persists during processing; used by the
+  // in-flight ProcessingStepper. Present on the serialized statement row.
+  extractionMethod: 'text' | 'ocr' | 'hybrid' | null;
+  llmProvider: 'local' | 'anthropic' | null;
+  llmModelVersion: string | null;
 }
 
 const PAGE_SIZE = 50;
@@ -264,7 +270,17 @@ export function GlobalStatementsPage() {
                   </td>
                   <td className="px-3 py-2 text-xs">{s.sourcePdfPages}</td>
                   <td className="px-3 py-2">
-                    <StatusBadge status={s.status} />
+                    {isInFlight(s.status) ? (
+                      <ProcessingStepper
+                        compact
+                        status={s.status}
+                        method={s.extractionMethod}
+                        provider={s.llmProvider}
+                        model={s.llmModelVersion}
+                      />
+                    ) : (
+                      <StatusBadge status={s.status} />
+                    )}
                   </td>
                   <td className="px-3 py-2">
                     {s.status === 'review' || s.status === 'exported' ? (

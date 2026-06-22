@@ -30,6 +30,7 @@ import {
   buildProviderForId,
   invalidateProviderCache,
   providerOrderFor,
+  resolveModelLabelForProvider,
   resolveProviderPolicy,
   type ProviderId,
 } from '../services/llm-provider.js';
@@ -924,7 +925,6 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
     timing.markdownMs = Date.now() - phaseStart;
 
     await checkCancelled(stmtId);
-    await setStatus(stmtId, 'extracting');
 
     // Two-provider orchestration. Each attempt runs the LLM call + repair
     // pass in memory without persisting anything; the orchestrator picks
@@ -932,6 +932,15 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
     currentPhase = 'extracting';
     policy = await resolveProviderPolicy(db);
     ({ primary, secondary } = providerOrderFor(policy));
+    // Surface which provider + model is in use the moment extraction begins, so
+    // the live processing UI can show it without waiting for the first LLM call
+    // to return telemetry. The final persist (on success / halt) overwrites
+    // these with the provider+model that actually produced the chosen result —
+    // which differs only when a provider fallback fires.
+    await setStatus(stmtId, 'extracting', {
+      llmProvider: primary,
+      llmModelVersion: await resolveModelLabelForProvider(db, primary),
+    });
     let attemptCtx: AttemptContext = {
       stmtId,
       markdown,

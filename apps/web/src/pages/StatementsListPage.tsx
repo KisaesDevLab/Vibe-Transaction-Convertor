@@ -1,6 +1,7 @@
 import { useMemo } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
 
+import { ProcessingStepper, isInFlight } from '../components/ProcessingStepper';
 import { ReconciliationBadge, StatusBadge } from '../components/StatusBadge';
 import { useStatementsByAccount } from '../hooks/useStatementsList';
 import { useAccount } from '../hooks/useStatements';
@@ -116,7 +117,17 @@ export function StatementsListPage() {
                     : `Statement ${s.id.slice(0, 8)}`}
                 </Link>
                 <div className="flex items-center gap-2">
-                  <StatusBadge status={s.status} />
+                  {isInFlight(s.status) ? (
+                    <ProcessingStepper
+                      compact
+                      status={s.status}
+                      method={s.extractionMethod}
+                      provider={s.llmProvider}
+                      model={s.llmModelVersion}
+                    />
+                  ) : (
+                    <StatusBadge status={s.status} />
+                  )}
                   <ReconciliationBadge
                     status={s.reconciliationStatus}
                     periodBoundsViolations={s.periodBoundsViolations}

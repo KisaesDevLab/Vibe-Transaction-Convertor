@@ -1,5 +1,6 @@
 import {
   AnthropicProvider,
+  DEFAULT_TEXT_MODEL,
   LocalGatewayProvider,
   type LlmProvider,
 } from '@vibe-tx-converter/extractor';
@@ -55,6 +56,26 @@ export const resolveLlmMaxTokens = async (db: Db): Promise<number> => {
   const fromEnv = Number.parseInt(process.env.LLM_MAX_COMPLETION_TOKENS ?? '', 10);
   if (Number.isFinite(fromEnv) && fromEnv > 0) return fromEnv;
   return DEFAULT_LLM_MAX_TOKENS;
+};
+
+// Anthropic default text model, mirrored from AnthropicProvider's own fallback.
+const DEFAULT_ANTHROPIC_MODEL = 'claude-sonnet-4-6';
+
+// Resolve the model tag a provider WOULD use for an extraction call, by the same
+// DB → env → default precedence the provider constructors apply — without
+// building the provider or making any network call. Used to label "which model
+// is in use" on the statement row the moment extraction starts, so the live
+// processing UI can show it before the first LLM call returns telemetry.
+export const resolveModelLabelForProvider = async (
+  db: Db,
+  providerId: ProviderId,
+): Promise<string> => {
+  if (providerId === 'anthropic') {
+    const row = await readSetting(db, KEY_ANTHROPIC_MODEL);
+    return row?.valuePlaintext ?? process.env.ANTHROPIC_MODEL ?? DEFAULT_ANTHROPIC_MODEL;
+  }
+  const row = await readSetting(db, KEY_OLLAMA_MODEL);
+  return row?.valuePlaintext ?? process.env.LLM_MODEL_ID ?? DEFAULT_TEXT_MODEL;
 };
 
 const DIRECT_ANTHROPIC = 'https://api.anthropic.com';
