@@ -444,6 +444,11 @@ export interface LocalGatewayProviderOptions {
 // the admin vision-model picker.
 export const DEFAULT_VISION_MODEL = 'minicpm-v4.5:latest';
 
+// Default text-extraction model (non-thinking instruct — see ADR-024). Exported
+// so the API layer can label "which model is in use" during processing without
+// duplicating the literal and risking drift from the provider default below.
+export const DEFAULT_TEXT_MODEL = 'qwen2.5:32b-instruct';
+
 export class LocalGatewayProvider implements LlmProvider {
   readonly id = 'local' as const;
   private baseUrl: string;
@@ -481,7 +486,7 @@ export class LocalGatewayProvider implements LlmProvider {
     // burned a reasoning pass per call and free-wrote prose under grammar
     // constraints. Operators override via the admin LLM-provider page (DB) or
     // LLM_MODEL_ID.
-    this.modelId = opts.modelId ?? process.env.LLM_MODEL_ID ?? 'qwen2.5:32b-instruct';
+    this.modelId = opts.modelId ?? process.env.LLM_MODEL_ID ?? DEFAULT_TEXT_MODEL;
     this.visionModelId =
       opts.visionModelId ?? process.env.OLLAMA_VISION_MODEL ?? DEFAULT_VISION_MODEL;
     this.timeoutMs = opts.timeoutMs ?? Number(process.env.LLM_TIMEOUT_MS ?? 60_000);
@@ -602,66 +607,104 @@ export class LocalGatewayProvider implements LlmProvider {
     messages: Array<{ role: string; content: string }>,
     schema: object | undefined,
   ): Promise<{ content: string; inputTokens: number; outputTokens: number; ms: number }> {
-    const ctl = new AbortController();
-    const t = setTimeout(() => ctl.abort(), this.timeoutMs);
-    const start = Date.now();
-    try {
-      const res = await this.fetcher(`${this.baseUrl}/v1/chat/completions`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          model: this.modelId,
-          messages,
-          response_format: schema
-            ? {
-                type: 'json_schema',
-                json_schema: { name: 'extraction', schema: sanitizeSchemaForOllama(schema) },
-              }
-            : { type: 'json_object' },
-          temperature: 0,
-          max_tokens: Number(process.env.LLM_MAX_COMPLETION_TOKENS ?? 6000),
-        }),
-        signal: ctl.signal,
-      });
-      if (!res.ok) {
-        throw new Error(`local gateway HTTP ${res.status}${await readErrorBodySuffix(res)}`);
-      }
-      const body = (await res.json()) as {
-        choices?: Array<{
-          message?: { content?: string };
-          finish_reason?: string;
-        }>;
-        usage?: { prompt_tokens?: number; completion_tokens?: number };
-      };
-      const content = body.choices?.[0]?.message?.content ?? '';
-      if (!content) {
-        // 200 with an empty completion. Most commonly when
-        // finish_reason='length' (max_tokens too low for the
-        // statement) or the gateway swallowed the response. Surface
-        // as ExtractionResponseError so the audit log captures the
-        // raw body and the operator sees a useful summary instead of
-        // "Unexpected end of JSON input".
-        const finish = body.choices?.[0]?.finish_reason;
-        throw new ExtractionResponseError({
-          summary: 'local gateway returned an empty completion',
-          rawResponse: JSON.stringify(body).slice(0, 8_000),
-          ...(finish ? { issues: `finish_reason=${finish}` } : {}),
+    const maxTokens = Number(process.env.LLM_MAX_COMPLETION_TOKENS ?? 6000);
+    // One round-trip. `useGrammar` chooses between grammar-constrained
+    // structured output (schema compiled to a GBNF grammar) and plain JSON
+    // mode. Each call owns its own timeout so the json_object retry below gets a
+    // fresh budget — the grammar attempt can burn most of its budget before the
+    // sampler dead-ends.
+    const runOnce = async (
+      useGrammar: boolean,
+    ): Promise<{ content: string; inputTokens: number; outputTokens: number; ms: number }> => {
+      const ctl = new AbortController();
+      const t = setTimeout(() => ctl.abort(), this.timeoutMs);
+      const start = Date.now();
+      try {
+        const res = await this.fetcher(`${this.baseUrl}/v1/chat/completions`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            model: this.modelId,
+            messages,
+            response_format:
+              schema && useGrammar
+                ? {
+                    type: 'json_schema',
+                    json_schema: { name: 'extraction', schema: sanitizeSchemaForOllama(schema) },
+                  }
+                : { type: 'json_object' },
+            temperature: 0,
+            max_tokens: maxTokens,
+          }),
+          signal: ctl.signal,
         });
+        if (!res.ok) {
+          const detail = await res.text().catch(() => '');
+          const error = new Error(
+            `local gateway HTTP ${res.status}${detail ? `: ${detail.slice(0, 500)}` : ''}`,
+          ) as Error & { grammarDeadEnd?: boolean };
+          // Ollama's grammar engine (llama.cpp GBNF) can dead-end mid-generation
+          // on real OCR content — the server returns a 5xx "peg-native format" /
+          // grammar error. Tag it so the caller retries once WITHOUT the grammar
+          // rather than failing over to the egress Anthropic provider.
+          error.grammarDeadEnd =
+            Boolean(schema) &&
+            useGrammar &&
+            res.status >= 500 &&
+            /peg|grammar|does not match the expected/i.test(detail);
+          throw error;
+        }
+        const body = (await res.json()) as {
+          choices?: Array<{
+            message?: { content?: string };
+            finish_reason?: string;
+          }>;
+          usage?: { prompt_tokens?: number; completion_tokens?: number };
+        };
+        const content = body.choices?.[0]?.message?.content ?? '';
+        if (!content) {
+          // 200 with an empty completion. Most commonly when
+          // finish_reason='length' (max_tokens too low for the
+          // statement) or the gateway swallowed the response. Surface
+          // as ExtractionResponseError so the audit log captures the
+          // raw body and the operator sees a useful summary instead of
+          // "Unexpected end of JSON input".
+          const finish = body.choices?.[0]?.finish_reason;
+          throw new ExtractionResponseError({
+            summary: 'local gateway returned an empty completion',
+            rawResponse: JSON.stringify(body).slice(0, 8_000),
+            ...(finish ? { issues: `finish_reason=${finish}` } : {}),
+          });
+        }
+        return {
+          content,
+          inputTokens: body.usage?.prompt_tokens ?? 0,
+          outputTokens: body.usage?.completion_tokens ?? 0,
+          ms: Date.now() - start,
+        };
+      } catch (err) {
+        throw asTimeoutError(
+          err,
+          `local gateway POST ${this.baseUrl}/v1/chat/completions`,
+          this.timeoutMs,
+        );
+      } finally {
+        clearTimeout(t);
       }
-      return {
-        content,
-        inputTokens: body.usage?.prompt_tokens ?? 0,
-        outputTokens: body.usage?.completion_tokens ?? 0,
-        ms: Date.now() - start,
-      };
+    };
+
+    try {
+      return await runOnce(true);
     } catch (err) {
-      throw asTimeoutError(
-        err,
-        `local gateway POST ${this.baseUrl}/v1/chat/completions`,
-        this.timeoutMs,
-      );
-    } finally {
-      clearTimeout(t);
+      if ((err as { grammarDeadEnd?: boolean }).grammarDeadEnd) {
+        // The grammar dead-ended on this statement. Retry once in plain JSON
+        // mode: the system prompt + exemplars still convey the schema and
+        // parseExtractionResponse (Zod) re-validates the result, so we recover
+        // locally — keeping processing on-appliance instead of egressing to
+        // Anthropic.
+        return await runOnce(false);
+      }
+      throw err;
     }
   }
 

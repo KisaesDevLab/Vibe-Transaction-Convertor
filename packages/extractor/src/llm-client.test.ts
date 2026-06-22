@@ -250,6 +250,60 @@ describe('LocalGatewayProvider', () => {
     expect(callCount).toBe(1);
   });
 
+  it('retries in json_object mode when the grammar dead-ends (peg-native 500)', async () => {
+    // Ollama's grammar engine can 500 mid-generation on real OCR content. The
+    // local provider must recover in plain JSON mode rather than bouncing to the
+    // Anthropic fallback — the prompt + exemplars still convey the shape and Zod
+    // re-validates.
+    const formats: string[] = [];
+    let calls = 0;
+    const provider = new LocalGatewayProvider({
+      baseUrl: 'http://gw.test',
+      modelId: 'qwen2.5:32b-instruct',
+      fetcher: async (_url, init) => {
+        calls += 1;
+        const body = JSON.parse((init as RequestInit).body as string) as {
+          response_format?: { type?: string };
+        };
+        formats.push(body.response_format?.type ?? '');
+        if (calls === 1) {
+          return new Response(
+            JSON.stringify({
+              error: {
+                message:
+                  'llama-server chat error: The model produced output that does not match the expected peg-native format',
+                type: 'api_error',
+              },
+            }),
+            { status: 500, headers: { 'content-type': 'application/json' } },
+          );
+        }
+        return okJsonResponse({
+          choices: [{ message: { content: JSON.stringify(SAMPLE) } }],
+          usage: { prompt_tokens: 5, completion_tokens: 9 },
+        });
+      },
+    });
+    const r = await provider.extract('# md', { schema: { type: 'object' } });
+    expect(r.data.transactions[0]?.description).toBe('X');
+    // Grammar attempt first, then the no-grammar retry.
+    expect(formats).toEqual(['json_schema', 'json_object']);
+    expect(calls).toBe(2);
+  });
+
+  it('does NOT retry a non-grammar 500 (no schema → no grammar to blame)', async () => {
+    let calls = 0;
+    const provider = new LocalGatewayProvider({
+      baseUrl: 'http://gw.test',
+      fetcher: async () => {
+        calls += 1;
+        return new Response('upstream boom', { status: 500 });
+      },
+    });
+    await expect(provider.extract('# md')).rejects.toThrow(/HTTP 500: upstream boom/);
+    expect(calls).toBe(1);
+  });
+
   it('rejects unparseable JSON with ExtractionResponseError', async () => {
     const broken = '{"period": {"start": "2026';
     const provider = new LocalGatewayProvider({
