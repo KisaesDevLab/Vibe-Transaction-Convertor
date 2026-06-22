@@ -427,6 +427,12 @@ export interface LocalGatewayProviderOptions {
   keepAlive?: string | undefined;
   numCtx?: number | undefined;
   visionThink?: boolean | undefined;
+  // Local text-extraction structured-output mode. 'grammar' (default) constrains
+  // generation with the JSON-schema grammar and falls back to json_object on a
+  // grammar dead-end; 'json_object' skips the grammar entirely — faster when the
+  // grammar reliably trips on a firm's OCR text. Resolved from the admin setting
+  // / LLM_LOCAL_STRUCTURED_OUTPUT by the factory.
+  structuredOutputMode?: 'grammar' | 'json_object' | undefined;
   fetcher?: typeof fetch | undefined;
 }
 
@@ -468,6 +474,8 @@ export class LocalGatewayProvider implements LlmProvider {
   // Reasoning is off by default — it doubles latency and a schema-constrained
   // OCR pass rarely needs it.
   private visionThink: boolean | undefined;
+  // See LocalGatewayProviderOptions.structuredOutputMode.
+  private structuredOutputMode: 'grammar' | 'json_object';
   private fetcher: typeof fetch;
 
   constructor(opts: LocalGatewayProviderOptions = {}) {
@@ -503,6 +511,9 @@ export class LocalGatewayProvider implements LlmProvider {
     const thinkEnv = process.env.OLLAMA_VISION_THINK;
     this.visionThink =
       opts.visionThink ?? (thinkEnv === 'on' ? true : thinkEnv === 'off' ? false : undefined);
+    this.structuredOutputMode =
+      opts.structuredOutputMode ??
+      (process.env.LLM_LOCAL_STRUCTURED_OUTPUT === 'json_object' ? 'json_object' : 'grammar');
     this.fetcher = opts.fetcher ?? fetch;
   }
 
@@ -693,6 +704,12 @@ export class LocalGatewayProvider implements LlmProvider {
       }
     };
 
+    // Operator opted out of grammar-constrained generation (e.g. the grammar
+    // reliably dead-ends on this firm's OCR text) — go straight to json_object
+    // and skip the wasted grammar attempt entirely.
+    if (this.structuredOutputMode === 'json_object') {
+      return runOnce(false);
+    }
     try {
       return await runOnce(true);
     } catch (err) {

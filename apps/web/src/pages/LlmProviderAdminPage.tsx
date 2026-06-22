@@ -86,7 +86,7 @@ interface ProviderStatus {
 
 interface AiSetting {
   id: string;
-  group: 'vision' | 'ocr' | 'safety';
+  group: 'vision' | 'ocr' | 'extraction' | 'safety';
   kind: 'int' | 'float' | 'string' | 'bool' | 'enum';
   label: string;
   help: string;
@@ -1131,6 +1131,7 @@ function OllamaField({
 const AI_GROUP_LABELS: Record<AiSetting['group'], string> = {
   vision: 'Vision performance',
   ocr: 'OCR fidelity',
+  extraction: 'Text extraction',
   safety: 'OCR safety net',
 };
 
@@ -1143,7 +1144,7 @@ function AiTuningSection({
   disabled: boolean;
   onSave: (id: string, value: string) => Promise<void>;
 }) {
-  const groups: AiSetting['group'][] = ['vision', 'ocr', 'safety'];
+  const groups: AiSetting['group'][] = ['vision', 'ocr', 'extraction', 'safety'];
   return (
     <section className="rounded-lg border border-surface-muted bg-white p-4">
       <h2 className="text-base font-medium">Local model tuning</h2>

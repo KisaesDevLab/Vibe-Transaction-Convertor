@@ -63,6 +63,15 @@ live('ai-settings (live Postgres)', () => {
     expect(s.ocrJpegQuality).toBe(80);
     expect(s.reviewConfidence).toBeCloseTo(0.7);
     expect(s.checkPayeeAuto).toBe(true);
+    expect(s.localStructuredOutput).toBe('grammar');
+  });
+
+  it('localStructuredOutput: accepts json_object, rejects anything else', async () => {
+    await setAiSetting(getDb(), 'localStructuredOutput', 'json_object', ACTOR);
+    expect((await resolveAiSettings(getDb())).localStructuredOutput).toBe('json_object');
+    await expect(setAiSetting(getDb(), 'localStructuredOutput', 'nope', ACTOR)).rejects.toThrow(
+      /one of/,
+    );
   });
 
   it('falls back to the env var when the DB has no override', async () => {

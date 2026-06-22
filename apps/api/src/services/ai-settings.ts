@@ -15,7 +15,7 @@ import { systemSettings } from '../db/schema.js';
 import { ValidationError } from '../lib/errors.js';
 
 export type AiSettingKind = 'int' | 'float' | 'string' | 'bool' | 'enum';
-export type AiSettingGroup = 'vision' | 'ocr' | 'safety';
+export type AiSettingGroup = 'vision' | 'ocr' | 'extraction' | 'safety';
 
 export interface AiSettingDef {
   id: string; // stable id used by the API + UI
@@ -92,6 +92,18 @@ export const AI_SETTINGS: readonly AiSettingDef[] = [
     min: 512,
     max: 131_072,
   },
+  // --- Text extraction ---
+  {
+    id: 'localStructuredOutput',
+    key: 'llm.local.structured_output',
+    env: 'LLM_LOCAL_STRUCTURED_OUTPUT',
+    kind: 'enum',
+    group: 'extraction',
+    label: 'Local structured output',
+    help: '"grammar" constrains the local model with the JSON-schema grammar and auto-falls-back to plain JSON if the grammar dead-ends; "json_object" skips the grammar entirely — faster when your scanned statements reliably trip it (no wasted grammar pass), relying on the prompt + validation.',
+    default: 'grammar',
+    enumValues: ['grammar', 'json_object'],
+  },
   // --- OCR fidelity ---
   {
     id: 'ocrDpi',
@@ -150,6 +162,7 @@ export interface ResolvedAiSettings {
   visionThink: boolean | undefined;
   keepAlive: string;
   numCtx: number | undefined;
+  localStructuredOutput: 'grammar' | 'json_object';
   ocrDpi: number;
   ocrJpegQuality: number;
   reviewConfidence: number;
@@ -204,6 +217,8 @@ export const resolveAiSettings = async (db: Db): Promise<ResolvedAiSettings> => 
     visionThink: thinkRaw === 'on' ? true : thinkRaw === 'off' ? false : undefined,
     keepAlive: raw(byId('keepAlive')!),
     numCtx: optIntOf('numCtx'),
+    localStructuredOutput:
+      raw(byId('localStructuredOutput')!) === 'json_object' ? 'json_object' : 'grammar',
     ocrDpi: intOf('ocrDpi'),
     ocrJpegQuality: intOf('ocrJpegQuality'),
     reviewConfidence: floatOf('reviewConfidence'),

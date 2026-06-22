@@ -304,6 +304,27 @@ describe('LocalGatewayProvider', () => {
     expect(calls).toBe(1);
   });
 
+  it('skips the grammar attempt entirely when structuredOutputMode=json_object', async () => {
+    const formats: string[] = [];
+    let calls = 0;
+    const provider = new LocalGatewayProvider({
+      baseUrl: 'http://gw.test',
+      structuredOutputMode: 'json_object',
+      fetcher: async (_url, init) => {
+        calls += 1;
+        const body = JSON.parse((init as RequestInit).body as string) as {
+          response_format?: { type?: string };
+        };
+        formats.push(body.response_format?.type ?? '');
+        return okJsonResponse({ choices: [{ message: { content: JSON.stringify(SAMPLE) } }] });
+      },
+    });
+    await provider.extract('# md', { schema: { type: 'object' } });
+    // Even with a schema present, no grammar (json_schema) request is ever sent.
+    expect(calls).toBe(1);
+    expect(formats).toEqual(['json_object']);
+  });
+
   it('rejects unparseable JSON with ExtractionResponseError', async () => {
     const broken = '{"period": {"start": "2026';
     const provider = new LocalGatewayProvider({

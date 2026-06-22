@@ -177,6 +177,7 @@ const constructLocal = async (db: Db): Promise<LlmProvider> => {
     ...(modelId ? { modelId } : {}),
     ...(visionModelId ? { visionModelId } : {}),
     timeoutMs,
+    structuredOutputMode: ai.localStructuredOutput,
     visionTimeoutMs: ai.visionTimeoutMs,
     visionMaxTokens: ai.visionMaxTokens,
     keepAlive: ai.keepAlive,
