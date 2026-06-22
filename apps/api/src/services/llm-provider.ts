@@ -23,12 +23,16 @@ const KEY_OLLAMA_BASE_URL = 'engine.llm_gateway.url';
 const KEY_OLLAMA_MODEL = 'llm.local.model';
 const KEY_OLLAMA_VISION_MODEL = 'llm.local.vision_model';
 
-export const DEFAULT_LLM_TIMEOUT_MS = 60_000;
+// 180s default: scanned statements now extract on the local text model
+// (qwen3.5, ~24 GB) in stage 2, whose first (cold) load can take ~2 min before
+// any tokens stream. keep_alive holds it warm afterward, so only the first call
+// per idle period is slow — but the default must not trip on it. Operator-tunable.
+export const DEFAULT_LLM_TIMEOUT_MS = 180_000;
 export const DEFAULT_LLM_MAX_TOKENS = 32_000;
 
 // Per-call timeout (ms) for extraction + enrichment LLM requests, applied
 // to both the local Ollama provider and the Anthropic provider. Operator-set
-// (system_settings) wins, then the LLM_TIMEOUT_MS env, then 60s. A slow
+// (system_settings) wins, then the LLM_TIMEOUT_MS env, then 180s. A slow
 // statement may take up to ~2x this (one reminder-retry).
 export const resolveLlmTimeoutMs = async (db: Db): Promise<number> => {
   const row = await readSetting(db, KEY_LLM_TIMEOUT);

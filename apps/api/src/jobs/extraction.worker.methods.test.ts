@@ -58,6 +58,11 @@ let behaviors: Record<ProviderId, Behavior>;
 let mockRasterPath = '';
 let mockRasterCount = 1;
 let buildCalls: ProviderId[] = [];
+// Stage-1 OCR transcription text, per page (by call index). Carries a unique
+// marker so the stage-2 extract Behavior can recognize OCR-derived markdown.
+// For multi-account tests, set distinct per-page account numbers here.
+let ocrPageTexts: string[] = ['OCR_STAGE1_MARKER'];
+let ocrCallIndex = 0;
 // Spy for the auto check-payee trigger (the resolver itself is unit-tested in
 // check-resolver.test.ts; here we only assert the worker's gate).
 const resolveCheckPayeesSpy = vi.fn(async () => ({
@@ -123,6 +128,14 @@ vi.mock('../services/llm-provider.js', async (orig) => {
         health: async () => ({ ok: true }),
         extract: (markdown: string, opts: { images?: unknown[] } = {}) =>
           behaviors[id](markdown, opts),
+        // Stage-1 OCR (local only): returns the configured per-page text. The
+        // worker calls this once per page, then feeds the joined markdown to
+        // extract() above.
+        ocrToMarkdown: async () => {
+          const text = ocrPageTexts[Math.min(ocrCallIndex, ocrPageTexts.length - 1)] ?? 'OCR';
+          ocrCallIndex += 1;
+          return { markdown: text, telemetry: telemetry() };
+        },
       };
     }),
   };
@@ -211,6 +224,8 @@ live('processExtraction — methods + error matrix (live Postgres)', () => {
     };
     buildCalls = [];
     mockRasterCount = 1;
+    ocrPageTexts = ['OCR_STAGE1_MARKER'];
+    ocrCallIndex = 0;
     resolveCheckPayeesSpy.mockClear();
     mockRasterPath = join(dataDir, 'fake-page.jpg');
     await writeFile(mockRasterPath, Buffer.from([0xff, 0xd8, 0xff, 0xd9])); // minimal JPEG-ish bytes
@@ -364,16 +379,17 @@ live('processExtraction — methods + error matrix (live Postgres)', () => {
       .update(statements)
       .set({ processingStrategyOverride: 'force-ocr' })
       .where(eq(statements.id, stmtId));
-    // The vision call receives images; assert the worker actually routed there.
-    let sawImages = false;
-    behaviors.local = async (_md, opts) => {
-      sawImages = Array.isArray(opts.images) && opts.images.length > 0;
+    // Two-stage: stage 1 OCRs to markdown locally, stage 2 extracts from it.
+    // Assert the markdown handed to extract came from the OCR transcription.
+    let extractMd = '';
+    behaviors.local = async (md) => {
+      extractMd = md;
       return ok(BALANCED);
     };
 
     await run();
     const stmt = await getStmt();
-    expect(sawImages).toBe(true);
+    expect(extractMd).toContain('OCR_STAGE1_MARKER');
     expect(stmt.status).toBe('review');
     expect(stmt.extractionMethod).toBe('ocr');
     expect(stmt.llmProvider).toBe('local');
@@ -443,8 +459,8 @@ live('processExtraction — methods + error matrix (live Postgres)', () => {
       .update(statements)
       .set({ processingStrategyOverride: 'auto-ocr-fallback' })
       .where(eq(statements.id, stmtId));
-    behaviors.local = async (_md, opts) => {
-      if (opts.images && opts.images.length > 0) return ok(BALANCED); // OCR retry succeeds
+    behaviors.local = async (md) => {
+      if (md.includes('OCR_STAGE1_MARKER')) return ok(BALANCED); // OCR retry succeeds
       throw new Error('local gateway HTTP 500'); // text-layer attempt rejects
     };
 
@@ -466,8 +482,8 @@ live('processExtraction — methods + error matrix (live Postgres)', () => {
       .update(statements)
       .set({ processingStrategyOverride: 'auto-text-fallback' })
       .where(eq(statements.id, stmtId));
-    behaviors.local = async (_md, opts) => {
-      if (opts.images && opts.images.length > 0) throw new Error('local gateway HTTP 500'); // OCR rejects
+    behaviors.local = async (md) => {
+      if (md.includes('OCR_STAGE1_MARKER')) throw new Error('local gateway HTTP 500'); // OCR rejects
       return ok(BALANCED); // text-layer retry succeeds
     };
 
@@ -599,31 +615,25 @@ live('processExtraction — methods + error matrix (live Postgres)', () => {
     expect(stmt.errorMessage).toBe('cancelled by operator'); // not overwritten
   });
 
-  // 18b — scanned multi-account: distinct account numbers across vision
-  // batches persist detectedSplits for the split UI (the OCR-path analogue of
-  // the text-path detection).
-  it('detects a scanned multi-account PDF from per-batch account numbers', async () => {
+  // 18b — scanned multi-account: distinct account numbers across the OCR'd page
+  // text persist detectedSplits for the split UI. Two-stage runs the SAME
+  // text-based detector (detectMultiAccount) on the stage-1 transcription.
+  it('detects a scanned multi-account PDF from the OCR page text', async () => {
     await getDb()
       .update(statements)
       .set({ processingStrategyOverride: 'force-ocr' })
       .where(eq(statements.id, stmtId));
     mockRasterCount = 4; // 4 rasterized pages
-    const prevBytes = process.env.VIBETC_OCR_IMAGE_BATCH_BYTES;
-    process.env.VIBETC_OCR_IMAGE_BATCH_BYTES = '1'; // force one page per batch
-    let batchIdx = 0;
-    behaviors.local = async (_md, opts) => {
-      // Pages 0–1 → account 1111, pages 2–3 → account 2222.
-      const last4 = batchIdx < 2 ? '1111' : '2222';
-      batchIdx += 1;
-      void opts;
-      return ok(withOverrides({ account: { masked_number: `****${last4}`, type_hint: null } }));
-    };
-    try {
-      await run();
-    } finally {
-      if (prevBytes === undefined) delete process.env.VIBETC_OCR_IMAGE_BATCH_BYTES;
-      else process.env.VIBETC_OCR_IMAGE_BATCH_BYTES = prevBytes;
-    }
+    // Pages 0–1 → account 1111, pages 2–3 → account 2222 (per-page OCR text).
+    ocrPageTexts = [
+      'Account number: 1111\nPAYROLL DEPOSIT 5000',
+      'Account number: 1111\nGROCERY 5000',
+      'Account number: 2222\nDEPOSIT 5000',
+      'Account number: 2222\nFEE 5000',
+    ];
+    behaviors.local = async () => ok(BALANCED);
+
+    await run();
     const stmt = await getStmt();
     expect(stmt.extractionMethod).toBe('ocr');
     const splits = stmt.detectedSplits as { multiAccount?: boolean; uniqueLast4?: string[] } | null;

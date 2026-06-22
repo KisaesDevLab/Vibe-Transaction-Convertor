@@ -350,6 +350,25 @@ describe('LocalGatewayProvider', () => {
     await provider.extract('', { images: [{ data: Buffer.from('i'), mediaType: 'image/jpeg' }] });
     expect(body.options?.num_predict).toBe(4096);
   });
+
+  it('ocrToMarkdown transcribes images to markdown with NO format/schema', async () => {
+    let body: { format?: unknown; messages?: Array<{ images?: unknown[] }> } = {};
+    const provider = new LocalGatewayProvider({
+      baseUrl: 'http://gw.test',
+      fetcher: async (_url, init) => {
+        body = JSON.parse((init as RequestInit).body as string) as typeof body;
+        return okJsonResponse({ message: { content: '```\n# Page 1\n\nROW ONE\n```' } });
+      },
+    });
+    const r = await provider.ocrToMarkdown({
+      images: [{ data: Buffer.from('img'), mediaType: 'image/jpeg' }],
+      systemPrompt: 's',
+      userPrompt: 'u',
+    });
+    expect(body.format).toBeUndefined(); // free text — structured output NOT requested
+    expect(r.markdown).toBe('# Page 1\n\nROW ONE'); // outer code fence stripped
+    expect(r.telemetry.costMicros).toBe(0n);
+  });
 });
 
 describe('AnthropicProvider', () => {
@@ -469,6 +488,17 @@ describe('AnthropicProvider', () => {
         systemPrompt: 's',
         userPrompt: 'u',
         schema: {},
+        images: [{ data: Buffer.from('i'), mediaType: 'image/png' }],
+      }),
+    ).rejects.toThrow(/text-only/);
+  });
+
+  it('ocrToMarkdown rejects — OCR is local-only (page images never egress)', async () => {
+    const provider = new AnthropicProvider({ apiKey: 'k' });
+    await expect(
+      provider.ocrToMarkdown({
+        systemPrompt: 's',
+        userPrompt: 'u',
         images: [{ data: Buffer.from('i'), mediaType: 'image/png' }],
       }),
     ).rejects.toThrow(/text-only/);

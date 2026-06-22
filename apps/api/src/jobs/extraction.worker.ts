@@ -4,19 +4,15 @@ import { readFile } from 'node:fs/promises';
 
 import {
   ExtractionResponseError,
+  OCR_TRANSCRIBE_SYSTEM_PROMPT,
+  OCR_TRANSCRIBE_USER_PROMPT,
   analyzePdfFromBuffer,
-  batchPageImages,
   detectMultiAccount,
-  detectMultiAccountFromSlices,
   extractTextLayerFromBuffer,
-  last4FromMasked,
-  mergeExtractionResults,
   rasterizePdf,
   repairPromptFor,
   routePdf,
-  type AccountSlice,
   type ExtractionMethod,
-  type MultiAccountAnalysis,
 } from '@vibe-tx-converter/extractor';
 import { findSuspectRows, reconcileGoldenRule, repairPass } from '@vibe-tx-converter/reconciler';
 import {
@@ -116,11 +112,15 @@ interface ProcessedTx {
 
 type AttemptRejection = 'http' | 'malformed' | 'empty-txs' | 'discrepancy' | null;
 
-// A rasterized page image bound for local vision/OCR extraction (Ollama Qwen-VL).
+// A rasterized page image bound for local OCR (stage 1 of two-stage extraction).
 type VisionImage = {
   data: Buffer;
   mediaType: 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp';
 };
+
+// A rasterized page plus its original 0-based PDF page index, so OCR output can
+// be page-marked (`# Page N`) and fed to text-based multi-account detection.
+type OcrPage = VisionImage & { pageIndex: number };
 
 interface AttemptOutcome {
   providerId: ProviderId;
@@ -148,19 +148,15 @@ interface AttemptOutcome {
   periodEnd: string | null;
   openingBalanceCents: bigint | null;
   closingBalanceCents: bigint | null;
-  // Scanned multi-account analysis from the vision path (undefined otherwise).
-  ocrMultiAccount?: MultiAccountAnalysis | undefined;
 }
 
 interface AttemptContext {
   stmtId: string;
+  // Statement content as markdown. For text-layer PDFs this is the extracted
+  // text; for scanned PDFs it's the stage-1 OCR transcription. Either way,
+  // extraction (stage 2) reads markdown — no images reach this stage.
   markdown: string;
   dateFormatOverride?: 'MDY' | 'DMY' | 'YMD';
-  // Vision/OCR — rasterized page images for scanned/image statements. Sent to
-  // the local Ollama Qwen-VL provider, which OCRs + extracts in one call and
-  // emits the same extraction JSON as the markdown path. When present the
-  // extraction reads the images, not ``markdown``.
-  images?: VisionImage[] | undefined;
 }
 
 const checkAnthropicMonthlyCap = async (stmtId: string): Promise<string | null> => {
@@ -200,55 +196,50 @@ const mapLlmTxs = (txs: schemas.extraction.ExtractionResult['transactions']): Pr
     sourceLine: idx,
   }));
 
-// Vision/OCR extraction over a multi-page statement. To keep any single
-// /api/chat call's prompt + image payload bounded (memory + context window),
-// we batch the pages (1–3 each, within a byte budget), extract each batch on
-// the local Ollama Qwen-VL provider, and merge the per-batch results back
-// into one statement-level extraction. The merged result is shaped exactly
-// like a single provider.extract() return so the orchestration downstream is
-// unchanged. Telemetry sums across batches; rawJson keeps each batch's raw
-// for the audit trail.
-const extractFromImagesBatched = async (
+// Stage 1 of two-stage scanned extraction: OCR each page image to markdown on
+// the LOCAL vision model (MiniCPM-V — page images never egress, ADR-023), ONE
+// page per call for reliable per-page text. The resulting page-marked markdown
+// then goes through the normal text extract() path (stage 2, qwen3.5), which
+// reliably enforces our schema field names + integer cents. MiniCPM-V is a
+// strong reader but an unreliable structured extractor, so it never emits the
+// extraction JSON directly. Returns the markdown, the per-page texts (for
+// text-based multi-account detection), and summed OCR telemetry (cost 0, local).
+const ocrImagesToMarkdown = async (
   provider: Awaited<ReturnType<typeof buildProviderForId>>,
-  images: VisionImage[],
-  baseOpts: Parameters<typeof provider.extract>[1],
-): Promise<
-  Awaited<ReturnType<typeof provider.extract>> & { ocrMultiAccount: MultiAccountAnalysis }
-> => {
-  const batches = batchPageImages(images);
-  const parts: Array<{ data: schemas.extraction.ExtractionResult; startPage: number }> = [];
-  const rawParts: string[] = [];
-  // Per-batch account identity (the number the model read on those page(s)),
-  // for scanned multi-account detection — there's no page text to regex.
-  const accountSlices: AccountSlice[] = [];
+  pages: OcrPage[],
+): Promise<{
+  markdown: string;
+  pages: Array<{ index: number; text: string }>;
+  telemetry: {
+    inputTokens: number;
+    outputTokens: number;
+    ms: number;
+    model: string;
+    costMicros: bigint;
+  };
+}> => {
+  const out: Array<{ index: number; text: string }> = [];
   let inputTokens = 0;
   let outputTokens = 0;
-  let costMicros = 0n;
   let ms = 0;
   let model = '';
-  for (const batch of batches) {
-    const r = await provider.extract('', { ...(baseOpts ?? {}), images: batch.images });
-    parts.push({ data: r.data, startPage: batch.startPage });
-    rawParts.push(r.rawJson);
-    // startPage is 1-based; AccountSlice page ranges are 0-based inclusive.
-    const start0 = batch.startPage - 1;
-    accountSlices.push({
-      pageStart: start0,
-      pageEnd: start0 + batch.images.length - 1,
-      last4: last4FromMasked(r.data.account?.masked_number),
+  for (const p of pages) {
+    const r = await provider.ocrToMarkdown({
+      images: [{ data: p.data, mediaType: p.mediaType }],
+      systemPrompt: OCR_TRANSCRIBE_SYSTEM_PROMPT,
+      userPrompt: OCR_TRANSCRIBE_USER_PROMPT,
     });
+    out.push({ index: p.pageIndex, text: r.markdown });
     inputTokens += r.telemetry.inputTokens ?? 0;
     outputTokens += r.telemetry.outputTokens ?? 0;
-    costMicros += r.telemetry.costMicros;
     ms += r.telemetry.ms;
     model = r.telemetry.model;
   }
-  const data = mergeExtractionResults(parts);
+  const markdown = out.map((p) => `# Page ${p.index + 1}\n\n${p.text}`).join('\n\n');
   return {
-    data,
-    rawJson: JSON.stringify({ batchCount: batches.length, batches: rawParts }).slice(0, 20_000),
-    telemetry: { inputTokens, outputTokens, ms, model, costMicros },
-    ocrMultiAccount: detectMultiAccountFromSlices(accountSlices, images.length),
+    markdown,
+    pages: out,
+    telemetry: { inputTokens, outputTokens, ms, model, costMicros: 0n },
   };
 };
 
@@ -293,7 +284,6 @@ const attemptExtraction = async (
     }
   }
 
-  const useVision = !!(ctx.images && ctx.images.length > 0);
   const baseExtractOpts = {
     schema: schemas.extraction.ExtractionJsonSchema,
     ...(ctx.dateFormatOverride ? { dateFormatOverride: ctx.dateFormatOverride } : {}),
@@ -301,24 +291,15 @@ const attemptExtraction = async (
 
   let result: Awaited<ReturnType<typeof provider.extract>>;
   try {
-    // Vision/OCR extraction: the local Ollama Qwen-VL provider reads the page
-    // images directly (one-call OCR+extract), batched and merged. The worker
-    // forces the local provider for image runs (Anthropic is text-only).
-    result = useVision
-      ? await extractFromImagesBatched(provider, ctx.images!, baseExtractOpts)
-      : await provider.extract(ctx.markdown, baseExtractOpts);
+    // Extraction always runs on markdown now. Scanned PDFs are OCR'd to markdown
+    // in stage 1 (local MiniCPM-V) before reaching here, so this stage honors
+    // the provider policy and only ever sees cleartext text — never images.
+    result = await provider.extract(ctx.markdown, baseExtractOpts);
   } catch (err) {
     const rejection: AttemptRejection =
       err instanceof ExtractionResponseError ? 'malformed' : 'http';
     return { providerId, rejection, error: err as Error, ...empty };
   }
-
-  // Scanned multi-account analysis (vision path only); undefined for the
-  // text-layer path, which detects in produceTextMarkdown instead.
-  const ocrMultiAccount: MultiAccountAnalysis | undefined =
-    useVision && 'ocrMultiAccount' in result
-      ? (result as { ocrMultiAccount?: MultiAccountAnalysis }).ocrMultiAccount
-      : undefined;
 
   const dateFormat = result.data.source_date_format.format;
   const dateFormatConfidence = result.data.source_date_format.confidence;
@@ -548,7 +529,6 @@ const attemptExtraction = async (
     periodEnd,
     openingBalanceCents: openingCents,
     closingBalanceCents: closingCents,
-    ...(ocrMultiAccount ? { ocrMultiAccount } : {}),
   };
 };
 
@@ -879,17 +859,17 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
     // Rasterize to JPEG: there's no gateway body cap anymore, but JPEG at
     // ~200 dpi keeps statement text legible while staying small enough to
     // batch and fit Ollama's context. DPI/quality are operator-tunable.
-    const produceOcrImages = async (): Promise<VisionImage[]> => {
+    const produceOcrImages = async (): Promise<OcrPage[]> => {
       const rasters = await rasterizePdf(data.sourcePdfPath, {
         dpi: aiSettings.ocrDpi,
         format: 'jpeg',
         jpegQuality: aiSettings.ocrJpegQuality,
       });
       const scopedRasters = rasters.filter((r) => inRange(r.index));
-      // Hard page cap. All page buffers are held resident at once here (and
-      // expand ~4/3× as base64 per batch), so at operator-tunable DPI a
-      // pathological upload could otherwise OOM the worker. Statements this large
-      // are vanishingly rare; fail loud and tell the operator to split.
+      // Hard page cap. All page buffers are held resident at once here, so at
+      // operator-tunable DPI a pathological upload could otherwise OOM the
+      // worker. Statements this large are vanishingly rare; fail loud and tell
+      // the operator to split.
       if (scopedRasters.length > MAX_OCR_PAGES) {
         throw new ExtractionResponseError({
           summary: `scanned statement has ${scopedRasters.length} pages, exceeding the OCR cap of ${MAX_OCR_PAGES}; split it into smaller statements`,
@@ -897,18 +877,40 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
         });
       }
       return Promise.all(
-        scopedRasters.map(async (r) => ({ data: await readFile(r.path), mediaType: r.mediaType })),
+        scopedRasters.map(async (r) => ({
+          data: await readFile(r.path),
+          mediaType: r.mediaType,
+          pageIndex: r.index,
+        })),
       );
     };
 
+    // Stage 1 of the scanned path: rasterize → OCR to markdown on the LOCAL
+    // vision model (page images never egress), then run text-based multi-account
+    // detection on the transcription (mirrors produceTextMarkdown). Returns the
+    // page-marked markdown for the normal stage-2 extraction below.
+    const produceOcrMarkdown = async (): Promise<string> => {
+      const pages = await produceOcrImages();
+      const localProvider = await buildProviderForId(db, 'local');
+      const ocr = await ocrImagesToMarkdown(localProvider, pages);
+      if (!pageRange) {
+        const splitInfo = detectMultiAccount(ocr.pages);
+        if (splitInfo.multiAccount) {
+          await db
+            .update(statements)
+            .set({ detectedSplits: splitInfo, updatedAt: sql`now()` })
+            .where(eq(statements.id, stmtId));
+          logger.warn(
+            { stmtId, splits: splitInfo.splits },
+            'multi-account scanned PDF detected; persisted splits for UI confirmation',
+          );
+        }
+      }
+      return ocr.markdown;
+    };
+
     currentPhase = method === 'text' ? 'text-markdown' : 'ocr-images';
-    let ocrImages: VisionImage[] | undefined;
-    if (method === 'text') {
-      markdown = await produceTextMarkdown();
-    } else {
-      ocrImages = await produceOcrImages();
-      markdown = ''; // the images carry the statement content
-    }
+    markdown = method === 'text' ? await produceTextMarkdown() : await produceOcrMarkdown();
     timing.markdownMs = Date.now() - phaseStart;
 
     await checkCancelled(stmtId);
@@ -924,7 +926,6 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
       stmtId,
       markdown,
       ...(dateFormatOverride ? { dateFormatOverride } : {}),
-      ...(ocrImages ? { images: ocrImages } : {}),
     };
 
     const persistAmbiguousHalt = async (a: AttemptOutcome): Promise<void> => {
@@ -964,12 +965,12 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
       if (primary === undefined || secondary === undefined) {
         throw new Error('provider order not resolved before runProviderFallback (bug)');
       }
-      // OCR/vision runs locally on Ollama Qwen-VL regardless of the
-      // configured policy — Anthropic is text-only and cannot read page
-      // images. Force the local provider (no secondary) for the image path;
-      // the text-layer path honors the operator's local/anthropic policy.
-      const resolvedPrimary: ProviderId = inputMethod === 'ocr' ? 'local' : primary;
-      const resolvedSecondary: ProviderId | null = inputMethod === 'ocr' ? null : secondary;
+      // Stage 2 always operates on markdown (text-layer text, or stage-1 OCR
+      // transcription), so it honors the operator's provider policy for BOTH
+      // inputs — page images were already consumed locally in stage 1 and never
+      // reach here, so Anthropic-on-OCR'd-markdown is allowed (ADR-023).
+      const resolvedPrimary: ProviderId = primary;
+      const resolvedSecondary: ProviderId | null = secondary;
       const firstStart = Date.now();
       const first = await attemptExtraction(resolvedPrimary, ctx);
       attempts.push(traceEntryFor(first, inputMethod, Date.now() - firstStart));
@@ -1044,16 +1045,16 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
       });
       logger.info(
         { stmtId, reason: chosen.rejection },
-        'text-layer extraction rejected — retrying with local OCR (Ollama Qwen-VL)',
+        'text-layer extraction rejected — retrying via local OCR (MiniCPM-V) → markdown',
       );
       await setStatus(stmtId, 'ocr', { extractionMethod: 'hybrid' });
       currentPhase = 'ocr-fallback-images';
       const ocrMarkdownStart = Date.now();
-      // Vision fallback: rasterize and send images to the local Qwen-VL
-      // provider instead of OCR'd markdown — same path as the primary scan.
-      const fallbackImages = await produceOcrImages();
+      // OCR fallback (stage 1): transcribe the page images to markdown locally,
+      // then re-extract from that markdown via the normal policy-respecting path.
+      const fallbackMarkdown = await produceOcrMarkdown();
       timing.ocrFallbackMarkdownMs = Date.now() - ocrMarkdownStart;
-      attemptCtx = { ...attemptCtx, markdown: '', images: fallbackImages };
+      attemptCtx = { ...attemptCtx, markdown: fallbackMarkdown };
       currentPhase = 'extracting';
       await setStatus(stmtId, 'extracting');
       const ocrLlmStart = Date.now();
@@ -1105,8 +1106,7 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
       const textMarkdownStart = Date.now();
       markdown = await produceTextMarkdown();
       timing.ocrFallbackMarkdownMs = Date.now() - textMarkdownStart;
-      // Falling back to the text layer: use markdown, NOT the OCR images.
-      attemptCtx = { ...attemptCtx, markdown, images: undefined };
+      attemptCtx = { ...attemptCtx, markdown };
       currentPhase = 'extracting';
       const textLlmStart = Date.now();
       const textChosen = await runProviderFallback(attemptCtx, 'text-layer');
@@ -1210,24 +1210,9 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
     await checkCancelled(stmtId);
     currentPhase = 'persisting';
 
-    // Multi-account detection for the OCR/vision path (the text path detects in
-    // produceTextMarkdown). Persist suggested splits so the review UI can offer
-    // the split-or-acknowledge flow; whole-PDF runs only (a sliced re-extract
-    // is single-account by definition).
-    if (
-      !pageRange &&
-      (method === 'ocr' || method === 'hybrid') &&
-      chosen.ocrMultiAccount?.multiAccount
-    ) {
-      await db
-        .update(statements)
-        .set({ detectedSplits: chosen.ocrMultiAccount, updatedAt: sql`now()` })
-        .where(eq(statements.id, stmtId));
-      logger.warn(
-        { stmtId, splits: chosen.ocrMultiAccount.splits },
-        'multi-account scanned PDF detected; persisted splits for UI confirmation',
-      );
-    }
+    // Multi-account detection now runs in produceTextMarkdown (text path) and
+    // produceOcrMarkdown (scanned path) — both detect on the page text and
+    // persist detectedSplits there, so there's nothing to do here.
 
     // OCR-error safety net (production). The Golden Rule catches balance-level
     // misreads, but a row whose amount happens to tie while its date or

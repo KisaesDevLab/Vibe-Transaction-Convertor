@@ -10,6 +10,11 @@
 
 import type { PageText } from './preprocess.js';
 
+// Detection only needs each page's index + text, so accept the structural
+// subset — this lets both the text-layer path (full PageText) and the OCR path
+// (transcribed {index, text}) call it.
+export type DetectablePage = Pick<PageText, 'index' | 'text'>;
+
 const ACCOUNT_REGEXES: RegExp[] = [
   /account\s*(?:number|no\.?|#|ending(?:\s*in)?)\s*[:#-]?\s*(?:•|x|X|\*|-)*(\d{4,})/g,
   /acct\s*(?:no\.?|#|ending(?:\s*in)?)?\s*[:#-]?\s*(?:•|x|X|\*|-)*(\d{4,})/g,
@@ -28,7 +33,7 @@ export interface MultiAccountAnalysis {
   splits: Array<{ last4: string; pageStart: number; pageEnd: number }>;
 }
 
-export const detectMultiAccount = (pages: PageText[]): MultiAccountAnalysis => {
+export const detectMultiAccount = (pages: DetectablePage[]): MultiAccountAnalysis => {
   const occurrences: AccountOccurrence[] = [];
   for (const page of pages) {
     const haystack = page.text.toLowerCase();

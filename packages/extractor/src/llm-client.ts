@@ -322,6 +322,18 @@ export interface CompleteResult {
   telemetry: ExtractCallTelemetry;
 }
 
+export interface OcrToMarkdownOptions {
+  images: NonNullable<CompleteOptions['images']>;
+  systemPrompt: string;
+  userPrompt: string;
+  maxOutputTokens?: number | undefined;
+}
+
+export interface OcrToMarkdownResult {
+  markdown: string;
+  telemetry: ExtractCallTelemetry;
+}
+
 export interface LlmProvider {
   readonly id: 'local' | 'anthropic';
   extract(markdown: string, opts?: ExtractOptions | object): Promise<ExtractResult>;
@@ -333,6 +345,11 @@ export interface LlmProvider {
   // path but with a caller-supplied prompt + schema instead of the fixed
   // statement-extraction ones.)
   completeWithImages(opts: CompleteOptions): Promise<CompleteResult>;
+  // OCR-only vision call: transcribes page image(s) to faithful markdown TEXT
+  // (no JSON schema / `format`). Stage 1 of two-stage scanned extraction — the
+  // markdown then goes through the normal text extract() path. Local provider
+  // only; page images never egress, so AnthropicProvider throws.
+  ocrToMarkdown(opts: OcrToMarkdownOptions): Promise<OcrToMarkdownResult>;
   health(): Promise<{ ok: boolean; detail?: string }>;
 }
 
@@ -466,6 +483,9 @@ export class LocalGatewayProvider implements LlmProvider {
     schema: object | undefined,
     system: string,
     userPrompt: string,
+    // When false, no `format` is sent — the model returns free text (used by the
+    // OCR-to-markdown transcription path, stage 1 of two-stage extraction).
+    sendFormat = true,
   ): Promise<{ content: string; inputTokens: number; outputTokens: number; ms: number }> {
     const ctl = new AbortController();
     const t = setTimeout(() => ctl.abort(), this.visionTimeoutMs);
@@ -484,7 +504,7 @@ export class LocalGatewayProvider implements LlmProvider {
               images: images.map((img) => img.data.toString('base64')),
             },
           ],
-          format: schema ?? 'json',
+          ...(sendFormat ? { format: schema ?? 'json' } : {}),
           stream: false,
           ...(this.visionThink !== undefined ? { think: this.visionThink } : {}),
           keep_alive: this.keepAlive,
@@ -814,6 +834,35 @@ export class LocalGatewayProvider implements LlmProvider {
     return {
       data,
       rawJson: call.content,
+      telemetry: {
+        inputTokens: call.inputTokens,
+        outputTokens: call.outputTokens,
+        ms: call.ms,
+        model: this.visionModelId,
+        costMicros: 0n, // local hardware
+      },
+    };
+  }
+
+  // OCR-only: transcribe page image(s) to faithful markdown TEXT. No `format`
+  // is sent (free text) — MiniCPM-V is a strong reader but an unreliable
+  // structured extractor, so the markdown then goes through the reliable text
+  // extract() path (stage 2). Page images are processed locally (ADR-023).
+  async ocrToMarkdown(opts: OcrToMarkdownOptions): Promise<OcrToMarkdownResult> {
+    if (!this.baseUrl) throw new Error('Ollama base URL not set');
+    if (!opts.images || opts.images.length === 0) {
+      throw new Error('ocrToMarkdown requires at least one image');
+    }
+    const call = await this.callOllamaVision(
+      opts.images,
+      undefined,
+      opts.systemPrompt,
+      opts.userPrompt,
+      false, // free text, no JSON schema
+    );
+    return {
+      // Strip an outer ``` / ```json fence if the model wrapped its output.
+      markdown: stripCodeFences(call.content.trim()).trim(),
       telemetry: {
         inputTokens: call.inputTokens,
         outputTokens: call.outputTokens,
@@ -1275,6 +1324,12 @@ export class AnthropicProvider implements LlmProvider {
   async completeWithImages(_opts: CompleteOptions): Promise<CompleteResult> {
     throw new Error(
       'AnthropicProvider.completeWithImages() is text-only — check-payee vision runs on the local Ollama provider',
+    );
+  }
+
+  async ocrToMarkdown(_opts: OcrToMarkdownOptions): Promise<OcrToMarkdownResult> {
+    throw new Error(
+      'AnthropicProvider.ocrToMarkdown() is text-only — OCR runs on the local Ollama provider (page images never egress)',
     );
   }
 }
