@@ -46,6 +46,15 @@ export function PdfViewer({
   // bypass that entirely.
   const [pdfData, setPdfData] = useState<Uint8Array | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // The source PDF was intentionally purged (admin Delete-PDF or the retention
+  // sweep): the API answers /raw with 410. This is distinct from a transient
+  // load error — a Retry can't bring the bytes back — so it gets its own
+  // graceful state instead of surfacing as "Could not load PDF: HTTP 410". The
+  // parent normally swaps the whole viewer for its own deleted-state notice via
+  // `sourcePdfDeleted`; this covers the window where that flag is stale (e.g.
+  // the PDF was swept server-side, or a sibling statement sharing the hash was
+  // deleted) and the viewer is still mounted.
+  const [deleted, setDeleted] = useState<boolean>(false);
   const [numPages, setNumPages] = useState<number>(0);
   const [page, setPage] = useState<number>(1);
   const [fit, setFit] = useState<FitMode>(() => {
@@ -69,11 +78,18 @@ export function PdfViewer({
   useEffect(() => {
     let cancelled = false;
     setError(null);
+    setDeleted(false);
     setPdfData(null);
     setNumPages(0);
     if (!pdfHash) return;
     fetch(withBase(`/api/uploads/${pdfHash}/raw`), { credentials: 'include' })
       .then(async (res) => {
+        // 410 Gone — the source PDF was deleted. Surface a graceful notice, not
+        // a retryable error (the bytes are gone for good).
+        if (res.status === 410) {
+          if (!cancelled) setDeleted(true);
+          return;
+        }
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const buffer = await res.arrayBuffer();
         if (cancelled) return;
@@ -289,7 +305,17 @@ export function PdfViewer({
       </div>
 
       <div className="relative overflow-auto bg-surface-subtle p-3">
-        {error ? (
+        {deleted ? (
+          <div className="grid h-64 place-items-center px-6 text-center text-sm text-ink-muted">
+            <div>
+              <p className="font-medium text-ink">Source PDF has been deleted.</p>
+              <p className="mt-1">
+                The extracted transactions and export files are still available. The original PDF
+                was removed from disk by an admin action or the retention sweep.
+              </p>
+            </div>
+          </div>
+        ) : error ? (
           <div className="grid h-64 place-items-center text-sm text-danger">
             Could not load PDF: {error}
             <button

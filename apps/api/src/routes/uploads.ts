@@ -234,8 +234,15 @@ export const uploadsRawRouter = (): Router => {
       const hash = String(req.params.hash ?? '').trim();
       if (!/^[0-9a-f]{64}$/.test(hash)) throw new ValidationError('invalid hash');
       const rows = await db.select().from(statements).where(eq(statements.sourcePdfHash, hash));
-      const row = rows[0];
-      if (!row) throw new NotFoundError(`no statement with hash ${hash}`);
+      if (rows.length === 0) throw new NotFoundError(`no statement with hash ${hash}`);
+      // Several statements can share one source PDF (multi-account split, or a
+      // re-upload of identical bytes). The hash is content-addressed, so they
+      // all reference the SAME file on disk — serve from any sibling whose copy
+      // is still present, and only report 410 when EVERY referencing statement
+      // has had its PDF purged (the file is actually gone). Picking rows[0]
+      // blindly would 410 a live PDF whenever an arbitrary deleted sibling
+      // sorted first.
+      const row = rows.find((r) => !r.sourcePdfDeleted) ?? rows[0]!;
       // 410 Gone — the row exists but the file was intentionally
       // removed (admin Delete-PDF or retention sweep). Distinguishes
       // "never existed" (404) from "existed, deliberately purged".

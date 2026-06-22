@@ -1,5 +1,5 @@
 import { migrate } from 'drizzle-orm/node-postgres/migrator';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -7,6 +7,7 @@ import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { closeDb, getDb, getPool } from '../db/client.js';
+import { statements } from '../db/schema.js';
 import { createApp } from '../server.js';
 
 const databaseUrl = process.env.DATABASE_URL;
@@ -109,5 +110,44 @@ live('Uploads — multipart, magic-byte gate, dedup (live Postgres)', () => {
     const sixtyFour = '0'.repeat(64);
     const res = await agent.get(`/api/uploads/${sixtyFour}/raw`);
     expect(res.status).toBe(404);
+  });
+
+  it('GET /api/uploads/:hash/raw serves a live sibling when another statement sharing the hash is deleted', async () => {
+    const db = getDb();
+    const hash = 'b'.repeat(64);
+    const pdfPath = join(dataDir, 'sibling.pdf');
+    await writeFile(pdfPath, Buffer.from('%PDF-1.4\n% sibling test\n'));
+    // Two statements reference the same content-addressed PDF: one purged, one
+    // live. Insert order is irrelevant — the handler must prefer the live one.
+    await db.insert(statements).values([
+      {
+        accountId,
+        sourcePdfHash: hash,
+        sourcePdfPath: pdfPath,
+        sourcePdfPages: 1,
+        status: 'review',
+        sourcePdfDeleted: true,
+      },
+      {
+        accountId,
+        sourcePdfHash: hash,
+        sourcePdfPath: pdfPath,
+        sourcePdfPages: 1,
+        status: 'review',
+        sourcePdfDeleted: false,
+      },
+    ]);
+    const ok = await agent.get(`/api/uploads/${hash}/raw`);
+    expect(ok.status).toBe(200);
+    expect(ok.headers['content-type']).toContain('application/pdf');
+
+    // Once every referencing statement is purged, it's a clean 410 PDF_DELETED.
+    await getPool().query(
+      'UPDATE vibetc.statements SET source_pdf_deleted = true WHERE source_pdf_hash = $1',
+      [hash],
+    );
+    const gone = await agent.get(`/api/uploads/${hash}/raw`);
+    expect(gone.status).toBe(410);
+    expect(gone.body.code).toBe('PDF_DELETED');
   });
 });
