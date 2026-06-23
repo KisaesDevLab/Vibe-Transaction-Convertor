@@ -6,6 +6,7 @@ export * from './prompts/enrich.js';
 export * from './prompts/check-resolve.js';
 export * from './prompts/ocr-transcribe.js';
 export * from './exemplars.js';
+export * from './glm-ocr-client.js';
 export * from './llm-client.js';
 export * from './multi-account-detector.js';
 export * from './image-batch.js';

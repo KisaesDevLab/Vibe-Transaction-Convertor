@@ -13,6 +13,7 @@ import {
   type UserPromptOptions,
 } from './prompts/extract.js';
 import { exemplarsAsMessages } from './exemplars.js';
+import { ocrPdfPages, type GlmOcrClientOptions } from './glm-ocr-client.js';
 
 // Phase 12 item 11: prompt budget. The Vibe Gateway hosts Qwen3-8B with a
 // 32K context, which after exemplars + system prompt + completion reserve
@@ -375,6 +376,12 @@ export interface OcrToMarkdownResult {
   telemetry: ExtractCallTelemetry;
 }
 
+export interface OcrToTextResult {
+  text: string;
+  ms: number;
+  model: string;
+}
+
 export interface LlmProvider {
   readonly id: 'local' | 'anthropic';
   extract(markdown: string, opts?: ExtractOptions | object): Promise<ExtractResult>;
@@ -391,6 +398,10 @@ export interface LlmProvider {
   // markdown then goes through the normal text extract() path. Local provider
   // only; page images never egress, so AnthropicProvider throws.
   ocrToMarkdown(opts: OcrToMarkdownOptions): Promise<OcrToMarkdownResult>;
+  // OCR image(s) to plain text (no schema), for the check-payee primary path
+  // (GLM-OCR transcribe → text-parse, ADR-025). Local provider only — Anthropic
+  // throws (page images never egress).
+  ocrImagesToText(images: NonNullable<CompleteOptions['images']>): Promise<OcrToTextResult>;
   health(): Promise<{ ok: boolean; detail?: string }>;
 }
 
@@ -433,6 +444,17 @@ export interface LocalGatewayProviderOptions {
   // grammar reliably trips on a firm's OCR text. Resolved from the admin setting
   // / LLM_LOCAL_STRUCTURED_OUTPUT by the factory.
   structuredOutputMode?: 'grammar' | 'json_object' | undefined;
+  // GLM-OCR stage-1 engine (ADR-025). Scanned statement pages are transcribed
+  // by a LOCAL GLM-OCR llama-server (OpenAI-compatible vision) instead of an
+  // Ollama vision model — GLM-OCR is a purpose-built OCR engine. Each falls back
+  // to its GLM_OCR_* env in the GLM client. baseUrl is required for the OCR
+  // path; when unset, ocrToMarkdown throws (no MiniCPM fallback — hard-removed).
+  glmOcrUrl?: string | undefined;
+  glmOcrModel?: string | undefined;
+  glmOcrPrompt?: string | undefined;
+  glmOcrTimeoutMs?: number | undefined;
+  glmOcrConcurrency?: number | undefined;
+  glmOcrApiKey?: string | undefined;
   fetcher?: typeof fetch | undefined;
 }
 
@@ -444,11 +466,12 @@ export interface LocalGatewayProviderOptions {
 // processed locally and never egress (ADR-023). See myBooks
 // `services/ai-providers/ollama.provider.ts` for the reference request shapes.
 
-// Default OCR/vision model — a dedicated multimodal model, NOT the text model.
-// (Falling back to the text tag silently broke OCR: page images went to a
-// text-only model and timed out.) Operators override via OLLAMA_VISION_MODEL /
-// the admin vision-model picker.
-export const DEFAULT_VISION_MODEL = 'minicpm-v4.5:latest';
+// Default vision model — used ONLY for the check-payee fallback now (ADR-025):
+// scanned statement OCR runs on GLM-OCR, not an Ollama vision model. This is a
+// capable multimodal model that reads cancelled-check images when the GLM-OCR
+// transcribe→text-parse primary path comes up empty. Operators override via
+// OLLAMA_VISION_MODEL / the admin vision-model picker.
+export const DEFAULT_VISION_MODEL = 'qwen3-vl:30b';
 
 // Default text-extraction model (non-thinking instruct — see ADR-024). Exported
 // so the API layer can label "which model is in use" during processing without
@@ -476,6 +499,9 @@ export class LocalGatewayProvider implements LlmProvider {
   private visionThink: boolean | undefined;
   // See LocalGatewayProviderOptions.structuredOutputMode.
   private structuredOutputMode: 'grammar' | 'json_object';
+  // GLM-OCR client options (ADR-025) — built once from the provider opts and
+  // passed to ocrPdfPages on every OCR call. baseUrl unset ⇒ the OCR path throws.
+  private glmOcr: GlmOcrClientOptions;
   private fetcher: typeof fetch;
 
   constructor(opts: LocalGatewayProviderOptions = {}) {
@@ -514,6 +540,19 @@ export class LocalGatewayProvider implements LlmProvider {
     this.structuredOutputMode =
       opts.structuredOutputMode ??
       (process.env.LLM_LOCAL_STRUCTURED_OUTPUT === 'json_object' ? 'json_object' : 'grammar');
+    // GLM-OCR config (ADR-025). Each field falls back to its GLM_OCR_* env
+    // inside the GLM client's resolveConfig; we only forward operator overrides
+    // and the shared fetcher (so tests can stub it). An undefined value here
+    // lets the env default win.
+    this.glmOcr = {
+      ...(opts.glmOcrUrl ? { baseUrl: opts.glmOcrUrl } : {}),
+      ...(opts.glmOcrModel ? { model: opts.glmOcrModel } : {}),
+      ...(opts.glmOcrPrompt ? { prompt: opts.glmOcrPrompt } : {}),
+      ...(opts.glmOcrTimeoutMs ? { timeoutMs: opts.glmOcrTimeoutMs } : {}),
+      ...(opts.glmOcrConcurrency ? { concurrency: opts.glmOcrConcurrency } : {}),
+      ...(opts.glmOcrApiKey ? { apiKey: opts.glmOcrApiKey } : {}),
+      fetcher: opts.fetcher ?? fetch,
+    };
     this.fetcher = opts.fetcher ?? fetch;
   }
 
@@ -962,33 +1001,59 @@ export class LocalGatewayProvider implements LlmProvider {
     };
   }
 
-  // OCR-only: transcribe page image(s) to faithful markdown TEXT. No `format`
-  // is sent (free text) — MiniCPM-V is a strong reader but an unreliable
-  // structured extractor, so the markdown then goes through the reliable text
-  // extract() path (stage 2). Page images are processed locally (ADR-023).
+  // Model label for the GLM-OCR engine (ADR-025), for telemetry / the live
+  // processing stepper's OCR phase.
+  private get glmModelLabel(): string {
+    return this.glmOcr.model ?? process.env.GLM_OCR_MODEL ?? 'glm-ocr';
+  }
+
+  // OCR-only: transcribe page image(s) to faithful markdown TEXT via the LOCAL
+  // GLM-OCR engine (ADR-025) — a purpose-built OCR llama-server, NOT an Ollama
+  // vision model (MiniCPM-V was hard-removed). The markdown then goes through
+  // the reliable text extract() path (stage 2). Page images are processed
+  // locally and never egress. On ANY GLM-OCR error this rejects — there is no
+  // MiniCPM fallback; the worker surfaces the failure.
   async ocrToMarkdown(opts: OcrToMarkdownOptions): Promise<OcrToMarkdownResult> {
-    if (!this.baseUrl) throw new Error('Ollama base URL not set');
     if (!opts.images || opts.images.length === 0) {
       throw new Error('ocrToMarkdown requires at least one image');
     }
-    const call = await this.callOllamaVision(
-      opts.images,
-      undefined,
-      opts.systemPrompt,
-      opts.userPrompt,
-      false, // free text, no JSON schema
+    const start = Date.now();
+    const ocr = await ocrPdfPages(
+      opts.images.map((i) => i.data),
+      this.glmOcr,
     );
+    // Strip an outer ``` / ```json fence per page if GLM wrapped its output.
+    const markdown = ocr.pages.map((p) => stripCodeFences(p.markdown.trim()).trim()).join('\n\n');
     return {
-      // Strip an outer ``` / ```json fence if the model wrapped its output.
-      markdown: stripCodeFences(call.content.trim()).trim(),
+      markdown,
       telemetry: {
-        inputTokens: call.inputTokens,
-        outputTokens: call.outputTokens,
-        ms: call.ms,
-        model: this.visionModelId,
-        costMicros: 0n, // local hardware
+        // llama-server OCR does not report token usage; cost is 0 (local hw).
+        inputTokens: 0,
+        outputTokens: 0,
+        ms: Date.now() - start,
+        model: this.glmModelLabel,
+        costMicros: 0n,
       },
     };
+  }
+
+  // OCR image(s) to plain text via GLM-OCR — the check-payee PRIMARY path
+  // (transcribe → text-parse, ADR-025). Concatenates per-page text. Rejects on
+  // any GLM-OCR error so the resolver can fall back to the vision model.
+  async ocrImagesToText(images: NonNullable<CompleteOptions['images']>): Promise<OcrToTextResult> {
+    if (!images || images.length === 0) {
+      throw new Error('ocrImagesToText requires at least one image');
+    }
+    const start = Date.now();
+    const ocr = await ocrPdfPages(
+      images.map((i) => i.data),
+      this.glmOcr,
+    );
+    const text = ocr.pages
+      .map((p) => p.markdown.trim())
+      .filter((t) => t.length > 0)
+      .join('\n\n');
+    return { text, ms: Date.now() - start, model: this.glmModelLabel };
   }
 }
 
@@ -1451,7 +1516,13 @@ export class AnthropicProvider implements LlmProvider {
 
   async ocrToMarkdown(_opts: OcrToMarkdownOptions): Promise<OcrToMarkdownResult> {
     throw new Error(
-      'AnthropicProvider.ocrToMarkdown() is text-only — OCR runs on the local Ollama provider (page images never egress)',
+      'AnthropicProvider.ocrToMarkdown() is text-only — OCR runs on the local GLM-OCR engine (page images never egress)',
+    );
+  }
+
+  async ocrImagesToText(_images: NonNullable<CompleteOptions['images']>): Promise<OcrToTextResult> {
+    throw new Error(
+      'AnthropicProvider.ocrImagesToText() is text-only — OCR runs on the local GLM-OCR engine (page images never egress)',
     );
   }
 }

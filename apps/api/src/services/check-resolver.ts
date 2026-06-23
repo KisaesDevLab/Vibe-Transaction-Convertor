@@ -1,16 +1,19 @@
 // Check-payee resolution service. Given a statement, finds every
 // transaction whose check_number was extracted, rasterizes the source
-// PDF pages, reads any cancelled-check images on the LOCAL Ollama Qwen-VL
-// vision model, and writes the resolved payee onto matching transactions'
-// `payee` column (the OFX <NAME> source). Page images are processed
-// locally and never egress (ADR-023).
+// PDF pages, reads any cancelled-check images, and writes the resolved payee
+// onto matching transactions' `payee` column (the OFX <NAME> source). Page
+// images are processed locally and never egress (ADR-023/ADR-025).
+//
+// Reading path (ADR-025): PRIMARY = local GLM-OCR transcribes the page, then
+// the local text model parses the structured check fields from that text.
+// FALLBACK = the local vision model (qwen3-vl:30b) reads the images directly
+// when GLM-OCR fails or the primary finds no payees.
 //
 // Why a separate service from enrichment.ts: the enrichment pipeline is
 // text-only (cleansed descriptions + categories through a text LLM call).
-// Check resolution needs page IMAGES — it runs through the local provider's
-// completeWithImages() vision path. Text-layer statements are the key
+// Check resolution needs page IMAGES. Text-layer statements are the key
 // beneficiary: their main extraction never sees check images, so this
-// rasterize→vision pass is the only way to read those payees.
+// rasterize→read pass is the only way to read those payees.
 
 import { and, eq, isNotNull, sql } from 'drizzle-orm';
 
@@ -86,15 +89,15 @@ export const resolveCheckPayees = async (db: Db, stmtId: string): Promise<CheckR
     throw new NoCheckTransactionsError();
   }
 
-  // Local vision provider. Check reading runs on the on-appliance Ollama
-  // Qwen-VL model (completeWithImages); page images never egress (ADR-023).
+  // Local provider. Check reading runs on-appliance: GLM-OCR (primary) +
+  // Ollama qwen3-vl (fallback); page images never egress (ADR-025).
   let provider;
   try {
     provider = await buildProviderForId(db, 'local');
   } catch (err) {
     throw new CheckResolveUnavailableError(
-      `local vision provider not available: ${(err as Error).message}. ` +
-        'Ensure Ollama is reachable with a vision (-VL) model pulled (see /admin/llm-provider).',
+      `local provider not available: ${(err as Error).message}. ` +
+        'Ensure GLM-OCR (GLM_OCR_URL) and Ollama (with qwen3-vl pulled) are reachable (see /admin/llm-provider).',
     );
   }
 
@@ -118,31 +121,90 @@ export const resolveCheckPayees = async (db: Db, stmtId: string): Promise<CheckR
   // A check appears on a single page, so concatenating per-batch results is
   // correct. One bad/illegible batch must not sink the whole run — collect
   // what parses and log the rest.
+  //
+  // PRIMARY (ADR-025): GLM-OCR transcribes the check region, then the local
+  // text model parses the structured check fields from that transcription —
+  // GLM-OCR is a transcription engine, not a JSON-adherent extractor.
+  // FALLBACK: when GLM-OCR fails (server down / empty transcription) or the
+  // primary finds no usable payee despite candidate check rows, re-read the
+  // images directly on the vision model (qwen3-vl:30b). Both paths are local.
   const startedAt = Date.now();
   const batches = batchPageImages(images);
+  const hasUsablePayee = (checks: schemas.checkResolve.CheckResolveResult['checks']): boolean =>
+    checks.some((c) => typeof c.payee === 'string' && c.payee.trim().length > 0);
+
   const extracted: schemas.checkResolve.CheckResolveResult['checks'] = [];
   let costMicros = 0n;
   let model: string | null = null;
+  let primaryFailedHard = false;
+
   for (const batch of batches) {
-    const result = await provider.completeWithImages({
-      systemPrompt: CHECK_RESOLVE_SYSTEM_PROMPT,
-      userPrompt: CHECK_RESOLVE_USER_PROMPT,
-      schema: CHECK_RESOLVE_JSON_SCHEMA,
-      schemaName: 'emit_checks',
-      maxOutputTokens: 4096,
-      images: batch.images,
-    });
-    costMicros += result.telemetry.costMicros;
-    model = result.telemetry.model;
-    const parsed = schemas.checkResolve.CheckResolveResult.safeParse(result.data);
-    if (!parsed.success) {
+    try {
+      const ocr = await provider.ocrImagesToText(batch.images);
+      if (ocr.text.trim().length === 0) {
+        // GLM-OCR returned nothing for a batch with check images present —
+        // treat as a hard miss and let the vision fallback re-read everything.
+        primaryFailedHard = true;
+        break;
+      }
+      const result = await provider.complete({
+        systemPrompt: CHECK_RESOLVE_SYSTEM_PROMPT,
+        userPrompt: `${CHECK_RESOLVE_USER_PROMPT}\n\nTranscribed check text:\n${ocr.text}`,
+        schema: CHECK_RESOLVE_JSON_SCHEMA,
+        schemaName: 'emit_checks',
+        maxOutputTokens: 4096,
+      });
+      costMicros += result.telemetry.costMicros;
+      model = `${ocr.model}+${result.telemetry.model}`;
+      const parsed = schemas.checkResolve.CheckResolveResult.safeParse(result.data);
+      if (!parsed.success) {
+        logger.warn(
+          { stmtId, startPage: batch.startPage, issues: parsed.error.issues.slice(0, 3) },
+          'check-resolve (GLM) batch did not match schema; skipping',
+        );
+        continue;
+      }
+      extracted.push(...parsed.data.checks);
+    } catch (err) {
       logger.warn(
-        { stmtId, startPage: batch.startPage, issues: parsed.error.issues.slice(0, 3) },
-        'check-resolve batch did not match schema; skipping',
+        { stmtId, startPage: batch.startPage, err: (err as Error).message },
+        'GLM-OCR check transcribe/parse failed — falling back to the vision model',
       );
-      continue;
+      primaryFailedHard = true;
+      break;
     }
-    extracted.push(...parsed.data.checks);
+  }
+
+  if (primaryFailedHard || (!hasUsablePayee(extracted) && candidates.length > 0)) {
+    logger.info(
+      { stmtId, reason: primaryFailedHard ? 'glm-error' : 'no-payees', batches: batches.length },
+      'check-resolve falling back to vision model (qwen3-vl)',
+    );
+    extracted.length = 0;
+    costMicros = 0n;
+    let fallbackModel: string | null = null;
+    for (const batch of batches) {
+      const result = await provider.completeWithImages({
+        systemPrompt: CHECK_RESOLVE_SYSTEM_PROMPT,
+        userPrompt: CHECK_RESOLVE_USER_PROMPT,
+        schema: CHECK_RESOLVE_JSON_SCHEMA,
+        schemaName: 'emit_checks',
+        maxOutputTokens: 4096,
+        images: batch.images,
+      });
+      costMicros += result.telemetry.costMicros;
+      fallbackModel = result.telemetry.model;
+      const parsed = schemas.checkResolve.CheckResolveResult.safeParse(result.data);
+      if (!parsed.success) {
+        logger.warn(
+          { stmtId, startPage: batch.startPage, issues: parsed.error.issues.slice(0, 3) },
+          'check-resolve (vision fallback) batch did not match schema; skipping',
+        );
+        continue;
+      }
+      extracted.push(...parsed.data.checks);
+    }
+    model = fallbackModel;
   }
   const llmExtractedCount = extracted.length;
   logger.info(

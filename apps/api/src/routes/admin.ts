@@ -32,7 +32,8 @@ import {
   resolveProviderPolicy,
   type LlmProviderPolicy,
 } from '../services/llm-provider.js';
-import { listAiSettings, setAiSetting } from '../services/ai-settings.js';
+import { listAiSettings, resolveAiSettings, setAiSetting } from '../services/ai-settings.js';
+import { probeGlmOcrHealth } from '@vibe-tx-converter/extractor';
 import {
   enrichmentPromptStatus,
   enrichmentToggleStatus,
@@ -73,14 +74,16 @@ const OLLAMA_MODEL_KEY = 'llm.local.model';
 const OLLAMA_VISION_MODEL_KEY = 'llm.local.vision_model';
 const DEFAULT_OLLAMA_BASE_URL = 'http://localhost:11434';
 const DEFAULT_OLLAMA_MODEL = 'qwen3.5:35b-a3b';
-const DEFAULT_OLLAMA_VISION_MODEL = 'minicpm-v4.5:latest';
-// Suggested vision/OCR tags for the admin picker; MiniCPM-V 4.5 first. The
-// field stays free-text so any pulled tag works.
+// Vision model = the check-payee FALLBACK now (ADR-025): scanned statement OCR
+// runs on GLM-OCR, not Ollama. qwen3-vl:30b is the default check-payee reader.
+const DEFAULT_OLLAMA_VISION_MODEL = 'qwen3-vl:30b';
+// Suggested vision tags for the admin picker (check-payee fallback); the field
+// stays free-text so any pulled tag works.
 const CURATED_VISION_MODELS = [
-  'minicpm-v4.5:latest',
+  'qwen3-vl:30b',
   'qwen2.5vl:7b',
+  'minicpm-v4.5:latest',
   'llama3.2-vision',
-  'llava',
 ] as const;
 
 // Read a single plaintext system_setting value, or null when unset.
@@ -216,6 +219,15 @@ export const adminRouter = (): Router => {
         // Operator-tunable AI knobs (vision performance, OCR fidelity, OCR
         // safety net) — each with its effective value + source for the UI.
         aiSettings: await listAiSettings(db),
+        // GLM-OCR stage-1 engine (ADR-025): resolved config + a live health
+        // probe so the admin page shows whether scanned OCR is wired up.
+        glmOcr: await (async () => {
+          const ai = await resolveAiSettings(db);
+          const health = ai.glmOcrUrl
+            ? await probeGlmOcrHealth({ baseUrl: ai.glmOcrUrl })
+            : { ok: false, detail: 'GLM_OCR_URL not set — scanned OCR is unavailable' };
+          return { url: ai.glmOcrUrl || null, model: ai.glmOcrModel, health };
+        })(),
       });
     } catch (err) {
       next(err);
@@ -641,6 +653,40 @@ export const adminRouter = (): Router => {
       });
     } catch (err) {
       next(err);
+    }
+  });
+
+  // Live local-model catalog. Hits Ollama's /api/tags (the models actually
+  // pulled on the host) so the admin model pickers can offer a dropdown of
+  // what's installed. Free-text entry still works for any tag not yet listed.
+  // Returns {models:[],ok:false} (not a 500) when Ollama is unreachable.
+  router.get('/llm-provider/local-models', async (_req, res) => {
+    const baseUrl = (
+      (await readSingleSetting(db, OLLAMA_BASE_URL_KEY)) ??
+      process.env.OLLAMA_BASE_URL ??
+      process.env.LLM_GATEWAY_URL ??
+      DEFAULT_OLLAMA_BASE_URL
+    )
+      .replace(/\/v1\/?$/, '')
+      .replace(/\/$/, '');
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 2500);
+    try {
+      const probe = await fetch(`${baseUrl}/api/tags`, { signal: controller.signal });
+      if (!probe.ok) {
+        res.json({ models: [], ok: false, detail: `HTTP ${probe.status}` });
+        return;
+      }
+      const body = (await probe.json()) as { models?: Array<{ name?: string }> };
+      const models = (body.models ?? [])
+        .map((m) => m.name ?? '')
+        .filter((n) => n.length > 0)
+        .sort();
+      res.json({ models, ok: true });
+    } catch (err) {
+      res.json({ models: [], ok: false, detail: (err as Error).message });
+    } finally {
+      clearTimeout(timer);
     }
   });
 

@@ -64,6 +64,10 @@ live('ai-settings (live Postgres)', () => {
     expect(s.reviewConfidence).toBeCloseTo(0.7);
     expect(s.checkPayeeAuto).toBe(true);
     expect(s.localStructuredOutput).toBe('grammar');
+    // GLM-OCR engine defaults (ADR-025).
+    expect(s.glmOcrModel).toBe('GLM-OCR');
+    expect(s.glmOcrTimeoutMs).toBe(120_000);
+    expect(s.glmOcrConcurrency).toBe(2);
   });
 
   it('localStructuredOutput: accepts json_object, rejects anything else', async () => {

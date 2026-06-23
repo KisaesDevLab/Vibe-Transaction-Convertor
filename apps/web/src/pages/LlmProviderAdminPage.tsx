@@ -82,6 +82,12 @@ interface ProviderStatus {
   // Operator-tunable AI knobs (vision performance / OCR fidelity / OCR safety
   // net), rendered generically by `kind` and grouped.
   aiSettings: AiSetting[];
+  // GLM-OCR stage-1 engine (ADR-025): resolved config + live health probe.
+  glmOcr: {
+    url: string | null;
+    model: string;
+    health: { ok: boolean; status?: number; detail?: string };
+  };
 }
 
 interface AiSetting {
@@ -156,6 +162,15 @@ export function LlmProviderAdminPage() {
   const cost = useQuery({
     queryKey: ['admin', 'llm-cost'],
     queryFn: () => api.get<CostSummary>('/api/admin/llm-provider/cost-summary'),
+  });
+  // Live catalog of models installed on the Ollama host — drives the model
+  // dropdowns. {ok:false} (empty list) when Ollama is unreachable; the fields
+  // stay free-text either way.
+  const localModels = useQuery({
+    queryKey: ['admin', 'local-models'],
+    queryFn: () =>
+      api.get<{ models: string[]; ok: boolean }>('/api/admin/llm-provider/local-models'),
+    staleTime: 60_000,
   });
 
   const switchPolicy = useMutation({
@@ -495,6 +510,7 @@ export function LlmProviderAdminPage() {
           model={provider.data.ollamaModel}
           visionModel={provider.data.ollamaVisionModel}
           visionModels={provider.data.curatedVisionModels}
+          localModels={localModels.data?.models ?? []}
           disabled={
             setOllamaBaseUrl.isPending || setOllamaModel.isPending || setOllamaVisionModel.isPending
           }
@@ -503,6 +519,8 @@ export function LlmProviderAdminPage() {
           onSaveVisionModel={onSaveOllama('visionModel')}
         />
       ) : null}
+
+      {provider.data ? <GlmOcrSection glmOcr={provider.data.glmOcr} /> : null}
 
       {provider.data ? (
         <AiTuningSection
@@ -1079,6 +1097,7 @@ function OllamaField({
   disabled,
   onSave,
   suggestions,
+  options,
 }: {
   label: string;
   value: string;
@@ -1087,16 +1106,41 @@ function OllamaField({
   onSave: (value: string) => Promise<void>;
   // Optional autocomplete list (e.g. curated vision models). Stays free-text.
   suggestions?: readonly string[];
+  // Live catalog of installed models (from Ollama /api/tags). When present,
+  // renders a dropdown of what's actually pulled; the text input remains for a
+  // custom tag.
+  options?: readonly string[];
 }) {
   const [val, setVal] = useState(value);
   useEffect(() => setVal(value), [value]);
   const listId = suggestions
     ? `ollama-field-${label.replace(/\W+/g, '-').toLowerCase()}`
     : undefined;
+  const hasOptions = options && options.length > 0;
   return (
     <label className="block text-xs text-ink-muted">
       {label}
       <div className="mt-1 flex flex-wrap items-center gap-2">
+        {hasOptions ? (
+          <select
+            value={options.includes(val) ? val : ''}
+            disabled={disabled}
+            onChange={(e) => {
+              if (e.target.value) setVal(e.target.value);
+            }}
+            title="Installed models (Ollama /api/tags)"
+            className="rounded-md border border-surface-muted px-2 py-1.5 text-sm"
+          >
+            <option value="">
+              {val && !options.includes(val) ? `custom: ${val}` : 'Installed…'}
+            </option>
+            {options.map((m) => (
+              <option key={m} value={m}>
+                {m}
+              </option>
+            ))}
+          </select>
+        ) : null}
         <input
           type="text"
           placeholder={placeholder}
@@ -1253,12 +1297,62 @@ function AiSettingRow({
 
 // Local Ollama (default provider): base URL + text/vision model tags. OCR
 // (scanned pages) and text extraction both run here; page images never egress.
+function GlmOcrSection({
+  glmOcr,
+}: {
+  glmOcr: {
+    url: string | null;
+    model: string;
+    health: { ok: boolean; status?: number; detail?: string };
+  };
+}) {
+  const { url, model, health } = glmOcr;
+  return (
+    <section className="rounded-lg border border-surface-muted bg-white p-4">
+      <div className="flex items-center justify-between">
+        <h2 className="text-base font-medium">GLM-OCR (scanned-page OCR)</h2>
+        <span
+          className={`inline-flex items-center gap-1 rounded px-2 py-0.5 text-xs font-medium ${
+            !url
+              ? 'bg-surface-muted text-ink-muted'
+              : health.ok
+                ? 'bg-emerald-50 text-emerald-800'
+                : 'bg-red-50 text-red-800'
+          }`}
+        >
+          {!url ? 'not configured' : health.ok ? 'healthy' : 'unreachable'}
+        </span>
+      </div>
+      <p className="mt-1 text-xs text-ink-subtle">
+        Local GLM-OCR llama-server transcribes scanned statement pages (and cancelled checks) on the
+        appliance — page images never egress. Configure the URL via the{' '}
+        <code className="rounded bg-surface-subtle px-1">GLM_OCR_URL</code> env or the “Text
+        extraction / OCR” settings below. With GLM-OCR down, scanned extraction fails fast (no
+        fallback).
+      </p>
+      <dl className="mt-3 grid grid-cols-[max-content_1fr] gap-x-4 gap-y-1 text-xs">
+        <dt className="text-ink-muted">URL</dt>
+        <dd className="font-mono">{url ?? <span className="text-ink-subtle">unset</span>}</dd>
+        <dt className="text-ink-muted">Model</dt>
+        <dd className="font-mono">{model}</dd>
+        {!health.ok && health.detail ? (
+          <>
+            <dt className="text-ink-muted">Detail</dt>
+            <dd className="text-danger">{health.detail}</dd>
+          </>
+        ) : null}
+      </dl>
+    </section>
+  );
+}
+
 function OllamaSection({
   baseUrl,
   model,
   visionModel,
   disabled,
   visionModels,
+  localModels,
   onSaveBaseUrl,
   onSaveModel,
   onSaveVisionModel,
@@ -1268,6 +1362,8 @@ function OllamaSection({
   visionModel: string;
   disabled: boolean;
   visionModels: string[];
+  // Live list of models installed on the Ollama host (empty when unreachable).
+  localModels: string[];
   onSaveBaseUrl: (value: string) => Promise<void>;
   onSaveModel: (value: string) => Promise<void>;
   onSaveVisionModel: (value: string) => Promise<void>;
@@ -1276,11 +1372,12 @@ function OllamaSection({
     <section className="rounded-lg border border-surface-muted bg-white p-4">
       <h2 className="text-base font-medium">Local Ollama (default provider)</h2>
       <p className="mt-1 text-xs text-ink-subtle">
-        Scanned PDFs are OCR’d AND extracted in one call by the vision model; text-layer PDFs use
-        the text model. Reading check payees off the images also uses the vision model. Page images
-        are processed locally and never egress. Pull the tags on the Ollama host first (e.g.{' '}
+        The text model extracts transactions from statement markdown (text-layer pages, or the
+        GLM-OCR transcription of scanned pages). The vision model is the{' '}
+        <strong>check-payee fallback</strong> only — scanned-page OCR runs on GLM-OCR (below). Page
+        images are processed locally and never egress. Pull the tags on the Ollama host first (e.g.{' '}
         <code className="rounded bg-surface-subtle px-1">
-          ollama pull {visionModels[0] ?? 'minicpm-v4.5:latest'}
+          ollama pull {visionModels[0] ?? 'qwen3-vl:30b'}
         </code>
         ). Blank = use the env / default.
       </p>
@@ -1295,17 +1392,19 @@ function OllamaSection({
         <OllamaField
           label="Text model"
           value={model}
-          placeholder="qwen3.5:35b-a3b"
+          placeholder="qwen2.5:32b-instruct"
           disabled={disabled}
           onSave={onSaveModel}
+          options={localModels}
         />
         <OllamaField
-          label="Vision / OCR model (scanned PDFs + check payees)"
+          label="Check-payee fallback vision model"
           value={visionModel}
-          placeholder={visionModels[0] ?? 'minicpm-v4.5:latest'}
+          placeholder={visionModels[0] ?? 'qwen3-vl:30b'}
           disabled={disabled}
           onSave={onSaveVisionModel}
           suggestions={visionModels}
+          options={localModels}
         />
       </div>
     </section>

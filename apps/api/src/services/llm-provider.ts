@@ -23,6 +23,8 @@ const KEY_LLM_MAX_TOKENS = 'llm.max_tokens';
 const KEY_OLLAMA_BASE_URL = 'engine.llm_gateway.url';
 const KEY_OLLAMA_MODEL = 'llm.local.model';
 const KEY_OLLAMA_VISION_MODEL = 'llm.local.vision_model';
+// GLM-OCR stage-1 model id (ADR-025) — labels the stepper's OCR phase.
+const KEY_GLM_OCR_MODEL = 'ocr.glm.model';
 
 // 180s default: scanned statements now extract on the local text model
 // (qwen3.5, ~24 GB) in stage 2, whose first (cold) load can take ~2 min before
@@ -76,6 +78,15 @@ export const resolveModelLabelForProvider = async (
   }
   const row = await readSetting(db, KEY_OLLAMA_MODEL);
   return row?.valuePlaintext ?? process.env.LLM_MODEL_ID ?? DEFAULT_TEXT_MODEL;
+};
+
+// OCR-engine label for the live processing UI (DB → env → default), resolved
+// without building the provider. Stage-1 OCR runs on GLM-OCR now (ADR-025), so
+// the stepper's `ocr` phase shows the GLM-OCR model — the text model takes over
+// at the `extracting` phase via resolveModelLabelForProvider.
+export const resolveVisionModelLabel = async (db: Db): Promise<string> => {
+  const row = await readSetting(db, KEY_GLM_OCR_MODEL);
+  return row?.valuePlaintext ?? process.env.GLM_OCR_MODEL ?? 'glm-ocr';
 };
 
 const DIRECT_ANTHROPIC = 'https://api.anthropic.com';
@@ -183,6 +194,13 @@ const constructLocal = async (db: Db): Promise<LlmProvider> => {
     keepAlive: ai.keepAlive,
     ...(ai.numCtx != null ? { numCtx: ai.numCtx } : {}),
     ...(ai.visionThink != null ? { visionThink: ai.visionThink } : {}),
+    // GLM-OCR stage-1 engine (ADR-025). URL/model/timeout/concurrency resolved
+    // DB→env→default; an empty URL leaves it to the GLM_OCR_URL env (and the
+    // OCR path throws if neither is set).
+    ...(ai.glmOcrUrl ? { glmOcrUrl: ai.glmOcrUrl } : {}),
+    ...(ai.glmOcrModel ? { glmOcrModel: ai.glmOcrModel } : {}),
+    glmOcrTimeoutMs: ai.glmOcrTimeoutMs,
+    glmOcrConcurrency: ai.glmOcrConcurrency,
   });
 };
 

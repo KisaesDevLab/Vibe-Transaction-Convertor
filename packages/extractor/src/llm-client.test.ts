@@ -9,6 +9,7 @@ import {
   parseExtractionResponse,
   sanitizeSchemaForOllama,
 } from './llm-client.js';
+import { clearOcrCache, resetEngineVersionCache, resetOcrCircuit } from './glm-ocr-client.js';
 
 describe('sanitizeSchemaForOllama', () => {
   it('strips `pattern` at every depth while preserving all other keywords', () => {
@@ -495,8 +496,8 @@ describe('LocalGatewayProvider', () => {
     ).rejects.toThrow(/at least one image/);
   });
 
-  it('defaults the vision model to MiniCPM-V (never the text model) when unset', async () => {
-    expect(DEFAULT_VISION_MODEL).toBe('minicpm-v4.5:latest');
+  it('defaults the vision model to qwen3-vl (check-payee fallback; never the text model) when unset', async () => {
+    expect(DEFAULT_VISION_MODEL).toBe('qwen3-vl:30b');
     const prev = process.env.OLLAMA_VISION_MODEL;
     delete process.env.OLLAMA_VISION_MODEL;
     let body: Record<string, unknown> = {};
@@ -532,23 +533,79 @@ describe('LocalGatewayProvider', () => {
     expect(body.options?.num_predict).toBe(4096);
   });
 
-  it('ocrToMarkdown transcribes images to markdown with NO format/schema', async () => {
-    let body: { format?: unknown; messages?: Array<{ images?: unknown[] }> } = {};
+  it('ocrToMarkdown transcribes images via the local GLM-OCR engine (ADR-025)', async () => {
+    clearOcrCache();
+    resetOcrCircuit();
+    resetEngineVersionCache();
+    let url = '';
+    let body: { model?: string } = {};
     const provider = new LocalGatewayProvider({
       baseUrl: 'http://gw.test',
-      fetcher: async (_url, init) => {
+      glmOcrUrl: 'http://glm.test:8090',
+      glmOcrModel: 'glm-ocr',
+      fetcher: async (u, init) => {
+        url = String(u);
+        if (url.endsWith('/version')) return new Response('{}', { status: 404 });
         body = JSON.parse((init as RequestInit).body as string) as typeof body;
-        return okJsonResponse({ message: { content: '```\n# Page 1\n\nROW ONE\n```' } });
+        return okJsonResponse({
+          choices: [
+            { message: { content: '```\n# Page 1\n\nROW ONE\n```' }, finish_reason: 'stop' },
+          ],
+        });
       },
     });
     const r = await provider.ocrToMarkdown({
-      images: [{ data: Buffer.from('img'), mediaType: 'image/jpeg' }],
+      images: [{ data: Buffer.from('glm-img-1'), mediaType: 'image/jpeg' }],
       systemPrompt: 's',
       userPrompt: 'u',
     });
-    expect(body.format).toBeUndefined(); // free text — structured output NOT requested
+    expect(body.model).toBe('glm-ocr'); // GLM-OCR, not the Ollama vision model
     expect(r.markdown).toBe('# Page 1\n\nROW ONE'); // outer code fence stripped
+    expect(r.telemetry.model).toBe('glm-ocr');
     expect(r.telemetry.costMicros).toBe(0n);
+  });
+
+  it('ocrToMarkdown rejects when GLM-OCR errors (no MiniCPM fallback — hard-removed)', async () => {
+    clearOcrCache();
+    resetOcrCircuit();
+    resetEngineVersionCache();
+    const provider = new LocalGatewayProvider({
+      baseUrl: 'http://gw.test',
+      glmOcrUrl: 'http://glm.test:8090',
+      fetcher: async (u) => {
+        if (String(u).endsWith('/version')) return new Response('{}', { status: 404 });
+        return new Response('boom', { status: 500 });
+      },
+    });
+    await expect(
+      provider.ocrToMarkdown({
+        images: [{ data: Buffer.from('glm-img-err'), mediaType: 'image/jpeg' }],
+        systemPrompt: 's',
+        userPrompt: 'u',
+      }),
+    ).rejects.toThrow(/GLM-OCR/);
+  });
+
+  it('ocrImagesToText concatenates GLM-OCR page text (check-payee primary path)', async () => {
+    clearOcrCache();
+    resetOcrCircuit();
+    resetEngineVersionCache();
+    const provider = new LocalGatewayProvider({
+      baseUrl: 'http://gw.test',
+      glmOcrUrl: 'http://glm.test:8090',
+      glmOcrModel: 'glm-ocr',
+      fetcher: async (u) => {
+        if (String(u).endsWith('/version')) return new Response('{}', { status: 404 });
+        return okJsonResponse({
+          choices: [{ message: { content: 'Pay to the order of ACME' }, finish_reason: 'stop' }],
+        });
+      },
+    });
+    const r = await provider.ocrImagesToText([
+      { data: Buffer.from('chk-1'), mediaType: 'image/png' },
+    ]);
+    expect(r.text).toBe('Pay to the order of ACME');
+    expect(r.model).toBe('glm-ocr');
   });
 });
 

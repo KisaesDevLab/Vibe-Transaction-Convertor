@@ -9,12 +9,17 @@ x-api-env: &api-env
   PORT: 4000
   DATABASE_URL: ${VIBETC_DATABASE_URL:?DATABASE_URL must be set in appliance env}
   REDIS_URL: ${VIBETC_REDIS_URL:?REDIS_URL must be set}
-  # Shared appliance Ollama model server — local OCR (vision) + text
-  # extraction. Page images never egress (ADR-023).
+  # Shared appliance Ollama model server — text extraction + the check-payee
+  # vision fallback. Page images never egress (ADR-023/ADR-025).
   OLLAMA_BASE_URL: ${VIBE_APPLIANCE_OLLAMA_URL:?shared Ollama base URL required}
   LLM_PROVIDER: local
-  LLM_MODEL_ID: ${LLM_MODEL_ID:-qwen3.5:35b-a3b}
+  LLM_MODEL_ID: ${LLM_MODEL_ID:-qwen2.5:32b-instruct}
+  # Check-payee fallback vision model (default qwen3-vl:30b). Scanned-page OCR
+  # runs on GLM-OCR below, not Ollama.
   OLLAMA_VISION_MODEL: ${OLLAMA_VISION_MODEL:-}
+  # Shared appliance GLM-OCR llama-server (ADR-025) — scanned-page OCR. Required
+  # for scanned statements; page images never egress.
+  GLM_OCR_URL: ${VIBE_APPLIANCE_GLM_OCR_URL:?shared GLM-OCR base URL required}
   SESSION_SECRET: ${SESSION_SECRET:?SESSION_SECRET must be set}
   # The appliance installer derives this from `routes[0].host` in
   # vibe-app.yaml (e.g. https://tx.<appliance-domain>) and threads it in

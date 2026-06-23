@@ -15,10 +15,16 @@ x-api-env: &api-env
   OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
   LLM_PROVIDER: local
   LLM_MODEL_ID: ${LLM_MODEL_ID:-qwen3.5:35b-a3b}
-  # Vision/OCR model for scanned PDFs + reading check payees. Defaults to
-  # minicpm-v4.5:latest (a multimodal OCR model) when unset — never the text
-  # model. Override with any pulled vision tag.
+  # Vision model = the CHECK-PAYEE FALLBACK only (ADR-025). Scanned-page OCR
+  # runs on GLM-OCR (below), not Ollama. Defaults to qwen3-vl:30b when unset;
+  # pull it on the Ollama host: `docker compose exec ollama ollama pull qwen3-vl:30b`.
   OLLAMA_VISION_MODEL: ${OLLAMA_VISION_MODEL:-}
+  # Local GLM-OCR llama-server (ADR-025) — transcribes scanned statement pages
+  # + cancelled checks. On-appliance only; page images never egress. Required
+  # for scanned OCR (unset ⇒ scanned extraction fails fast). Operators with an
+  # EXISTING GLM-OCR server just set GLM_OCR_URL to it (e.g. http://<host>:8082)
+  # and can ignore the bundled glm-ocr service below.
+  GLM_OCR_URL: ${GLM_OCR_URL:-http://glm-ocr:8082}
   SESSION_SECRET: ${SESSION_SECRET:?SESSION_SECRET must be set}
   # Default LAN install: Caddy serves plain HTTP on :80 (the Caddyfile's
   # `tls internal` block is commented out by default), so cookies must
@@ -75,6 +81,35 @@ services:
       interval: 5s
       timeout: 5s
       retries: 30
+
+  # Local GLM-OCR engine (ADR-025) — llama.cpp llama-server + GLM-OCR weights,
+  # OpenAI-compatible /v1/chat/completions vision. Transcribes scanned statement
+  # pages (stage 1) before the text model extracts. Page images are processed
+  # on-appliance and NEVER egress: there is intentionally NO `ports:` host
+  # mapping — only sibling services on the compose network reach it by name
+  # (http://glm-ocr:8090). GPU: add a deploy.resources NVIDIA block (and pin a
+  # separate GPU from Ollama to avoid VRAM contention); CPU-only works but is
+  # slow (keep GLM_OCR_TIMEOUT_MS ~120000).
+  glm-ocr:
+    image: kisaesdevlab/glm-ocr-server:latest
+    profiles: ['standalone']
+    expose:
+      - '8082'
+    environment:
+      # Model id the server advertises — must be exactly "glm-ocr".
+      OCR_MODEL: ${GLM_OCR_MODEL:-glm-ocr}
+      # Output-token cap; the client fails loud on finish_reason=length.
+      OCR_N_PREDICT: ${GLM_OCR_N_PREDICT:-4096}
+      # Optional bearer token gate (set GLM_OCR_API_KEY in the API env too).
+      OCR_API_KEY: ${GLM_OCR_API_KEY:-}
+    volumes:
+      - vibetc-glm-ocr:/root/.cache
+    healthcheck:
+      test: ['CMD-SHELL', 'curl -fsS http://localhost:8082/health || exit 1']
+      interval: 30s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
 
   api:
     build:
@@ -163,5 +198,6 @@ volumes:
   vibetc-data:
   vibetc-redis:
   vibetc-ollama:
+  vibetc-glm-ocr:
   vibetc-caddy-data:
   vibetc-caddy-config:

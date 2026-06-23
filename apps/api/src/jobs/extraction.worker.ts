@@ -32,6 +32,7 @@ import {
   providerOrderFor,
   resolveModelLabelForProvider,
   resolveProviderPolicy,
+  resolveVisionModelLabel,
   type ProviderId,
 } from '../services/llm-provider.js';
 import { resolvePdfStrategy } from '../services/pdf-strategy.js';
@@ -834,10 +835,18 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
     timing.preprocessMs = Date.now() - phaseStart;
     phaseStart = Date.now();
 
-    await setStatus(stmtId, method === 'ocr' ? 'ocr' : 'extracting', {
+    const methodPatch: Record<string, unknown> = {
       extractionMethod: method,
       sourcePdfPages: analysis.pageCount,
-    });
+    };
+    if (method === 'ocr') {
+      // Stage 1 (OCR) runs on the LOCAL vision model. Surface it now so the live
+      // stepper shows which model is doing the current action — the text model
+      // overwrites this when extraction (stage 2) begins.
+      methodPatch.llmProvider = 'local';
+      methodPatch.llmModelVersion = await resolveVisionModelLabel(db);
+    }
+    await setStatus(stmtId, method === 'ocr' ? 'ocr' : 'extracting', methodPatch);
 
     const produceTextMarkdown = async (): Promise<string> => {
       const pages = await extractTextLayerFromBuffer(await readFile(data.sourcePdfPath));
@@ -861,20 +870,17 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
       return scoped.map((p) => `# Page ${p.index + 1}\n\n${p.text}`).join('\n\n');
     };
 
-    // Vision/OCR extraction. For scanned/image statements we rasterize the
-    // pages and send the IMAGES to the local Ollama Qwen-VL provider, which
-    // OCRs + extracts in one call (ADR-023). Page images are processed
-    // locally and never egress. rasterizePdf shells out to pdftoppm
-    // (poppler-utils): the standalone Dockerfile installs it; on host
-    // machines the operator needs `brew install poppler` (or apt/choco).
-    // Rasterize to JPEG: there's no gateway body cap anymore, but JPEG at
-    // ~200 dpi keeps statement text legible while staying small enough to
-    // batch and fit Ollama's context. DPI/quality are operator-tunable.
+    // Scanned-statement OCR (ADR-025): rasterize each page and send the IMAGE
+    // to the local GLM-OCR engine (page images are processed locally and never
+    // egress). rasterizePdf shells out to pdftoppm (poppler-utils): the
+    // standalone Dockerfile installs it; on host machines the operator needs
+    // `brew install poppler` (or apt/choco). Rasterize to PNG — lossless is
+    // best for OCR fidelity and matches the `image/png` data-URL GLM-OCR
+    // expects. DPI is operator-tunable.
     const produceOcrImages = async (): Promise<OcrPage[]> => {
       const rasters = await rasterizePdf(data.sourcePdfPath, {
         dpi: aiSettings.ocrDpi,
-        format: 'jpeg',
-        jpegQuality: aiSettings.ocrJpegQuality,
+        format: 'png',
       });
       const scopedRasters = rasters.filter((r) => inRange(r.index));
       // Hard page cap. All page buffers are held resident at once here, so at
@@ -1019,7 +1025,14 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
         },
         'falling back to secondary provider',
       );
-      await setStatus(stmtId, 'extracting');
+      // Flip the live model line to the fallback provider+model for the duration
+      // of the secondary attempt — otherwise the stepper would keep showing the
+      // primary (local) model while Anthropic is the one actually running. The
+      // final persist still records whichever attempt's result is chosen.
+      await setStatus(stmtId, 'extracting', {
+        llmProvider: resolvedSecondary,
+        llmModelVersion: await resolveModelLabelForProvider(db, resolvedSecondary),
+      });
       const secondStart = Date.now();
       const second = await attemptExtraction(resolvedSecondary, ctx);
       attempts.push(traceEntryFor(second, inputMethod, Date.now() - secondStart));

@@ -30,24 +30,34 @@ let mockChecks: Array<{
 }> = [];
 let requestedProviderId = '';
 let fakePngPath = '';
+// GLM-OCR transcription the mock "reads" off the check images. '' triggers the
+// vision fallback (ADR-025). Default non-empty so the primary path runs.
+let mockGlmText = 'Pay to the order of ...';
+// Flipped true when the vision fallback (completeWithImages) is used.
+let usedFallback = false;
 
 vi.mock('./llm-provider.js', () => ({
   buildProviderForId: vi.fn(async (_db: unknown, id: string) => {
     requestedProviderId = id;
+    const result = {
+      data: { checks: mockChecks },
+      rawJson: JSON.stringify({ checks: mockChecks }),
+      telemetry: { inputTokens: 1, outputTokens: 1, ms: 1, model: 'm', costMicros: 0n },
+    };
     return {
       id,
       health: async () => ({ ok: true }),
-      completeWithImages: async () => ({
-        data: { checks: mockChecks },
-        rawJson: JSON.stringify({ checks: mockChecks }),
-        telemetry: {
-          inputTokens: 1,
-          outputTokens: 1,
-          ms: 1,
-          model: 'qwen2.5vl:7b',
-          costMicros: 0n,
-        },
+      // PRIMARY: GLM-OCR transcribe → text-parse.
+      ocrImagesToText: async () => ({ text: mockGlmText, ms: 1, model: 'GLM-OCR' }),
+      complete: async () => ({
+        ...result,
+        telemetry: { ...result.telemetry, model: 'qwen2.5:32b-instruct' },
       }),
+      // FALLBACK: vision model reads the images directly.
+      completeWithImages: async () => {
+        usedFallback = true;
+        return { ...result, telemetry: { ...result.telemetry, model: 'qwen3-vl:30b' } };
+      },
     };
   }),
 }));
@@ -118,6 +128,8 @@ live('resolveCheckPayees (live Postgres, mocked local vision)', () => {
   beforeEach(async () => {
     mockChecks = [];
     requestedProviderId = '';
+    mockGlmText = 'Pay to the order of ...';
+    usedFallback = false;
     await getPool().query(
       'TRUNCATE TABLE vibetc.transactions, vibetc.statements, vibetc.accounts, vibetc.companies, vibetc.users RESTART IDENTITY CASCADE',
     );
@@ -168,6 +180,25 @@ live('resolveCheckPayees (live Postgres, mocked local vision)', () => {
     expect(rows[0]?.payee).toBe('ACME Plumbing LLC');
     // cleansedDescription is left to enrichment (not clobbered).
     expect(rows[0]?.cleansedDescription).toBeNull();
+    // Primary GLM-OCR transcribe→text-parse path succeeded — no vision fallback.
+    expect(usedFallback).toBe(false);
+  });
+
+  it('falls back to the vision model when GLM-OCR returns no text (ADR-025)', async () => {
+    await seedTx({ checkNumber: '1234', description: 'CHECK 1234', amountCents: -250_00n }, 0);
+    mockGlmText = ''; // GLM-OCR transcribed nothing → vision fallback
+    mockChecks = [{ check_number: '1234', payee: 'Fallback Vendor', amount_cents: 25000 }];
+
+    const res = await resolveCheckPayees(getDb(), stmtId);
+
+    expect(usedFallback).toBe(true);
+    expect(res.model).toBe('qwen3-vl:30b');
+    expect(res.matchedCount).toBe(1);
+    const rows = await getDb()
+      .select()
+      .from(transactions)
+      .where(eq(transactions.statementId, stmtId));
+    expect(rows[0]?.payee).toBe('Fallback Vendor');
   });
 
   it('disambiguates a reused check number by amount (tiebreak)', async () => {

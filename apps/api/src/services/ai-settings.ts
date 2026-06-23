@@ -129,6 +129,52 @@ export const AI_SETTINGS: readonly AiSettingDef[] = [
     min: 30,
     max: 100,
   },
+  // --- GLM-OCR engine (local stage-1 OCR; ADR-025) ---
+  {
+    id: 'glmOcrUrl',
+    key: 'ocr.glm.url',
+    env: 'GLM_OCR_URL',
+    kind: 'string',
+    group: 'ocr',
+    label: 'GLM-OCR base URL',
+    help: 'Local GLM-OCR llama-server (OpenAI-compatible vision) that transcribes scanned statement pages. e.g. http://glm-ocr:8090. On-appliance only — page images never egress. Required for scanned OCR; unset ⇒ scanned extraction fails fast.',
+    default: '',
+  },
+  {
+    id: 'glmOcrModel',
+    key: 'ocr.glm.model',
+    env: 'GLM_OCR_MODEL',
+    kind: 'string',
+    group: 'ocr',
+    label: 'GLM-OCR model',
+    help: 'Model id the GLM-OCR llama-server advertises. Must be exactly "glm-ocr".',
+    default: 'glm-ocr',
+  },
+  {
+    id: 'glmOcrTimeoutMs',
+    key: 'ocr.glm.timeout_ms',
+    env: 'GLM_OCR_TIMEOUT_MS',
+    kind: 'int',
+    group: 'ocr',
+    label: 'GLM-OCR timeout',
+    help: 'Per-page OCR timeout. ~120s gives 2× headroom over CPU inference; drop to ~30000 on GPU.',
+    default: '120000',
+    min: 1000,
+    max: 600_000,
+    unit: 'ms',
+  },
+  {
+    id: 'glmOcrConcurrency',
+    key: 'ocr.glm.concurrency',
+    env: 'GLM_OCR_CONCURRENCY',
+    kind: 'int',
+    group: 'ocr',
+    label: 'GLM-OCR concurrency',
+    help: 'Pages OCR’d in parallel against the GLM-OCR server. Raise on a GPU box; keep low on CPU to avoid contention.',
+    default: '2',
+    min: 1,
+    max: 8,
+  },
   // --- OCR safety net ---
   {
     id: 'reviewConfidence',
@@ -165,6 +211,10 @@ export interface ResolvedAiSettings {
   localStructuredOutput: 'grammar' | 'json_object';
   ocrDpi: number;
   ocrJpegQuality: number;
+  glmOcrUrl: string;
+  glmOcrModel: string;
+  glmOcrTimeoutMs: number;
+  glmOcrConcurrency: number;
   reviewConfidence: number;
   checkPayeeAuto: boolean;
 }
@@ -221,6 +271,10 @@ export const resolveAiSettings = async (db: Db): Promise<ResolvedAiSettings> => 
       raw(byId('localStructuredOutput')!) === 'json_object' ? 'json_object' : 'grammar',
     ocrDpi: intOf('ocrDpi'),
     ocrJpegQuality: intOf('ocrJpegQuality'),
+    glmOcrUrl: raw(byId('glmOcrUrl')!),
+    glmOcrModel: raw(byId('glmOcrModel')!),
+    glmOcrTimeoutMs: intOf('glmOcrTimeoutMs'),
+    glmOcrConcurrency: intOf('glmOcrConcurrency'),
     reviewConfidence: floatOf('reviewConfidence'),
     checkPayeeAuto: raw(byId('checkPayeeAuto')!) !== 'false',
   };
