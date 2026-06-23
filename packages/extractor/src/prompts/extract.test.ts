@@ -32,8 +32,8 @@ describe('extractionSystemPromptFor', () => {
   });
 
   it('default prompt states integer-cents with a worked example', () => {
-    expect(SYSTEM_PROMPT).toMatch(/461756/);
-    expect(SYSTEM_PROMPT).toMatch(/INTEGER number of CENTS/i);
+    expect(SYSTEM_PROMPT).toMatch(/123456/);
+    expect(SYSTEM_PROMPT).toMatch(/integer (number of )?cents/i);
   });
 });
 

@@ -267,7 +267,7 @@ describe('LocalGatewayProvider', () => {
 
     await provider.extract('# md'); // no override → built-in default
     expect(body.messages?.[0]?.content).not.toBe('CUSTOM EXTRACTION PROMPT');
-    expect(body.messages?.[0]?.content).toMatch(/bank-statement extractor/i);
+    expect(body.messages?.[0]?.content).toMatch(/bank-statement transcription engine/i);
   });
 
   it('rejects schema-mismatch payloads with ExtractionResponseError carrying the raw response', async () => {
