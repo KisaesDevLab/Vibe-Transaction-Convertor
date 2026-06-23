@@ -152,6 +152,9 @@ interface AttemptOutcome {
   periodEnd: string | null;
   openingBalanceCents: bigint | null;
   closingBalanceCents: bigint | null;
+  // The raw model JSON for this attempt (post-parse source text) — captured so
+  // the per-step audit log can show exactly what extraction received.
+  rawJson: string | null;
 }
 
 interface AttemptContext {
@@ -275,6 +278,7 @@ const attemptExtraction = async (
     periodEnd: null,
     openingBalanceCents: null,
     closingBalanceCents: null,
+    rawJson: null,
   };
 
   let provider;
@@ -342,6 +346,7 @@ const attemptExtraction = async (
     openingBalanceCents: openingCents,
     closingBalanceCents: closingCents,
     repairApplied: null,
+    rawJson: result.rawJson,
   } as const;
 
   // AMBIGUOUS halts the worker regardless of fallback — secondary would
@@ -538,6 +543,7 @@ const attemptExtraction = async (
     periodEnd,
     openingBalanceCents: openingCents,
     closingBalanceCents: closingCents,
+    rawJson: result.rawJson,
   };
 };
 
@@ -682,6 +688,43 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
   // Phase tracker — updated at each transition so the failure audit
   // can say "we were in `ocr-markdown` when this fired".
   let currentPhase: ExtractionPhase = 'init';
+  // Per-step result log. Each pipeline stage writes its result — including the
+  // actual data it received/produced (the OCR markdown, the raw model JSON, the
+  // reconciliation outcome) — to the audit log IMMEDIATELY, before the next step
+  // runs, so the operator can see exactly what each process returned even when a
+  // later step throws. Also accumulated into the end-of-run trace (`steps`) and
+  // emitted to the server log. Large `received` payloads are capped to keep the
+  // JSONB row bounded; the full length is recorded when truncated.
+  const STEP_PAYLOAD_CAP = 64_000;
+  const boundReceived = (r: unknown): unknown => {
+    if (typeof r !== 'string') return r;
+    return r.length > STEP_PAYLOAD_CAP
+      ? { text: r.slice(0, STEP_PAYLOAD_CAP), truncated: true, fullLength: r.length }
+      : r;
+  };
+  const steps: Array<Record<string, unknown>> = [];
+  const logStep = async (
+    step: string,
+    detail: Record<string, unknown> = {},
+    received?: unknown,
+  ): Promise<void> => {
+    const entry = { step, atMs: Date.now() - workerStartedAt, ...detail };
+    steps.push(entry);
+    logger.info({ stmtId, ...entry }, `extraction step: ${step}`);
+    try {
+      await writeAudit(db, {
+        entityType: 'statement',
+        entityId: stmtId,
+        action: 'statement.extraction-step',
+        payload: {
+          ...entry,
+          ...(received !== undefined ? { received: boundReceived(received) } : {}),
+        },
+      });
+    } catch (auditErr) {
+      logger.warn({ stmtId, step, auditErr }, 'failed to write extraction-step audit row');
+    }
+  };
   // Hoisted so the outer catch can include them in the failure trace
   // even when an error fires mid-extraction. Each starts undefined
   // and gets populated as the corresponding phase begins.
@@ -736,6 +779,9 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
     markdown: {
       chars: markdown.length,
     },
+    // Chronological per-step results (preprocess → markdown → reconcile →
+    // persist), complementing the categorized fields above.
+    steps,
     attempts,
     timing: {
       totalMs: Date.now() - workerStartedAt,
@@ -850,6 +896,18 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
         aiSettings.ocrEngine === 'vibe' ? 'vibe-ocr' : await resolveVisionModelLabel(db);
     }
     await setStatus(stmtId, method === 'ocr' ? 'ocr' : 'extracting', methodPatch);
+    await logStep(
+      'preprocess',
+      {
+        pages: analysis.pageCount,
+        hasTextLayer: analysis.hasTextLayer,
+        avgCharsPerPage: Math.round(analysis.avgCharsPerPage),
+        method,
+        strategy: strategy ?? null,
+        ocrEngine: method === 'ocr' || method === 'hybrid' ? aiSettings.ocrEngine : null,
+      },
+      analysis,
+    );
 
     const produceTextMarkdown = async (): Promise<string> => {
       const pages = await extractTextLayerFromBuffer(await readFile(data.sourcePdfPath));
@@ -974,6 +1032,17 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
     currentPhase = method === 'text' ? 'text-markdown' : 'ocr-images';
     markdown = method === 'text' ? await produceTextMarkdown() : await produceOcrMarkdown();
     timing.markdownMs = Date.now() - phaseStart;
+    await logStep(
+      'markdown',
+      {
+        source: method === 'text' ? 'text-layer' : `ocr:${aiSettings.ocrEngine}`,
+        chars: markdown.length,
+        ms: timing.markdownMs,
+      },
+      // The exact markdown the OCR / text-layer stage produced — what the
+      // extraction model will read.
+      markdown,
+    );
 
     await checkCancelled(stmtId);
 
@@ -1214,6 +1283,21 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
     await checkCancelled(stmtId);
     currentPhase = 'reconciling';
     await setStatus(stmtId, 'reconciling');
+    await logStep(
+      'extract',
+      {
+        provider: chosen.providerId,
+        model: chosen.modelVersion,
+        method,
+        llmEmittedTxCount: chosen.llmEmittedTxCount,
+        txCount: chosen.effectiveTxs.length,
+        reconciliation: chosen.reconciled?.status ?? null,
+        deltaCents: chosen.reconciled?.deltaCents?.toString() ?? null,
+        repairApplied: chosen.repairApplied ?? null,
+      },
+      // The exact raw JSON the extraction model returned (post-parse source).
+      chosen.rawJson ?? undefined,
+    );
 
     // Empty-tx fallback path can still land here when no secondary was
     // available. Treat as an inserted-zero outcome — the operator sees
@@ -1376,6 +1460,25 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
     });
 
     timing.persistMs = Date.now() - phaseStart;
+    await logStep(
+      'persist',
+      {
+        inserted: effectiveTxs.length,
+        status: 'review',
+        reconciliation: reconciled.status,
+        heldForReview: reviewHoldReason !== null,
+        lowConfidenceRows: lowConfidenceCount,
+        ms: timing.persistMs,
+      },
+      // The transactions as persisted (date, amount, description, balance) — the
+      // final output of the pipeline.
+      effectiveTxs.map((t) => ({
+        posted_date: t.postedDate,
+        description: t.description,
+        amount_cents: Number(t.amountCents),
+        running_balance_cents: t.runningBalanceCents != null ? Number(t.runningBalanceCents) : null,
+      })),
+    );
 
     // Auto-resolve check payees (best-effort). The text-layer path never sees
     // cancelled-check images, and a scanned run may have missed some — so for
@@ -1386,10 +1489,10 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
     if (autoCheckPayee && effectiveTxs.some((t) => t.checkNumber && !t.payee)) {
       try {
         const res = await resolveCheckPayees(db, stmtId);
-        logger.info(
-          { stmtId, matched: res.matchedCount, candidates: res.candidateCount },
-          'auto check-payee resolution complete',
-        );
+        await logStep('check-payee', {
+          matched: res.matchedCount,
+          candidates: res.candidateCount,
+        });
       } catch (err) {
         logger.warn(
           { stmtId, err: (err as Error).message },
