@@ -103,9 +103,25 @@ export function StatementReviewPage() {
   const accountsInCompany = useAccounts(parentAccount.data?.companyId ?? '');
   const parentCompany = useCompany(parentAccount.data?.companyId ?? '');
 
-  const txSumCents = useMemo<bigint>(() => {
-    if (!stmt.data) return 0n;
-    return stmt.data.transactions.reduce<bigint>((acc, t) => acc + BigInt(t.amountCents), 0n);
+  // Segregate deposits (credits, +) from withdrawals (debits, −) so a
+  // discrepancy is easy to localize to one side. deposits + withdrawals === the
+  // net sum used for the Golden Rule (opening + net = expected closing).
+  const txTotals = useMemo(() => {
+    let deposits = 0n;
+    let withdrawals = 0n;
+    let depositCount = 0;
+    let withdrawalCount = 0;
+    for (const t of stmt.data?.transactions ?? []) {
+      const c = BigInt(t.amountCents);
+      if (c > 0n) {
+        deposits += c;
+        depositCount += 1;
+      } else if (c < 0n) {
+        withdrawals += c;
+        withdrawalCount += 1;
+      }
+    }
+    return { sum: deposits + withdrawals, deposits, withdrawals, depositCount, withdrawalCount };
   }, [stmt.data]);
 
   if (stmt.isPending) {
@@ -675,7 +691,12 @@ export function StatementReviewPage() {
         <ReconciliationWidget
           stmt={s}
           txCount={txs.length}
-          txSumCents={txSumCents}
+          txSumCents={txTotals.sum}
+          depositsCents={txTotals.deposits}
+          withdrawalsCents={txTotals.withdrawals}
+          depositCount={txTotals.depositCount}
+          withdrawalCount={txTotals.withdrawalCount}
+          txs={txs}
           canOverride={canOverride}
         />
       </div>
