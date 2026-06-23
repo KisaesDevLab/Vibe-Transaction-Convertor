@@ -12,6 +12,7 @@ import {
   rasterizePdf,
   repairPromptFor,
   routePdf,
+  vibeOcrFile,
   type ExtractionMethod,
 } from '@vibe-tx-converter/extractor';
 import { findSuspectRows, reconcileGoldenRule, repairPass } from '@vibe-tx-converter/reconciler';
@@ -844,7 +845,9 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
       // stepper shows which model is doing the current action — the text model
       // overwrites this when extraction (stage 2) begins.
       methodPatch.llmProvider = 'local';
-      methodPatch.llmModelVersion = await resolveVisionModelLabel(db);
+      // Label the engine doing stage-1: VibeOCR (PDF-native) vs GLM-OCR per page.
+      methodPatch.llmModelVersion =
+        aiSettings.ocrEngine === 'vibe' ? 'vibe-ocr' : await resolveVisionModelLabel(db);
     }
     await setStatus(stmtId, method === 'ocr' ? 'ocr' : 'extracting', methodPatch);
 
@@ -902,16 +905,58 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
       );
     };
 
-    // Stage 1 of the scanned path: rasterize → OCR to markdown on the LOCAL
-    // vision model (page images never egress), then run text-based multi-account
-    // detection on the transcription (mirrors produceTextMarkdown). Returns the
-    // page-marked markdown for the normal stage-2 extraction below.
-    const produceOcrMarkdown = async (): Promise<string> => {
+    // GLM-OCR path (ADR-025): rasterize → OCR each page on the local VLM. Used
+    // as the engine when ocrEngine='glm', and as the automatic fallback when
+    // VibeOCR is unset/unreachable. Returns per-page transcriptions.
+    const produceGlmOcrPages = async (): Promise<Array<{ index: number; text: string }>> => {
       const pages = await produceOcrImages();
       const localProvider = await buildProviderForId(db, 'local');
       const ocr = await ocrImagesToMarkdown(localProvider, pages);
+      return ocr.pages;
+    };
+
+    // VibeOCR path (ADR-026): send the WHOLE PDF once to the PDF-native OCR
+    // service; it rasterizes + OCRs server-side and returns per-page markdown.
+    // Page images never egress (on-appliance). Filtered to the requested range.
+    const produceVibeOcrPages = async (): Promise<Array<{ index: number; text: string }>> => {
+      const pdfBytes = await readFile(data.sourcePdfPath);
+      const result = await vibeOcrFile(
+        pdfBytes,
+        `${data.sourcePdfHash.slice(0, 12)}.pdf`,
+        'application/pdf',
+        {
+          ...(aiSettings.vibeOcrUrl ? { baseUrl: aiSettings.vibeOcrUrl } : {}),
+          ...(aiSettings.vibeOcrApiKey ? { apiKey: aiSettings.vibeOcrApiKey } : {}),
+          timeoutMs: aiSettings.vibeOcrTimeoutMs,
+        },
+      );
+      // page_num is 1-based; map to 0-based page index and scope to the range.
+      return result.pages
+        .map((p) => ({ index: p.pageNum - 1, text: p.markdown }))
+        .filter((p) => inRange(p.index));
+    };
+
+    // Stage 1 of the scanned path: produce page-marked OCR markdown (page images
+    // never egress), then run text-based multi-account detection on the
+    // transcription (mirrors produceTextMarkdown). Returns the page-marked
+    // markdown for the normal stage-2 extraction below.
+    const produceOcrMarkdown = async (): Promise<string> => {
+      let pages: Array<{ index: number; text: string }>;
+      if (aiSettings.ocrEngine === 'vibe') {
+        try {
+          pages = await produceVibeOcrPages();
+        } catch (err) {
+          logger.warn(
+            { stmtId, err: (err as Error).message },
+            'VibeOCR failed — falling back to GLM-OCR per-page',
+          );
+          pages = await produceGlmOcrPages();
+        }
+      } else {
+        pages = await produceGlmOcrPages();
+      }
       if (!pageRange) {
-        const splitInfo = detectMultiAccount(ocr.pages);
+        const splitInfo = detectMultiAccount(pages);
         if (splitInfo.multiAccount) {
           await db
             .update(statements)
@@ -923,7 +968,7 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
           );
         }
       }
-      return ocr.markdown;
+      return pages.map((p) => `# Page ${p.index + 1}\n\n${p.text}`).join('\n\n');
     };
 
     currentPhase = method === 'text' ? 'text-markdown' : 'ocr-images';

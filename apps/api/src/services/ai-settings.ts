@@ -118,6 +118,51 @@ export const AI_SETTINGS: readonly AiSettingDef[] = [
     min: 1000,
     max: 120_000,
   },
+  // --- Scanned-statement OCR engine (ADR-026) ---
+  {
+    id: 'ocrEngine',
+    key: 'ocr.engine',
+    env: 'VIBETC_OCR_ENGINE',
+    kind: 'enum',
+    group: 'ocr',
+    label: 'OCR engine',
+    help: '"vibe" = VibeOCR (PDF-native async service; the whole PDF is sent once and OCR\'d server-side). "glm" = call GLM-OCR per rasterized page directly. VibeOCR falls back to GLM-OCR automatically on failure.',
+    default: 'vibe',
+    enumValues: ['vibe', 'glm'],
+  },
+  {
+    id: 'vibeOcrUrl',
+    key: 'ocr.vibe.url',
+    env: 'VIBE_OCR_URL',
+    kind: 'string',
+    group: 'ocr',
+    label: 'VibeOCR base URL',
+    help: 'VibeOCR service (PDF-native OCR), e.g. http://vibe-ocr:8099. On-appliance only — page images never egress. Falls back to GLM-OCR when unset/unreachable.',
+    default: '',
+  },
+  {
+    id: 'vibeOcrApiKey',
+    key: 'ocr.vibe.api_key',
+    env: 'VIBE_OCR_API_KEY',
+    kind: 'string',
+    group: 'ocr',
+    label: 'VibeOCR API key',
+    help: 'x-api-key sent to VibeOCR. The on-appliance service accepts any non-empty value; leave blank only if your deployment disables the key check.',
+    default: '',
+  },
+  {
+    id: 'vibeOcrTimeoutMs',
+    key: 'ocr.vibe.timeout_ms',
+    env: 'VIBE_OCR_TIMEOUT_MS',
+    kind: 'int',
+    group: 'ocr',
+    label: 'VibeOCR job timeout',
+    help: 'Overall budget for one VibeOCR job (submit + poll + result) across all pages.',
+    default: '300000',
+    min: 5000,
+    max: 1_800_000,
+    unit: 'ms',
+  },
   // --- Scanned-statement OCR (GLM-OCR; ADR-025) ---
   {
     id: 'ocrDpi',
@@ -211,6 +256,10 @@ export interface ResolvedAiSettings {
   numCtx: number | undefined;
   localStructuredOutput: 'grammar' | 'json_object';
   maxPromptTokens: number;
+  ocrEngine: 'vibe' | 'glm';
+  vibeOcrUrl: string;
+  vibeOcrApiKey: string;
+  vibeOcrTimeoutMs: number;
   ocrDpi: number;
   glmOcrUrl: string;
   glmOcrModel: string;
@@ -271,6 +320,10 @@ export const resolveAiSettings = async (db: Db): Promise<ResolvedAiSettings> => 
     localStructuredOutput:
       raw(byId('localStructuredOutput')!) === 'json_object' ? 'json_object' : 'grammar',
     maxPromptTokens: intOf('maxPromptTokens'),
+    ocrEngine: raw(byId('ocrEngine')!) === 'glm' ? 'glm' : 'vibe',
+    vibeOcrUrl: raw(byId('vibeOcrUrl')!),
+    vibeOcrApiKey: raw(byId('vibeOcrApiKey')!),
+    vibeOcrTimeoutMs: intOf('vibeOcrTimeoutMs'),
     ocrDpi: intOf('ocrDpi'),
     glmOcrUrl: raw(byId('glmOcrUrl')!),
     glmOcrModel: raw(byId('glmOcrModel')!),

@@ -88,6 +88,12 @@ interface ProviderStatus {
     model: string;
     health: { ok: boolean; status?: number; detail?: string };
   };
+  // VibeOCR (ADR-026): PDF-native OCR engine + which engine is selected.
+  vibeOcr: {
+    url: string | null;
+    engine: 'vibe' | 'glm';
+    health: { ok: boolean; status?: number; detail?: string };
+  };
 }
 
 interface AiSetting {
@@ -520,6 +526,7 @@ export function LlmProviderAdminPage() {
         />
       ) : null}
 
+      {provider.data ? <VibeOcrSection vibeOcr={provider.data.vibeOcr} /> : null}
       {provider.data ? <GlmOcrSection glmOcr={provider.data.glmOcr} /> : null}
 
       {provider.data ? (
@@ -1297,6 +1304,64 @@ function AiSettingRow({
 
 // Local Ollama (default provider): base URL + text/vision model tags. OCR
 // (scanned pages) and text extraction both run here; page images never egress.
+function VibeOcrSection({
+  vibeOcr,
+}: {
+  vibeOcr: {
+    url: string | null;
+    engine: 'vibe' | 'glm';
+    health: { ok: boolean; status?: number; detail?: string };
+  };
+}) {
+  const { url, engine, health } = vibeOcr;
+  const selected = engine === 'vibe';
+  return (
+    <section className="rounded-lg border border-surface-muted bg-white p-4">
+      <div className="flex items-center justify-between">
+        <h2 className="text-base font-medium">VibeOCR (scanned-statement OCR)</h2>
+        <span
+          className={`inline-flex items-center gap-1 rounded px-2 py-0.5 text-xs font-medium ${
+            !selected
+              ? 'bg-surface-muted text-ink-muted'
+              : !url
+                ? 'bg-surface-muted text-ink-muted'
+                : health.ok
+                  ? 'bg-emerald-50 text-emerald-800'
+                  : 'bg-amber-50 text-amber-800'
+          }`}
+        >
+          {!selected
+            ? 'not selected (engine: GLM-OCR)'
+            : !url
+              ? 'not configured'
+              : health.ok
+                ? 'healthy'
+                : 'unreachable → GLM-OCR fallback'}
+        </span>
+      </div>
+      <p className="mt-1 text-xs text-ink-subtle">
+        VibeOCR is the PDF-native OCR service — the whole PDF is uploaded once and OCR&apos;d
+        server-side on the appliance (page images never egress). Select it with the{' '}
+        <strong>OCR engine</strong> setting below; configure the URL/key via{' '}
+        <code className="rounded bg-surface-subtle px-1">VIBE_OCR_URL</code> or the OCR settings.
+        When VibeOCR is unset or unreachable it falls back to GLM-OCR automatically.
+      </p>
+      <dl className="mt-3 grid grid-cols-[max-content_1fr] gap-x-4 gap-y-1 text-xs">
+        <dt className="text-ink-muted">Engine</dt>
+        <dd className="font-mono">{engine}</dd>
+        <dt className="text-ink-muted">URL</dt>
+        <dd className="font-mono">{url ?? <span className="text-ink-subtle">unset</span>}</dd>
+        {!health.ok && health.detail ? (
+          <>
+            <dt className="text-ink-muted">Detail</dt>
+            <dd className="text-amber-700">{health.detail}</dd>
+          </>
+        ) : null}
+      </dl>
+    </section>
+  );
+}
+
 function GlmOcrSection({
   glmOcr,
 }: {
@@ -1327,8 +1392,8 @@ function GlmOcrSection({
         Local GLM-OCR llama-server transcribes scanned statement pages (and cancelled checks) on the
         appliance — page images never egress. Configure the URL via the{' '}
         <code className="rounded bg-surface-subtle px-1">GLM_OCR_URL</code> env or the “Text
-        extraction / OCR” settings below. With GLM-OCR down, scanned extraction fails fast (no
-        fallback).
+        extraction / OCR” settings below. GLM-OCR is the <strong>fallback</strong> when VibeOCR is
+        the engine; if it is the selected engine and down, scanned extraction fails fast.
       </p>
       <dl className="mt-3 grid grid-cols-[max-content_1fr] gap-x-4 gap-y-1 text-xs">
         <dt className="text-ink-muted">URL</dt>

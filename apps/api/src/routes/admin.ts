@@ -33,7 +33,7 @@ import {
   type LlmProviderPolicy,
 } from '../services/llm-provider.js';
 import { listAiSettings, resolveAiSettings, setAiSetting } from '../services/ai-settings.js';
-import { probeGlmOcrHealth } from '@vibe-tx-converter/extractor';
+import { probeGlmOcrHealth, probeVibeOcrHealth } from '@vibe-tx-converter/extractor';
 import {
   enrichmentPromptStatus,
   enrichmentToggleStatus,
@@ -227,6 +227,19 @@ export const adminRouter = (): Router => {
             ? await probeGlmOcrHealth({ baseUrl: ai.glmOcrUrl })
             : { ok: false, detail: 'GLM_OCR_URL not set — scanned OCR is unavailable' };
           return { url: ai.glmOcrUrl || null, model: ai.glmOcrModel, health };
+        })(),
+        // VibeOCR (ADR-026): the PDF-native OCR engine. Shown with its live
+        // health so the operator can see whether the primary scanned path is up
+        // (it falls back to GLM-OCR when down).
+        vibeOcr: await (async () => {
+          const ai = await resolveAiSettings(db);
+          const health = ai.vibeOcrUrl
+            ? await probeVibeOcrHealth({
+                baseUrl: ai.vibeOcrUrl,
+                ...(ai.vibeOcrApiKey ? { apiKey: ai.vibeOcrApiKey } : {}),
+              })
+            : { ok: false, detail: 'VIBE_OCR_URL not set — using GLM-OCR' };
+          return { url: ai.vibeOcrUrl || null, engine: ai.ocrEngine, health };
         })(),
       });
     } catch (err) {

@@ -20,6 +20,11 @@ x-api-env: &api-env
   # Shared appliance GLM-OCR llama-server (ADR-025) — scanned-page OCR. Required
   # for scanned statements; page images never egress.
   GLM_OCR_URL: ${VIBE_APPLIANCE_GLM_OCR_URL:?shared GLM-OCR base URL required}
+  # Shared appliance VibeOCR (ADR-026) — PDF-native primary scanned-OCR engine.
+  # Optional: when set it is preferred over per-page GLM-OCR (which stays as the
+  # fallback). On-appliance only; page images never egress.
+  VIBE_OCR_URL: ${VIBE_APPLIANCE_VIBE_OCR_URL:-}
+  VIBE_OCR_API_KEY: ${VIBE_APPLIANCE_VIBE_OCR_API_KEY:-}
   SESSION_SECRET: ${SESSION_SECRET:?SESSION_SECRET must be set}
   # The appliance installer derives this from `routes[0].host` in
   # vibe-app.yaml (e.g. https://tx.<appliance-domain>) and threads it in

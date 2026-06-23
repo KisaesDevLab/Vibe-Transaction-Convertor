@@ -25,6 +25,12 @@ x-api-env: &api-env
   # EXISTING GLM-OCR server just set GLM_OCR_URL to it (e.g. http://<host>:8082)
   # and can ignore the bundled glm-ocr service below.
   GLM_OCR_URL: ${GLM_OCR_URL:-http://glm-ocr:8082}
+  # VibeOCR (ADR-026) — the PDF-native OCR engine (the whole PDF is uploaded once
+  # and OCR'd server-side; it fronts GLM-OCR). When set and reachable it is the
+  # primary scanned-OCR path (select via the "OCR engine" admin setting / default
+  # 'vibe'); on failure the worker falls back to GLM-OCR. On-appliance only.
+  VIBE_OCR_URL: ${VIBE_OCR_URL:-}
+  VIBE_OCR_API_KEY: ${VIBE_OCR_API_KEY:-}
   SESSION_SECRET: ${SESSION_SECRET:?SESSION_SECRET must be set}
   # Default LAN install: Caddy serves plain HTTP on :80 (the Caddyfile's
   # `tls internal` block is commented out by default), so cookies must
