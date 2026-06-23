@@ -48,7 +48,10 @@ Hard rules:
    NEVER invent a value for an illegible field: omit the optional field and
    lower that row's confidence.
 6. Do not invent transactions. Skip lines that are headers, subtotals,
-   footers, or layout artifacts.
+   footers, or layout artifacts. Emit ONE object per transaction: the
+   "description" field is a single string and "amount_cents" a single integer —
+   NEVER arrays. If several transactions share a date, emit a SEPARATE object
+   for each; do not merge same-date rows into one object.
 7. running_balance_cents is OPTIONAL — include only when the statement
    explicitly prints a per-row running balance.
 8. balances.opening_cents + sum(transactions.amount_cents) MUST equal
@@ -62,8 +65,31 @@ Hard rules:
 11. check_number: extract it from "CHECK 1234" / "Check #1234" patterns and
     preserve any leading zeros (store as a string).
 12. Use trntype only when the description clearly indicates one (e.g. ATM
-    Withdrawal -> "ATM"). Otherwise omit.
-13. confidence reflects your certainty in the row (0.0 - 1.0).`;
+    Withdrawal -> "ATM"). Otherwise omit (leave it null) — the system infers it.
+13. confidence reflects your certainty in the row (0.0 - 1.0).
+
+COMPLETENESS — the single most important requirement. Missing or merged
+transactions are the most common and most damaging error:
+A. Extract EVERY transaction line on EVERY page. Never skip, sample,
+   summarize, truncate, or merge rows. A statement that lists 150 transactions
+   must produce 150 objects — output them all even if the list is long.
+B. Statements group transactions into SECTIONS — e.g. "Deposits and Other
+   Credits", "Withdrawals and Other Debits", "Checks Paid", "Electronic
+   Payments", "Service Fees" — and these often continue across several pages.
+   Read EVERY section on EVERY page; do not stop after the first section or
+   the first page.
+C. Multiple transactions on the SAME date are normal and common (daily
+   card-batch deposits, several ACH debits in one day). Emit a separate object
+   for each — never collapse same-date rows into one.
+D. SELF-CHECK with the running balance: when a per-row running balance is
+   printed, each row's running balance MUST equal the previous row's running
+   balance plus this row's amount. If that chain ever breaks, you missed a
+   row, duplicated one, or misread an amount — re-scan that spot before you
+   finish.
+E. SELF-CHECK with printed totals: if the statement prints section subtotals
+   ("Total Deposits", "Total Withdrawals") or a transaction count, your
+   extracted rows for that section should sum to the subtotal and match the
+   count. If they don't, a row is missing or duplicated — find it.`;
 
 export type ExtractionPromptMode = 'rules' | 'full';
 
@@ -119,13 +145,23 @@ Hard rules:
    set source_date_format accordingly (use "AMBIGUOUS" with low confidence
    only when genuinely undecidable).
 3. Do not invent transactions. Skip headers, subtotals, footers, layout
-   artifacts.
+   artifacts. Emit ONE object per transaction — the "description" field is a
+   single string and "amount_cents" a single integer, NEVER arrays. Emit a
+   separate object for each same-date transaction; do not merge them.
 4. running_balance_cents is OPTIONAL — only when the row prints one.
 5. balances.opening_cents + sum(transactions.amount_cents) MUST equal
    balances.closing_cents; if you cannot tie, explain in "notes".
 6. source_page is the 1-based image/page index where the row appears.
-7. Use trntype only when clearly indicated; otherwise omit.
+7. Use trntype only when clearly indicated; otherwise omit (null).
 8. confidence reflects your certainty in the row (0.0–1.0).
+
+COMPLETENESS (most important): extract EVERY transaction on EVERY page. Never
+skip, summarize, or merge rows. Read every SECTION (Deposits, Withdrawals,
+Checks, Electronic, Fees) across ALL pages. Multiple transactions on the same
+date are normal — emit a separate object for each. When a per-row running
+balance is printed, verify each row's balance = prior balance + this amount;
+a break means a missed/duplicated/misread row. If section subtotals or a count
+are printed, your rows should match them.
 
 Check & payee rules:
 - For a cancelled-check image, read the PAYEE from the "Pay to the order of"
@@ -143,7 +179,8 @@ export const imageUserPromptFor = (opts: UserPromptOptions = {}): string => {
   return (
     `The preceding image(s) are the pages of one statement (and any cancelled ` +
     `checks). Emit JSON conforming to the schema. Do not add prose around the ` +
-    `JSON.${overrideLine}`
+    `JSON. Extract EVERY transaction from EVERY section and page — do not skip, ` +
+    `summarize, or merge same-date rows.${overrideLine}`
   );
 };
 
@@ -166,7 +203,10 @@ export const userPromptFor = (markdown: string, opts: UserPromptOptions = {}): s
     : '';
   return (
     `Below is the OCR/text-layer markdown for one statement. Emit JSON\n` +
-    `that conforms to the schema. Do not add prose around the JSON.${overrideLine}\n\n` +
+    `that conforms to the schema. Do not add prose around the JSON.\n` +
+    `Extract EVERY transaction from EVERY section and page — do not skip,\n` +
+    `summarize, or merge same-date rows. If a running balance is printed, use\n` +
+    `it to confirm no row is missing.${overrideLine}\n\n` +
     `=== STATEMENT MARKDOWN ===\n${markdown}\n=== END ===`
   );
 };

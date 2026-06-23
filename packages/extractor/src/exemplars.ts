@@ -759,6 +759,103 @@ Ending Balance 2026-10-31 ...................... $14,163.35`,
       ],
     },
   },
+  // Dense same-date statement with a per-row running balance + printed section
+  // subtotals — anchors the two failure modes that hurt completeness: collapsing
+  // several same-date rows into one object, and dropping rows. Note 05/04 has
+  // three rows and 05/05 has three rows, each emitted SEPARATELY, and the
+  // running balance chains exactly from opening to closing.
+  {
+    label: 'summit-business-dense-same-date',
+    markdown: `# Summit Business Bank — Business Checking
+Account ****3310    Statement period 05/01/2026 – 05/31/2026
+
+Beginning Balance        $10,000.00
+Ending Balance           $10,930.00
+Total Deposits (3)        $3,050.00
+Total Withdrawals (4)     $2,120.00
+
+Date    Description                       Amount       Balance
+05/04   CARD DEPOSIT BATCH 8841         1,200.00     11,200.00
+05/04   CARD DEPOSIT BATCH 8842           850.00     12,050.00
+05/04   ACH DEBIT SYSCO FOODS            -600.00     11,450.00
+05/05   CARD DEPOSIT BATCH 8843         1,000.00     12,450.00
+05/05   ACH DEBIT PAYROLL TAX            -920.00     11,530.00
+05/05   ACH DEBIT CITY UTILITIES         -150.00     11,380.00
+05/06   CHECK 1042                       -450.00     10,930.00`,
+    expected: {
+      account: { masked_number: '3310', type_hint: 'CHECKING' },
+      institution: { name: 'Summit Business Bank', intu_org_hint: null },
+      period: { start: '2026-05-01', end: '2026-05-31' },
+      balances: { opening_cents: 1_000_000, closing_cents: 1_093_000 },
+      source_date_format: { format: 'MDY', confidence: 0.98 },
+      transactions: [
+        {
+          posted_date: '2026-05-04',
+          description: 'CARD DEPOSIT BATCH 8841',
+          amount_cents: 120_000,
+          running_balance_cents: 1_120_000,
+          trntype: 'DEP',
+          source_page: 1,
+          confidence: 0.99,
+        },
+        {
+          posted_date: '2026-05-04',
+          description: 'CARD DEPOSIT BATCH 8842',
+          amount_cents: 85_000,
+          running_balance_cents: 1_205_000,
+          trntype: 'DEP',
+          source_page: 1,
+          confidence: 0.99,
+        },
+        {
+          posted_date: '2026-05-04',
+          description: 'ACH DEBIT SYSCO FOODS',
+          amount_cents: -60_000,
+          running_balance_cents: 1_145_000,
+          trntype: 'DIRECTDEBIT',
+          source_page: 1,
+          confidence: 0.99,
+        },
+        {
+          posted_date: '2026-05-05',
+          description: 'CARD DEPOSIT BATCH 8843',
+          amount_cents: 100_000,
+          running_balance_cents: 1_245_000,
+          trntype: 'DEP',
+          source_page: 1,
+          confidence: 0.99,
+        },
+        {
+          posted_date: '2026-05-05',
+          description: 'ACH DEBIT PAYROLL TAX',
+          amount_cents: -92_000,
+          running_balance_cents: 1_153_000,
+          trntype: 'DIRECTDEBIT',
+          source_page: 1,
+          confidence: 0.99,
+        },
+        {
+          posted_date: '2026-05-05',
+          description: 'ACH DEBIT CITY UTILITIES',
+          amount_cents: -15_000,
+          running_balance_cents: 1_138_000,
+          trntype: 'DIRECTDEBIT',
+          source_page: 1,
+          confidence: 0.99,
+        },
+        {
+          posted_date: '2026-05-06',
+          description: 'CHECK 1042',
+          amount_cents: -45_000,
+          running_balance_cents: 1_093_000,
+          check_number: '1042',
+          trntype: 'CHECK',
+          source_page: 1,
+          confidence: 0.99,
+        },
+      ],
+    },
+  },
 ];
 
 export const exemplarsAsMessages = (
