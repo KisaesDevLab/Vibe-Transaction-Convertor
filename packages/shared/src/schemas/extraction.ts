@@ -48,7 +48,11 @@ export const ExtractionTransaction = z.object({
   // cancelled-check image when present. Drives the OFX <NAME> field for
   // check transactions. Null for non-check rows or when not visible.
   payee: z.string().max(200).nullable().optional(),
-  trntype: TrntypeEnum.optional(),
+  // The model may emit null (explicitly "type unknown") or omit it entirely;
+  // both mean "infer downstream" — inferTrntype derives the type from the amount
+  // sign + description and uses this only as a hint. Normalize null → undefined
+  // so the inferred hint type stays `Trntype | undefined`.
+  trntype: TrntypeEnum.nullish().transform((v) => v ?? undefined),
   source_page: z.number().int().min(1),
   confidence: z.number().min(0).max(1).default(1),
 });
@@ -119,7 +123,7 @@ const transactionJsonSchema = {
         'Who a check is made out to ("Pay to the order of"), read from the ' +
         'cancelled-check image. Null for non-check rows or when not visible.',
     },
-    trntype: { type: 'string', enum: TrntypeEnum.options },
+    trntype: { type: ['string', 'null'], enum: [...TrntypeEnum.options, null] },
     source_page: { type: 'integer', minimum: 1 },
     confidence: { type: 'number', minimum: 0, maximum: 1 },
   },

@@ -60,6 +60,40 @@ describe('ExtractionResult (nested)', () => {
     expect(out.institution).toEqual({});
   });
 
+  it('accepts trntype: null (model declined to classify) and normalizes it to undefined', () => {
+    // Regression: a real statement returned `trntype: null` for every row; the
+    // old `.optional()` schema rejected explicit null. inferTrntype derives the
+    // type downstream, so null/absent must parse, not fail.
+    const out = ExtractionResult.parse({
+      ...sampleNested,
+      transactions: [
+        {
+          posted_date: '2026-03-03',
+          description: 'TOAST DEP',
+          amount_cents: 12_345,
+          trntype: null,
+          source_page: 1,
+          confidence: 0.95,
+        },
+      ],
+    });
+    expect(out.transactions[0]?.trntype).toBeUndefined();
+  });
+
+  it('still accepts a valid trntype enum value', () => {
+    const out = ExtractionResult.parse({
+      ...sampleNested,
+      transactions: [{ ...sampleNested.transactions[0], trntype: 'DEP' }],
+    });
+    expect(out.transactions[0]?.trntype).toBe('DEP');
+  });
+
+  it('JSON Schema marks trntype nullable so the model may defer to inference', () => {
+    expect(ExtractionJsonSchema.properties.transactions.items.properties.trntype.type).toContain(
+      'null',
+    );
+  });
+
   it('exposes a JSON Schema with the right top-level required fields', () => {
     expect(ExtractionJsonSchema.required).toContain('period');
     expect(ExtractionJsonSchema.required).toContain('balances');
