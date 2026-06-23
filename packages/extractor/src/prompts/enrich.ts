@@ -31,19 +31,34 @@ export const DEFAULT_JSON_OUTPUT_FRAMING =
   `schema is additionalProperties=false — extra fields will be rejected.`;
 
 export const DEFAULT_CLEANSE_RULES =
-  `Cleansing rules (\`cleansed_description\`, max ${ENRICHMENT_CLEANSED_MAX_LENGTH} chars):\n` +
-  `1. Keep the merchant or counterparty identity intact. "POS DBT 0123 SQ\n` +
-  `   *AMTHAUS" → "Square — Amthaus". "AMZN MKTP US*A1B2C3" → "Amazon\n` +
-  `   Marketplace".\n` +
-  `2. Strip POS/DBT/CRD/CHK/REF/etc. transaction-channel noise unless it\n` +
-  `   adds disambiguation. Keep cardholder names if present.\n` +
-  `3. Preserve original wording when it's already clear ("Costco\n` +
-  `   Wholesale", "Verizon Wireless").\n` +
-  `4. Use proper case for merchant names; preserve all-caps brand names\n` +
-  `   that are intentionally so ("UPS", "AT&T").\n` +
-  `5. Never invent a merchant. If the source is opaque (e.g. "POS DEBIT\n` +
-  `   3942"), emit the closest faithful normalization ("POS Debit 3942"),\n` +
-  `   not a guess.`;
+  `Your task: rewrite each raw bank description as \`cleansed_description\` —\n` +
+  `a short, human-readable merchant or counterparty name (max\n` +
+  `${ENRICHMENT_CLEANSED_MAX_LENGTH} chars). Follow these rules exactly:\n` +
+  `\n` +
+  `1. Find the real merchant/counterparty and write it in Title Case\n` +
+  `   ("Costco Wholesale", "Verizon Wireless"). Keep brand names that are\n` +
+  `   intentionally all-caps ("UPS", "AT&T", "IBM").\n` +
+  `2. Remove processing noise: POS, DBT, CRD, PURCHASE, ACH, WEB, RECUR,\n` +
+  `   PYMT, terminal/store numbers, phone numbers, city/state, dates, and\n` +
+  `   "*" / "#" codes — UNLESS a token is the only thing naming the merchant.\n` +
+  `3. Keep a person's name on a check or personal transfer\n` +
+  `   ("CHECK 1042 JOHN SMITH" → "Check 1042 — John Smith").\n` +
+  `4. If the description is already clean, keep the wording and only fix casing.\n` +
+  `5. NEVER invent or guess a merchant. If the source is opaque, return a\n` +
+  `   faithful tidy-up of the original, not a made-up name.\n` +
+  `\n` +
+  `Do NOT: add words, amounts, dates, or categories that aren't in the input;\n` +
+  `write explanations; alter a person's name; or skip a row.\n` +
+  `\n` +
+  `Examples (raw description → cleansed_description):\n` +
+  `  "POS DBT 0123 SQ *AMTHAUS COFFEE" → "Square — Amthaus Coffee"\n` +
+  `  "AMZN MKTP US*A1B2C3" → "Amazon Marketplace"\n` +
+  `  "ACH WEB PYMT VERIZON WIRELESS 800-922-0204" → "Verizon Wireless"\n` +
+  `  "RECUR DEBIT NETFLIX.COM 866-579-7172 CA" → "Netflix"\n` +
+  `  "COSTCO WHSE #0455 SPRINGFIELD MO" → "Costco Wholesale"\n` +
+  `  "CHECK 1042 JOHN SMITH" → "Check 1042 — John Smith"\n` +
+  `  "EXTERNAL TRANSFER TO SAV XXXXXX4471" → "Transfer to Savings"\n` +
+  `  "POS DEBIT 3942" → "POS Debit 3942"`;
 
 // The "Available categories:" listing is appended automatically after
 // these rules — the operator edits the rules text only; the dynamic
