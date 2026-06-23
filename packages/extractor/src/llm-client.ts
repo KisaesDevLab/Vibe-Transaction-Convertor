@@ -444,6 +444,9 @@ export interface LocalGatewayProviderOptions {
   // grammar reliably trips on a firm's OCR text. Resolved from the admin setting
   // / LLM_LOCAL_STRUCTURED_OUTPUT by the factory.
   structuredOutputMode?: 'grammar' | 'json_object' | undefined;
+  // Prompt budget (tokens): caps how much statement markdown is sent before the
+  // head/tail truncation kicks in. Operator setting / LLM_MAX_PROMPT_TOKENS.
+  maxPromptTokens?: number | undefined;
   // GLM-OCR stage-1 engine (ADR-025). Scanned statement pages are transcribed
   // by a LOCAL GLM-OCR llama-server (OpenAI-compatible vision) instead of an
   // Ollama vision model — GLM-OCR is a purpose-built OCR engine. Each falls back
@@ -499,6 +502,8 @@ export class LocalGatewayProvider implements LlmProvider {
   private visionThink: boolean | undefined;
   // See LocalGatewayProviderOptions.structuredOutputMode.
   private structuredOutputMode: 'grammar' | 'json_object';
+  // See LocalGatewayProviderOptions.maxPromptTokens.
+  private maxPromptTokens: number;
   // GLM-OCR client options (ADR-025) — built once from the provider opts and
   // passed to ocrPdfPages on every OCR call. baseUrl unset ⇒ the OCR path throws.
   private glmOcr: GlmOcrClientOptions;
@@ -540,6 +545,7 @@ export class LocalGatewayProvider implements LlmProvider {
     this.structuredOutputMode =
       opts.structuredOutputMode ??
       (process.env.LLM_LOCAL_STRUCTURED_OUTPUT === 'json_object' ? 'json_object' : 'grammar');
+    this.maxPromptTokens = opts.maxPromptTokens ?? defaultPromptBudget();
     // GLM-OCR config (ADR-025). Each field falls back to its GLM_OCR_* env
     // inside the GLM client's resolveConfig; we only forward operator overrides
     // and the shared fetcher (so tests can stub it). An undefined value here
@@ -822,7 +828,7 @@ export class LocalGatewayProvider implements LlmProvider {
       throw new Error('ollama vision extract: retry loop exhausted unexpectedly');
     }
 
-    const { text } = prepareMarkdown(markdown);
+    const { text } = prepareMarkdown(markdown, this.maxPromptTokens);
 
     // One-shot reminder retry. When the gateway returns valid JSON
     // missing a required top-level field (the Vibe Gateway with
@@ -1103,6 +1109,10 @@ export interface AnthropicProviderOptions {
   // truncated mid-array and dropped `transactions`. Operator-tunable
   // from the LLM-provider admin page.
   maxTokens?: number | undefined;
+  // Prompt budget (tokens) — caps markdown sent before truncation. Same setting
+  // as the local provider (LLM_MAX_PROMPT_TOKENS); threaded so both providers
+  // honor the operator's value.
+  maxPromptTokens?: number | undefined;
   fetcher?: typeof fetch | undefined;
   // Operator-mergeable price table. When set, replaces the curated
   // defaults. Used by buildProvider to pass DB-backed pricing through
@@ -1117,6 +1127,7 @@ export class AnthropicProvider implements LlmProvider {
   private model: string;
   private timeoutMs: number;
   private maxTokens: number;
+  private maxPromptTokens: number;
   private fetcher: typeof fetch;
   private priceTable: AnthropicPriceTable;
 
@@ -1131,6 +1142,7 @@ export class AnthropicProvider implements LlmProvider {
     this.model = opts.model ?? process.env.ANTHROPIC_MODEL ?? 'claude-sonnet-4-6';
     this.timeoutMs = opts.timeoutMs ?? Number(process.env.LLM_TIMEOUT_MS ?? 60_000);
     this.maxTokens = opts.maxTokens ?? Number(process.env.LLM_MAX_COMPLETION_TOKENS ?? 32_000);
+    this.maxPromptTokens = opts.maxPromptTokens ?? defaultPromptBudget();
     this.fetcher = opts.fetcher ?? fetch;
     this.priceTable = opts.priceTable ?? ANTHROPIC_PRICE_TABLE_DEFAULT;
   }
@@ -1348,7 +1360,7 @@ export class AnthropicProvider implements LlmProvider {
         'AnthropicProvider is text-only — scanned/image statements OCR locally on Ollama',
       );
     }
-    const { text } = prepareMarkdown(markdown);
+    const { text } = prepareMarkdown(markdown, this.maxPromptTokens);
     const promptOpts: UserPromptOptions = {};
     if (opts.dateFormatOverride) promptOpts.dateFormatOverride = opts.dateFormatOverride;
     if (opts.accountTypeHint) promptOpts.accountTypeHint = opts.accountTypeHint;

@@ -189,6 +189,7 @@ const constructLocal = async (db: Db): Promise<LlmProvider> => {
     ...(visionModelId ? { visionModelId } : {}),
     timeoutMs,
     structuredOutputMode: ai.localStructuredOutput,
+    maxPromptTokens: ai.maxPromptTokens,
     visionTimeoutMs: ai.visionTimeoutMs,
     visionMaxTokens: ai.visionMaxTokens,
     keepAlive: ai.keepAlive,
@@ -225,7 +226,16 @@ const constructAnthropic = async (db: Db): Promise<LlmProvider> => {
   const baseUrl = await resolveAnthropicBaseUrl(db);
   const timeoutMs = await resolveLlmTimeoutMs(db);
   const maxTokens = await resolveLlmMaxTokens(db);
-  return new AnthropicProvider({ apiKey, model, priceTable, baseUrl, timeoutMs, maxTokens });
+  const { maxPromptTokens } = await resolveAiSettings(db);
+  return new AnthropicProvider({
+    apiKey,
+    model,
+    priceTable,
+    baseUrl,
+    timeoutMs,
+    maxTokens,
+    maxPromptTokens,
+  });
 };
 
 export const buildProviderForId = async (db: Db, id: ProviderId): Promise<LlmProvider> => {

@@ -79,8 +79,8 @@ interface ProviderStatus {
   effectiveModel: string;
   effectiveMaxTokens: number;
   monthlyCapUsd: number | null;
-  // Operator-tunable AI knobs (vision performance / OCR fidelity / OCR safety
-  // net), rendered generically by `kind` and grouped.
+  // Operator-tunable AI knobs (check-payee vision / GLM-OCR / text extraction /
+  // review safety net), rendered generically by `kind` and grouped.
   aiSettings: AiSetting[];
   // GLM-OCR stage-1 engine (ADR-025): resolved config + live health probe.
   glmOcr: {
@@ -1173,10 +1173,10 @@ function OllamaField({
 // setting falls back to its env var / default; blanking a field clears the
 // override. int/float/string commit on blur+Enter; bool/enum commit on change.
 const AI_GROUP_LABELS: Record<AiSetting['group'], string> = {
-  vision: 'Vision performance',
-  ocr: 'OCR fidelity',
-  extraction: 'Text extraction',
-  safety: 'OCR safety net',
+  vision: 'Check-payee vision fallback (Ollama)',
+  ocr: 'Scanned-statement OCR (GLM-OCR)',
+  extraction: 'Text extraction (Ollama)',
+  safety: 'Review safety net',
 };
 
 function AiTuningSection({

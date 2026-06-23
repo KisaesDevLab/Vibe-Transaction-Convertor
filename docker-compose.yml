@@ -64,16 +64,28 @@ services:
       timeout: 3s
       retries: 30
 
-  # Local Ollama model server — serves both the text model (OpenAI-compatible
-  # /v1) and the Qwen-VL vision model (native /api/chat) for OCR. Models are
+  # Local Ollama model server — serves the text model (OpenAI-compatible /v1)
+  # and the check-payee fallback vision model (native /api/chat). Models are
   # NOT baked into the image; after `up`, pull them:
-  #   docker compose exec ollama ollama pull qwen3.5:35b-a3b
-  #   docker compose exec ollama ollama pull minicpm-v4.5:latest   # OCR/vision
+  #   docker compose exec ollama ollama pull qwen2.5:32b-instruct
+  #   docker compose exec ollama ollama pull qwen3-vl:30b            # check-payee vision
   # For GPU acceleration add a `deploy.resources.reservations.devices` NVIDIA
   # block (host needs the NVIDIA container toolkit); CPU-only works but is slow.
   ollama:
     image: ollama/ollama:latest
     profiles: ['standalone']
+    environment:
+      # SERVER-side keep-alive: how long Ollama keeps a model resident after a
+      # request. The OpenAI-compatible /v1 endpoint (used by text extraction)
+      # IGNORES a per-request keep_alive, so this server default is the only way
+      # to keep the text model warm and avoid the ~2-min cold reload on the
+      # first extraction. Default 1h; "-1" = forever (more VRAM, no reloads).
+      OLLAMA_KEEP_ALIVE: ${OLLAMA_KEEP_ALIVE:-1h}
+      # SERVER-side default context window. The big extraction prompt (system +
+      # exemplars + statement markdown) can exceed Ollama's stock 4096 and get
+      # silently truncated — /v1 can't set num_ctx per request either, so raise
+      # the server default. 8192 fits a typical statement; raise for long ones.
+      OLLAMA_CONTEXT_LENGTH: ${OLLAMA_CONTEXT_LENGTH:-8192}
     volumes:
       - vibetc-ollama:/root/.ollama
     healthcheck:

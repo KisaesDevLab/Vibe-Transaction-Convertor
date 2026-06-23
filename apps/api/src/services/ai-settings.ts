@@ -33,7 +33,9 @@ export interface AiSettingDef {
 }
 
 export const AI_SETTINGS: readonly AiSettingDef[] = [
-  // --- Vision performance ---
+  // --- Check-payee vision fallback (Ollama qwen3-vl) ---
+  // These govern ONLY the check-payee fallback vision call (callOllamaVision).
+  // Scanned-statement OCR runs on GLM-OCR (ADR-025), not an Ollama vision model.
   {
     id: 'visionTimeoutMs',
     key: 'llm.vision.timeout_ms',
@@ -41,7 +43,7 @@ export const AI_SETTINGS: readonly AiSettingDef[] = [
     kind: 'int',
     group: 'vision',
     label: 'Vision call timeout',
-    help: 'Per-call OCR/vision timeout. Raise for a large -VL model on CPU or a cold model load.',
+    help: 'Per-call timeout for the check-payee fallback vision model (qwen3-vl). Raise for a large model on CPU or a cold load.',
     default: '300000',
     min: 1000,
     max: 1_800_000,
@@ -54,7 +56,7 @@ export const AI_SETTINGS: readonly AiSettingDef[] = [
     kind: 'int',
     group: 'vision',
     label: 'Vision max output tokens',
-    help: 'Hard cap on vision output (Ollama num_predict). Bounds runaway generation that would blow past the timeout.',
+    help: 'Hard cap on the check-payee vision model output (Ollama num_predict). Bounds runaway generation that would blow past the timeout.',
     default: '8192',
     min: 256,
     max: 64_000,
@@ -66,7 +68,7 @@ export const AI_SETTINGS: readonly AiSettingDef[] = [
     kind: 'enum',
     group: 'vision',
     label: 'Vision reasoning',
-    help: 'Thinking models: "off" roughly halves latency; a schema-constrained OCR pass rarely needs it. Blank = the model default.',
+    help: 'Thinking models: "off" roughly halves latency; the check-payee read rarely needs reasoning. Blank = the model default.',
     default: '',
     enumValues: ['', 'on', 'off'],
   },
@@ -76,8 +78,8 @@ export const AI_SETTINGS: readonly AiSettingDef[] = [
     env: 'OLLAMA_KEEP_ALIVE',
     kind: 'string',
     group: 'vision',
-    label: 'Model keep-alive',
-    help: 'How long Ollama keeps the model resident between calls (e.g. 30m, 1h, or -1 for forever). Longer avoids cold reloads.',
+    label: 'Vision model keep-alive',
+    help: 'How long Ollama keeps the check-payee vision model resident between calls (e.g. 30m, 1h, or -1 for forever). Longer avoids cold reloads.',
     default: '30m',
   },
   {
@@ -86,8 +88,8 @@ export const AI_SETTINGS: readonly AiSettingDef[] = [
     env: 'OLLAMA_NUM_CTX',
     kind: 'int',
     group: 'vision',
-    label: 'Context window (num_ctx)',
-    help: 'Override the Ollama context window for long statements. Blank = the model default.',
+    label: 'Vision context window (num_ctx)',
+    help: 'Override the Ollama context window for the check-payee vision model. Blank = the model default.',
     default: '',
     min: 512,
     max: 131_072,
@@ -104,7 +106,19 @@ export const AI_SETTINGS: readonly AiSettingDef[] = [
     default: 'grammar',
     enumValues: ['grammar', 'json_object'],
   },
-  // --- OCR fidelity ---
+  {
+    id: 'maxPromptTokens',
+    key: 'llm.max_prompt_tokens',
+    env: 'LLM_MAX_PROMPT_TOKENS',
+    kind: 'int',
+    group: 'extraction',
+    label: 'Max prompt tokens',
+    help: 'Token budget for the statement markdown sent to the text model (the system prompt + exemplars reserve ~4k more on top). Markdown beyond this is head/tail-truncated. Raise for long statements, but keep below the model context window.',
+    default: '24000',
+    min: 1000,
+    max: 120_000,
+  },
+  // --- Scanned-statement OCR (GLM-OCR; ADR-025) ---
   {
     id: 'ocrDpi',
     key: 'ocr.raster_dpi',
@@ -112,24 +126,11 @@ export const AI_SETTINGS: readonly AiSettingDef[] = [
     kind: 'int',
     group: 'ocr',
     label: 'OCR raster DPI',
-    help: 'Resolution scanned pages are rasterized at. Higher = sharper small text (better OCR) but slower/larger calls and more timeout risk.',
+    help: 'Resolution scanned pages are rasterized to (PNG) before GLM-OCR. Higher = sharper small text (better OCR) but larger requests and more timeout risk.',
     default: '200',
     min: 72,
     max: 600,
   },
-  {
-    id: 'ocrJpegQuality',
-    key: 'ocr.raster_jpeg_quality',
-    env: 'VIBETC_OCR_RASTER_JPEG_QUALITY',
-    kind: 'int',
-    group: 'ocr',
-    label: 'OCR JPEG quality',
-    help: 'JPEG quality (30–100) for rasterized page images.',
-    default: '80',
-    min: 30,
-    max: 100,
-  },
-  // --- GLM-OCR engine (local stage-1 OCR; ADR-025) ---
   {
     id: 'glmOcrUrl',
     key: 'ocr.glm.url',
@@ -209,8 +210,8 @@ export interface ResolvedAiSettings {
   keepAlive: string;
   numCtx: number | undefined;
   localStructuredOutput: 'grammar' | 'json_object';
+  maxPromptTokens: number;
   ocrDpi: number;
-  ocrJpegQuality: number;
   glmOcrUrl: string;
   glmOcrModel: string;
   glmOcrTimeoutMs: number;
@@ -269,8 +270,8 @@ export const resolveAiSettings = async (db: Db): Promise<ResolvedAiSettings> => 
     numCtx: optIntOf('numCtx'),
     localStructuredOutput:
       raw(byId('localStructuredOutput')!) === 'json_object' ? 'json_object' : 'grammar',
+    maxPromptTokens: intOf('maxPromptTokens'),
     ocrDpi: intOf('ocrDpi'),
-    ocrJpegQuality: intOf('ocrJpegQuality'),
     glmOcrUrl: raw(byId('glmOcrUrl')!),
     glmOcrModel: raw(byId('glmOcrModel')!),
     glmOcrTimeoutMs: intOf('glmOcrTimeoutMs'),

@@ -430,6 +430,19 @@ export function StatementReviewPage() {
           {(enrichmentToggles.data?.cleanseEnabled || enrichmentToggles.data?.categoryEnabled) && (
             <div className="flex flex-wrap items-center gap-2 rounded-lg border border-surface-muted bg-white p-3 text-sm">
               <span className="text-ink-muted">AI enrichment:</span>
+              {enrichmentToggles.data?.model ? (
+                <span className="text-xs">
+                  {enrich.isPending ? (
+                    <span className="text-blue-700">
+                      running on {enrichmentToggles.data.model}…
+                    </span>
+                  ) : (
+                    <span className="text-ink-subtle">
+                      uses {enrichmentToggles.data.provider} · {enrichmentToggles.data.model}
+                    </span>
+                  )}
+                </span>
+              ) : null}
               {enrichmentToggles.data?.cleanseEnabled && canEnrich ? (
                 <button
                   type="button"
@@ -445,7 +458,8 @@ export function StatementReviewPage() {
                           (r.skippedUserEditedCount > 0
                             ? ` (${r.skippedUserEditedCount} user-edited skipped)`
                             : '') +
-                          (r.cacheHits > 0 ? ` · ${r.cacheHits} cache hits` : ''),
+                          (r.cacheHits > 0 ? ` · ${r.cacheHits} cache hits` : '') +
+                          (r.model ? ` · ${r.model}` : ''),
                       );
                     } catch (err) {
                       toast.error(err instanceof ApiError ? err.message : 'enrichment failed');
@@ -471,7 +485,8 @@ export function StatementReviewPage() {
                           (r.skippedUserEditedCount > 0
                             ? ` (${r.skippedUserEditedCount} user-edited skipped)`
                             : '') +
-                          (r.cacheHits > 0 ? ` · ${r.cacheHits} cache hits` : ''),
+                          (r.cacheHits > 0 ? ` · ${r.cacheHits} cache hits` : '') +
+                          (r.model ? ` · ${r.model}` : ''),
                       );
                     } catch (err) {
                       toast.error(err instanceof ApiError ? err.message : 'enrichment failed');

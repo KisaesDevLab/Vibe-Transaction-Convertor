@@ -60,7 +60,6 @@ live('ai-settings (live Postgres)', () => {
     expect(s.keepAlive).toBe('30m');
     expect(s.numCtx).toBeUndefined();
     expect(s.ocrDpi).toBe(200);
-    expect(s.ocrJpegQuality).toBe(80);
     expect(s.reviewConfidence).toBeCloseTo(0.7);
     expect(s.checkPayeeAuto).toBe(true);
     expect(s.localStructuredOutput).toBe('grammar');

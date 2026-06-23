@@ -38,7 +38,7 @@ import {
   enrichmentCache,
   type EnrichmentCacheKey,
 } from './enrichment-cache.js';
-import { buildProvider } from './llm-provider.js';
+import { buildProvider, resolveModelLabelForProvider, resolveProviderId } from './llm-provider.js';
 import { readSettingPlain, upsertSetting } from './system-settings.js';
 
 export interface EnrichOptions {
@@ -406,10 +406,22 @@ export const enrichStatement = async (
 // different statement).
 export const enrichmentToggleStatus = async (
   db: Db,
-): Promise<{ cleanseEnabled: boolean; categoryEnabled: boolean }> => ({
-  cleanseEnabled: await isToggleEnabled(db, 'enrichment.cleanse_enabled'),
-  categoryEnabled: await isToggleEnabled(db, 'enrichment.category_enabled'),
-});
+): Promise<{
+  cleanseEnabled: boolean;
+  categoryEnabled: boolean;
+  provider: 'local' | 'anthropic';
+  model: string;
+}> => {
+  // Enrichment runs on the default provider (buildProvider) — surface which
+  // provider + model it will use so the UI can show it before/while running.
+  const provider = await resolveProviderId(db);
+  return {
+    cleanseEnabled: await isToggleEnabled(db, 'enrichment.cleanse_enabled'),
+    categoryEnabled: await isToggleEnabled(db, 'enrichment.category_enabled'),
+    provider,
+    model: await resolveModelLabelForProvider(db, provider),
+  };
+};
 
 export interface EnrichmentPromptStatus {
   mode: EnrichmentPromptMode;

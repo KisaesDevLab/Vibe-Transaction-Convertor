@@ -72,6 +72,10 @@ export const useArchiveCategory = () => {
 export interface EnrichmentTogglesStatus {
   cleanseEnabled: boolean;
   categoryEnabled: boolean;
+  // The provider + model enrichment will run on (default provider). Optional
+  // for back-compat with older API responses.
+  provider?: 'local' | 'anthropic';
+  model?: string;
 }
 
 export const useEnrichmentToggles = () =>
