@@ -10,6 +10,27 @@ import { z } from 'zod';
 
 export const ENRICHMENT_CLEANSED_MAX_LENGTH = 80;
 
+// Richer transaction taxonomy produced by the cleanse pass (distinct from the
+// OFX `trntype`). The model classifies each row into exactly one of these.
+export const ENRICHMENT_TRANSACTION_TYPES = [
+  'purchase',
+  'bill_payment',
+  'transfer',
+  'p2p',
+  'check',
+  'fee',
+  'interest',
+  'dividend',
+  'deposit',
+  'atm',
+  'refund',
+  'payroll',
+  'tax',
+  'government',
+  'unknown',
+] as const;
+export const ENRICHMENT_CONFIDENCE_BANDS = ['high', 'medium', 'low'] as const;
+
 // ----- request input (what the API sends to the LLM) -----
 
 export const EnrichmentInputTransaction = z.object({
@@ -45,6 +66,15 @@ export const EnrichedTransaction = z.object({
   index: z.number().int().min(0),
   cleansed_description: z.string().min(1).max(ENRICHMENT_CLEANSED_MAX_LENGTH).nullable().optional(),
   category: z.string().min(1).nullable().optional(),
+  // Structured cleanse outputs. Kept LENIENT (any string, nullable, optional)
+  // so a model that omits or mis-spells one field never fails the whole batch —
+  // the JSON Schema below constrains the model to the enums; Zod is the safety
+  // net (mirrors the extraction lessons about over-strict re-validation).
+  merchant_name: z.string().max(120).nullable().optional(),
+  processor: z.string().max(60).nullable().optional(),
+  transaction_type: z.string().max(40).nullable().optional(),
+  is_opaque: z.boolean().nullable().optional(),
+  confidence: z.string().max(10).nullable().optional(),
 });
 export type EnrichedTransaction = z.infer<typeof EnrichedTransaction>;
 
@@ -87,9 +117,43 @@ export const buildEnrichmentJsonSchema = (opts: {
       minLength: 1,
       maxLength: ENRICHMENT_CLEANSED_MAX_LENGTH,
       description:
-        'Concise human-readable form of the raw bank description. Preserve original wording where it adds identification value (merchant name, location). No invented details.',
+        'Concise human-readable display name derived ONLY from tokens in the raw input. No invented merchant, brand, location, amount, date, or category.',
     };
-    itemRequired.push('cleansed_description');
+    itemProperties.merchant_name = {
+      type: ['string', 'null'],
+      maxLength: 120,
+      description:
+        'Underlying merchant or person (looking past any payment processor). null when no identifiable counterparty.',
+    };
+    itemProperties.processor = {
+      type: ['string', 'null'],
+      maxLength: 60,
+      description: 'Payment intermediary if present (Square, Toast, PayPal, …). null when none.',
+    };
+    itemProperties.transaction_type = {
+      type: 'string',
+      enum: [...ENRICHMENT_TRANSACTION_TYPES],
+      description: 'Exactly one transaction type from the enum.',
+    };
+    itemProperties.is_opaque = {
+      type: 'boolean',
+      description: 'true when no meaningful counterparty could be identified (abstained).',
+    };
+    itemProperties.confidence = {
+      type: 'string',
+      enum: [...ENRICHMENT_CONFIDENCE_BANDS],
+      description: 'Self-reported confidence band.',
+    };
+    // All required (merchant_name/processor allow null) so the model always
+    // emits them — left optional, some models silently drop merchant_name.
+    itemRequired.push(
+      'cleansed_description',
+      'merchant_name',
+      'processor',
+      'transaction_type',
+      'is_opaque',
+      'confidence',
+    );
   }
   if (opts.categorize) {
     itemProperties.category = {

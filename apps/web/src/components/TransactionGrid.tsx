@@ -1047,18 +1047,46 @@ function CleansedCell({
   }
 
   const display = tx.cleansedDescription ?? '';
+  const tip =
+    [
+      tx.enrichmentMerchantName ? `merchant: ${tx.enrichmentMerchantName}` : null,
+      tx.enrichmentProcessor ? `processor: ${tx.enrichmentProcessor}` : null,
+      tx.enrichmentTransactionType ? `type: ${tx.enrichmentTransactionType}` : null,
+      tx.enrichmentConfidence ? `confidence: ${tx.enrichmentConfidence}` : null,
+    ]
+      .filter(Boolean)
+      .join(' · ') ||
+    display ||
+    'Click to add a cleansed description';
   return (
-    <button
-      type="button"
-      onClick={() => setEditing(true)}
-      className="text-left text-xs hover:underline"
-      title={display || 'Click to add a cleansed description'}
-    >
-      {display.length > 32 ? `${display.slice(0, 32)}…` : display || '—'}
-      {tx.enrichmentUserEdited ? (
-        <span className="ml-1 text-[10px] text-ink-subtle">(edited)</span>
+    <div className="flex flex-col items-start gap-0.5">
+      <button
+        type="button"
+        onClick={() => setEditing(true)}
+        className="text-left text-xs hover:underline"
+        title={tip}
+      >
+        {display.length > 32 ? `${display.slice(0, 32)}…` : display || '—'}
+        {tx.enrichmentUserEdited ? (
+          <span className="ml-1 text-[10px] text-ink-subtle">(edited)</span>
+        ) : null}
+      </button>
+      {tx.enrichmentTransactionType || tx.enrichmentProcessor || tx.enrichmentIsOpaque ? (
+        <span className="flex flex-wrap items-center gap-1 text-[10px]">
+          {tx.enrichmentTransactionType ? (
+            <span className="rounded bg-surface-subtle px-1 text-ink-muted">
+              {tx.enrichmentTransactionType}
+            </span>
+          ) : null}
+          {tx.enrichmentProcessor ? (
+            <span className="text-ink-subtle">via {tx.enrichmentProcessor}</span>
+          ) : null}
+          {tx.enrichmentIsOpaque ? (
+            <span className="rounded bg-amber-50 px-1 text-amber-800">opaque</span>
+          ) : null}
+        </span>
       ) : null}
-    </button>
+    </div>
   );
 }
 

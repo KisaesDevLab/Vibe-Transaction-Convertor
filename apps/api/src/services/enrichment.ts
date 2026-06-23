@@ -243,6 +243,11 @@ export const enrichStatement = async (
     txId: string;
     cleansedDescription: string | null;
     categoryName: string | null;
+    merchantName: string | null;
+    processor: string | null;
+    transactionType: string | null;
+    isOpaque: boolean | null;
+    confidence: string | null;
   };
   const resolved: Resolved[] = [];
   const missing: typeof candidateTxs = [];
@@ -255,6 +260,11 @@ export const enrichStatement = async (
         txId: tx.id,
         cleansedDescription: opts.cleanse ? (hit.cleansedDescription ?? null) : null,
         categoryName: opts.categorize ? (hit.category ?? null) : null,
+        merchantName: opts.cleanse ? (hit.merchantName ?? null) : null,
+        processor: opts.cleanse ? (hit.processor ?? null) : null,
+        transactionType: opts.cleanse ? (hit.transactionType ?? null) : null,
+        isOpaque: opts.cleanse ? (hit.isOpaque ?? null) : null,
+        confidence: opts.cleanse ? (hit.confidence ?? null) : null,
       });
     } else {
       missing.push(tx);
@@ -317,12 +327,31 @@ export const enrichStatement = async (
       if (!tx) continue;
       const cleansedDescription = opts.cleanse ? (out.cleansed_description ?? null) : null;
       const categoryName = opts.categorize ? (out.category ?? null) : null;
-      resolved.push({ txId: tx.id, cleansedDescription, categoryName });
+      const merchantName = opts.cleanse ? (out.merchant_name ?? null) : null;
+      const processor = opts.cleanse ? (out.processor ?? null) : null;
+      const transactionType = opts.cleanse ? (out.transaction_type ?? null) : null;
+      const isOpaque = opts.cleanse ? (out.is_opaque ?? null) : null;
+      const confidence = opts.cleanse ? (out.confidence ?? null) : null;
+      resolved.push({
+        txId: tx.id,
+        cleansedDescription,
+        categoryName,
+        merchantName,
+        processor,
+        transactionType,
+        isOpaque,
+        confidence,
+      });
       // Best-effort cache write so the same merchant on the next
       // statement is a hit. A failing Redis silently no-ops.
       void enrichmentCache.set(cacheKeyFor(tx.description), {
         ...(cleansedDescription !== null ? { cleansedDescription } : {}),
         ...(categoryName !== null ? { category: categoryName } : {}),
+        ...(merchantName !== null ? { merchantName } : {}),
+        ...(processor !== null ? { processor } : {}),
+        ...(transactionType !== null ? { transactionType } : {}),
+        ...(isOpaque !== null ? { isOpaque } : {}),
+        ...(confidence !== null ? { confidence } : {}),
       });
     }
   }
@@ -342,7 +371,14 @@ export const enrichStatement = async (
   await db.transaction(async (tx) => {
     for (const r of resolved) {
       const update: Record<string, unknown> = { enrichmentRunAt: sql`now()` };
-      if (opts.cleanse) update.cleansedDescription = r.cleansedDescription;
+      if (opts.cleanse) {
+        update.cleansedDescription = r.cleansedDescription;
+        update.enrichmentMerchantName = r.merchantName;
+        update.enrichmentProcessor = r.processor;
+        update.enrichmentTransactionType = r.transactionType;
+        update.enrichmentIsOpaque = r.isOpaque;
+        update.enrichmentConfidence = r.confidence;
+      }
       if (opts.categorize) {
         const categoryId = r.categoryName
           ? (categoryNameToId.get(r.categoryName.toLowerCase()) ?? null)

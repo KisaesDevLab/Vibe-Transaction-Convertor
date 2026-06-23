@@ -32,11 +32,25 @@ describe('buildEnrichmentJsonSchema', () => {
       };
     };
     const item = sch.properties.transactions.items;
-    expect(item.required).toEqual(['index', 'cleansed_description']);
+    expect(item.required).toEqual([
+      'index',
+      'cleansed_description',
+      'merchant_name',
+      'processor',
+      'transaction_type',
+      'is_opaque',
+      'confidence',
+    ]);
     expect(item.properties.cleansed_description).toMatchObject({
       maxLength: ENRICHMENT_CLEANSED_MAX_LENGTH,
     });
     expect(item.properties.category).toBeUndefined();
+    // Structured cleanse fields present + constrained.
+    const props = item.properties as Record<string, { type?: unknown; enum?: string[] }>;
+    expect(props.transaction_type?.enum).toContain('p2p');
+    expect(props.confidence?.enum).toEqual(['high', 'medium', 'low']);
+    expect(props.is_opaque?.type).toBe('boolean');
+    expect(props.merchant_name?.type).toEqual(['string', 'null']);
   });
 
   it('categorize-only schema requires category enum', () => {
@@ -63,7 +77,16 @@ describe('buildEnrichmentJsonSchema', () => {
       categoryNames: ['Office', 'Travel'],
     }) as { properties: { transactions: { items: { required: string[] } } } };
     const item = sch.properties.transactions.items;
-    expect(item.required).toEqual(['index', 'cleansed_description', 'category']);
+    expect(item.required).toEqual([
+      'index',
+      'cleansed_description',
+      'merchant_name',
+      'processor',
+      'transaction_type',
+      'is_opaque',
+      'confidence',
+      'category',
+    ]);
   });
 
   it('top-level forbids extra properties', () => {

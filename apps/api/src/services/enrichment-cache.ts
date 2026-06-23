@@ -24,6 +24,13 @@ const client = (): Redis | null => {
 export interface EnrichmentCachePayload {
   cleansedDescription?: string | null | undefined;
   category?: string | null | undefined;
+  // Structured cleanse outputs (see ADR / enrichment.ts). Cached alongside the
+  // display name so the same merchant on the next statement reuses them.
+  merchantName?: string | null | undefined;
+  processor?: string | null | undefined;
+  transactionType?: string | null | undefined;
+  isOpaque?: boolean | null | undefined;
+  confidence?: string | null | undefined;
 }
 
 export interface EnrichmentCacheKey {
@@ -42,7 +49,10 @@ export interface EnrichmentCacheKey {
   categorize: boolean;
 }
 
-export const ENRICHMENT_PROMPT_VERSION = '1';
+// Bumped to '2' when the cleanse pass started emitting the structured fields
+// (merchant_name/processor/transaction_type/is_opaque/confidence) — old cached
+// entries lack them, so invalidate.
+export const ENRICHMENT_PROMPT_VERSION = '2';
 
 const hashKey = (k: EnrichmentCacheKey): string => {
   const h = createHash('sha256');

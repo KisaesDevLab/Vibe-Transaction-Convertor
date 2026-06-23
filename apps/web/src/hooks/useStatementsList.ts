@@ -83,6 +83,12 @@ export interface TransactionRow {
   businessCategoryName: string | null;
   enrichmentUserEdited: boolean;
   enrichmentRunAt: string | null;
+  // Structured cleanse outputs (Phase 33 follow-up). Null until cleansed.
+  enrichmentMerchantName: string | null;
+  enrichmentProcessor: string | null;
+  enrichmentTransactionType: string | null;
+  enrichmentIsOpaque: boolean | null;
+  enrichmentConfidence: string | null;
   // Server-computed: cents the printed running_balance is off vs.
   // (prior_running + this row's amount). Null when the row reconciles
   // cleanly or no running balance was extracted. Phase 18 #25.

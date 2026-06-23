@@ -31,34 +31,87 @@ export const DEFAULT_JSON_OUTPUT_FRAMING =
   `schema is additionalProperties=false — extra fields will be rejected.`;
 
 export const DEFAULT_CLEANSE_RULES =
-  `Your task: rewrite each raw bank description as \`cleansed_description\` —\n` +
-  `a short, human-readable merchant or counterparty name (max\n` +
-  `${ENRICHMENT_CLEANSED_MAX_LENGTH} chars). Follow these rules exactly:\n` +
+  `CLEANSING — for each transaction produce these fields: cleansed_description\n` +
+  `(<= ${ENRICHMENT_CLEANSED_MAX_LENGTH} chars), merchant_name, processor,\n` +
+  `transaction_type, is_opaque, confidence. Behave like a deterministic parser,\n` +
+  `not a creative assistant.\n` +
   `\n` +
-  `1. Find the real merchant/counterparty and write it in Title Case\n` +
-  `   ("Costco Wholesale", "Verizon Wireless"). Keep brand names that are\n` +
-  `   intentionally all-caps ("UPS", "AT&T", "IBM").\n` +
-  `2. Remove processing noise: POS, DBT, CRD, PURCHASE, ACH, WEB, RECUR,\n` +
-  `   PYMT, terminal/store numbers, phone numbers, city/state, dates, and\n` +
-  `   "*" / "#" codes — UNLESS a token is the only thing naming the merchant.\n` +
-  `3. Keep a person's name on a check or personal transfer\n` +
-  `   ("CHECK 1042 JOHN SMITH" → "Check 1042 — John Smith").\n` +
-  `4. If the description is already clean, keep the wording and only fix casing.\n` +
-  `5. NEVER invent or guess a merchant. If the source is opaque, return a\n` +
-  `   faithful tidy-up of the original, not a made-up name.\n` +
+  `CORE PRINCIPLE — EXTRACT, NEVER INVENT. Every character of the\n` +
+  `merchant/counterparty name MUST be derivable from tokens in that row's\n` +
+  `raw_description. You may expand an unambiguous abbreviation (AMZN MKTP ->\n` +
+  `Amazon Marketplace, WM SUPERCENTER -> Walmart, COSTCO WHSE -> Costco\n` +
+  `Wholesale), but NEVER add a merchant, brand, location, amount, date, or\n` +
+  `category not present in or directly implied by the input. If you cannot\n` +
+  `identify a meaningful name, ABSTAIN (is_opaque=true) rather than guess.\n` +
   `\n` +
-  `Do NOT: add words, amounts, dates, or categories that aren't in the input;\n` +
-  `write explanations; alter a person's name; or skip a row.\n` +
+  `PROCEDURE (in order):\n` +
+  `1. IDENTIFY the real counterparty; use the processor table to look PAST\n` +
+  `   payment intermediaries to the underlying merchant/person.\n` +
+  `2. CLASSIFY transaction_type as one of: purchase, bill_payment, transfer,\n` +
+  `   p2p, check, fee, interest, dividend, deposit, atm, refund, payroll, tax,\n` +
+  `   government, unknown.\n` +
+  `3. STRIP noise: POS, DBT, CRD, CHKCARD, PURCHASE, ACH, WEB, RECUR, PYMT, PPD,\n` +
+  `   CCD, TEL, DES:, INDN:, CO ID:, SEC codes, trace/terminal/store numbers,\n` +
+  `   phone numbers, city/state, dates, and "*"/"#" codes -- UNLESS a token is\n` +
+  `   the ONLY thing naming the counterparty. Never strip the name.\n` +
+  `4. CANONICALIZE casing (below).\n` +
+  `5. VALIDATE: the name uses only input-derived tokens; if not, abstain.\n` +
   `\n` +
-  `Examples (raw description → cleansed_description):\n` +
-  `  "POS DBT 0123 SQ *AMTHAUS COFFEE" → "Square — Amthaus Coffee"\n` +
-  `  "AMZN MKTP US*A1B2C3" → "Amazon Marketplace"\n` +
-  `  "ACH WEB PYMT VERIZON WIRELESS 800-922-0204" → "Verizon Wireless"\n` +
-  `  "RECUR DEBIT NETFLIX.COM 866-579-7172 CA" → "Netflix"\n` +
-  `  "COSTCO WHSE #0455 SPRINGFIELD MO" → "Costco Wholesale"\n` +
-  `  "CHECK 1042 JOHN SMITH" → "Check 1042 — John Smith"\n` +
-  `  "EXTERNAL TRANSFER TO SAV XXXXXX4471" → "Transfer to Savings"\n` +
-  `  "POS DEBIT 3942" → "POS Debit 3942"`;
+  `PAYMENT PROCESSORS — many rows show a processor, not the merchant; the real\n` +
+  `merchant/person usually follows the "*":\n` +
+  `  SQ */gosq.com=Square; TST*=Toast; PP*/PAYPAL *=PayPal; VENMO*/VEN*=Venmo;\n` +
+  `  CASH APP*/SQC*=Cash App; CLV*/CLOVER=Clover; WPY*=Worldpay; BT*=Braintree;\n` +
+  `  SP*/SP+AFF*=Shopify; GOOGLE*=Google.\n` +
+  `Set merchant_name to the entity AFTER the "*" and processor to the prefix's\n` +
+  `company: "SQ *BLUE BOTTLE" -> merchant_name "Blue Bottle Coffee", processor\n` +
+  `"Square". EXCEPTIONS (the brand IS the merchant; no third party follows):\n` +
+  `APL*/APPLE.COM/BILL -> Apple; AMZN MKTP/AMZN.COM/BILL -> Amazon. Stripe puts\n` +
+  `the merchant's own name as the PREFIX (no "Stripe" prefix).\n` +
+  `\n` +
+  `ACH / BANK DESCRIPTORS — the counterparty is the Company Name (billers) or\n` +
+  `the Receiving Individual Name (often after INDN:). SEC codes (PPD/CCD/WEB/TEL)\n` +
+  `and entry descriptions (PAYROLL, PURCHASE) set transaction_type, not the name.\n` +
+  `"IRS TREAS 310 ... TAX REF" -> merchant_name "IRS", transaction_type "tax".\n` +
+  `Payroll providers (GUSTO, ADP, PAYCHEX) -> keep the provider as merchant_name,\n` +
+  `transaction_type "payroll".\n` +
+  `\n` +
+  `TRANSFERS / P2P / CHECKS:\n` +
+  `- Internal transfer: "EXTERNAL TRANSFER TO SAV XXXX4471" -> "Transfer to\n` +
+  `  Savings", type "transfer". Mask account digits.\n` +
+  `- P2P to a person (Zelle/Venmo/Cash App + a name) -> use the person's name,\n` +
+  `  type "p2p": "ZELLE PMT TO JOHN SMITH" -> "Zelle - John Smith".\n` +
+  `- Checks: "CHECK 1042 JOHN SMITH" -> "Check 1042 - John Smith", type "check".\n` +
+  `  No payee: "CHECK 1042" -> "Check 1042".\n` +
+  `- Bank items: fees -> "fee"; interest -> "interest"; ATM -> "atm".\n` +
+  `\n` +
+  `CASING:\n` +
+  `- Title Case by default ("Costco Wholesale", "Verizon Wireless").\n` +
+  `- PRESERVE these all-caps brand acronyms exactly: UPS, AT&T, IBM, H&M, CVS,\n` +
+  `  IKEA, HSBC, USAA, BP, KFC, TJ Maxx, AMC, NPR.\n` +
+  `- Keep intentional internal punctuation (AT&T, H&M).\n` +
+  `- Join a label and a name with " - " (check/P2P).\n` +
+  `\n` +
+  `ABSTAIN — if the input is just a number, a meaningless code, or has no\n` +
+  `identifiable counterparty: set is_opaque=true, confidence="low",\n` +
+  `merchant_name and processor null, and return a faithful tidy-up of the\n` +
+  `original as cleansed_description ("POS DEBIT 3942" -> "POS Debit 3942").\n` +
+  `NEVER invent a plausible merchant to fill the gap.\n` +
+  `\n` +
+  `FIELD NOTES: merchant_name and processor are null when not present. Set\n` +
+  `is_opaque true only when no name was found. confidence is "high"|"medium"|\n` +
+  `"low". Do not fabricate any value.\n` +
+  `\n` +
+  `EXAMPLES (raw_description -> the cleanse fields for that row):\n` +
+  `"POS DBT 0123 SQ *AMTHAUS COFFEE" -> {"cleansed_description":"Amthaus Coffee","merchant_name":"Amthaus Coffee","processor":"Square","transaction_type":"purchase","is_opaque":false,"confidence":"high"}\n` +
+  `"AMZN MKTP US*A1B2C3" -> {"cleansed_description":"Amazon Marketplace","merchant_name":"Amazon","processor":null,"transaction_type":"purchase","is_opaque":false,"confidence":"high"}\n` +
+  `"ACH WEB PYMT VERIZON WIRELESS 800-922-0204" -> {"cleansed_description":"Verizon Wireless","merchant_name":"Verizon Wireless","processor":null,"transaction_type":"bill_payment","is_opaque":false,"confidence":"high"}\n` +
+  `"ZELLE PAYMENT TO JOHN SMITH 8823" -> {"cleansed_description":"Zelle - John Smith","merchant_name":"John Smith","processor":"Zelle","transaction_type":"p2p","is_opaque":false,"confidence":"high"}\n` +
+  `"CHECK 1042 JOHN SMITH" -> {"cleansed_description":"Check 1042 - John Smith","merchant_name":"John Smith","processor":null,"transaction_type":"check","is_opaque":false,"confidence":"high"}\n` +
+  `"EXTERNAL TRANSFER TO SAV XXXXXX4471" -> {"cleansed_description":"Transfer to Savings","merchant_name":null,"processor":null,"transaction_type":"transfer","is_opaque":false,"confidence":"high"}\n` +
+  `"IRS TREAS 310 TAX REF 092024" -> {"cleansed_description":"IRS Tax Refund","merchant_name":"IRS","processor":null,"transaction_type":"tax","is_opaque":false,"confidence":"high"}\n` +
+  `"GUSTO PAY 123456 DES:PAYROLL" -> {"cleansed_description":"Gusto","merchant_name":"Gusto","processor":null,"transaction_type":"payroll","is_opaque":false,"confidence":"high"}\n` +
+  `"UPS 1Z9999 SHIPPING LOUISVILLE KY" -> {"cleansed_description":"UPS","merchant_name":"UPS","processor":null,"transaction_type":"purchase","is_opaque":false,"confidence":"high"}\n` +
+  `"POS DEBIT 3942" -> {"cleansed_description":"POS Debit 3942","merchant_name":null,"processor":null,"transaction_type":"unknown","is_opaque":true,"confidence":"low"}`;
 
 // The "Available categories:" listing is appended automatically after
 // these rules — the operator edits the rules text only; the dynamic

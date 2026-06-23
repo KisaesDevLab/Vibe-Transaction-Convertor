@@ -376,6 +376,14 @@ export const transactions = vibetc.table(
     }),
     enrichmentUserEdited: boolean('enrichment_user_edited').notNull().default(false),
     enrichmentRunAt: timestamp('enrichment_run_at', { withTimezone: true }),
+    // Structured cleanse outputs (the underlying merchant/person behind a
+    // processor, the processor itself, a richer transaction type, an abstain
+    // flag, and the model's self-reported confidence). NULL until cleansed.
+    enrichmentMerchantName: text('enrichment_merchant_name'),
+    enrichmentProcessor: text('enrichment_processor'),
+    enrichmentTransactionType: text('enrichment_transaction_type'),
+    enrichmentIsOpaque: boolean('enrichment_is_opaque'),
+    enrichmentConfidence: text('enrichment_confidence'),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
   },
