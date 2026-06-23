@@ -131,6 +131,27 @@ export const AI_SETTINGS: readonly AiSettingDef[] = [
     max: 7_200_000,
     unit: 'ms',
   },
+  {
+    id: 'extractionEngine',
+    key: 'extraction.engine',
+    env: 'VIBETC_EXTRACTION_ENGINE',
+    kind: 'enum',
+    group: 'extraction',
+    label: 'Extraction engine',
+    help: '"legacy" = the prompt + exemplars path (Ollama /v1 qwen2.5:32b / Anthropic). "statement-model" = a purpose-built model on Ollama /api/chat — no system prompt (it bakes its own), its native schema is mapped back to the internal model. Set the model below. v1 sends the whole statement; per-page + header-crop are the next step.',
+    default: 'legacy',
+    enumValues: ['legacy', 'statement-model'],
+  },
+  {
+    id: 'statementModel',
+    key: 'extraction.statement_model',
+    env: 'VIBETC_STATEMENT_MODEL',
+    kind: 'string',
+    group: 'extraction',
+    label: 'Statement model',
+    help: 'Ollama model tag used when the engine is "statement-model": qwen2.5-stmt (fast/triage) or qwen2.5-stmt-32b (booking-grade). Must be pulled on the Ollama host.',
+    default: 'qwen2.5-stmt',
+  },
   // --- Scanned-statement OCR engine (ADR-026) ---
   {
     id: 'ocrEngine',
@@ -270,6 +291,8 @@ export interface ResolvedAiSettings {
   localStructuredOutput: 'grammar' | 'json_object';
   maxPromptTokens: number;
   extractionTimeoutMs: number;
+  extractionEngine: 'legacy' | 'statement-model';
+  statementModel: string;
   ocrEngine: 'vibe' | 'glm';
   vibeOcrUrl: string;
   vibeOcrApiKey: string;
@@ -335,6 +358,9 @@ export const resolveAiSettings = async (db: Db): Promise<ResolvedAiSettings> => 
       raw(byId('localStructuredOutput')!) === 'json_object' ? 'json_object' : 'grammar',
     maxPromptTokens: intOf('maxPromptTokens'),
     extractionTimeoutMs: intOf('extractionTimeoutMs'),
+    extractionEngine:
+      raw(byId('extractionEngine')!) === 'statement-model' ? 'statement-model' : 'legacy',
+    statementModel: raw(byId('statementModel')!) || 'qwen2.5-stmt',
     ocrEngine: raw(byId('ocrEngine')!) === 'glm' ? 'glm' : 'vibe',
     vibeOcrUrl: raw(byId('vibeOcrUrl')!),
     vibeOcrApiKey: raw(byId('vibeOcrApiKey')!),

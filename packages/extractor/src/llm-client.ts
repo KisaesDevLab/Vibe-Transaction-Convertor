@@ -14,6 +14,7 @@ import {
 } from './prompts/extract.js';
 import { exemplarsAsMessages } from './exemplars.js';
 import { ocrPdfPages, type GlmOcrClientOptions } from './glm-ocr-client.js';
+import { STATEMENT_MODEL_FORMAT, mapStatementModelOutput } from './statement-model.js';
 
 // Phase 12 item 11: prompt budget. The Vibe Gateway hosts Qwen3-8B with a
 // 32K context, which after exemplars + system prompt + completion reserve
@@ -499,6 +500,11 @@ export interface LocalGatewayProviderOptions {
   // array mid-row (finish_reason=length → "Unterminated string"). Resolved from
   // the admin "Max output tokens" setting / LLM_MAX_COMPLETION_TOKENS.
   maxCompletionTokens?: number | undefined;
+  // Statement-model engine (see statement-model.ts): route extraction through
+  // Ollama's native /api/chat with NO system prompt (the model bakes its own),
+  // parse the model's native schema, and map it to ExtractionResult. modelId is
+  // the statement model (qwen2.5-stmt[-32b]).
+  statementModelMode?: boolean | undefined;
   // GLM-OCR stage-1 engine (ADR-025). Scanned statement pages are transcribed
   // by a LOCAL GLM-OCR llama-server (OpenAI-compatible vision) instead of an
   // Ollama vision model — GLM-OCR is a purpose-built OCR engine. Each falls back
@@ -558,6 +564,8 @@ export class LocalGatewayProvider implements LlmProvider {
   private maxPromptTokens: number;
   // See LocalGatewayProviderOptions.maxCompletionTokens.
   private maxCompletionTokens: number;
+  // See LocalGatewayProviderOptions.statementModelMode.
+  private statementModelMode: boolean;
   // GLM-OCR client options (ADR-025) — built once from the provider opts and
   // passed to ocrPdfPages on every OCR call. baseUrl unset ⇒ the OCR path throws.
   private glmOcr: GlmOcrClientOptions;
@@ -604,6 +612,7 @@ export class LocalGatewayProvider implements LlmProvider {
     // transaction list routinely exceeds 6000 output tokens and got truncated.
     this.maxCompletionTokens =
       opts.maxCompletionTokens ?? Number(process.env.LLM_MAX_COMPLETION_TOKENS ?? 16_000);
+    this.statementModelMode = opts.statementModelMode ?? false;
     // GLM-OCR config (ADR-025). Each field falls back to its GLM_OCR_* env
     // inside the GLM client's resolveConfig; we only forward operator overrides
     // and the shared fetcher (so tests can stub it). An undefined value here
@@ -710,6 +719,81 @@ export class LocalGatewayProvider implements LlmProvider {
       );
     } finally {
       clearTimeout(t);
+    }
+  }
+
+  // Statement-model engine: one /api/chat round-trip to a purpose-built
+  // statement model. No system prompt (the model bakes its own); the model
+  // emits its native schema, which we map back to ExtractionResult so the rest
+  // of the pipeline (Zod, reconciler, exporters) is unchanged.
+  private async callStatementModel(text: string): Promise<ExtractResult> {
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), this.timeoutMs);
+    const start = Date.now();
+    try {
+      const res = await this.fetcher(`${this.baseUrl}/api/chat`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          model: this.modelId,
+          stream: false,
+          format: STATEMENT_MODEL_FORMAT,
+          options: { temperature: 0, ...(this.numCtx ? { num_ctx: this.numCtx } : {}) },
+          ...(this.keepAlive ? { keep_alive: this.keepAlive } : {}),
+          messages: [{ role: 'user', content: `<statement_ocr>\n${text}\n</statement_ocr>` }],
+        }),
+        signal: ctl.signal,
+      });
+      if (!res.ok) {
+        const detail = await res.text().catch(() => '');
+        throw new Error(
+          `statement model POST /api/chat HTTP ${res.status}${detail ? `: ${detail.slice(0, 500)}` : ''}`,
+        );
+      }
+      const body = (await res.json()) as {
+        message?: { content?: string };
+        prompt_eval_count?: number;
+        eval_count?: number;
+      };
+      const content = body.message?.content ?? '';
+      if (!content) {
+        throw new ExtractionResponseError({
+          summary: 'statement model returned an empty completion',
+          rawResponse: JSON.stringify(body).slice(0, 8_000),
+        });
+      }
+      let rawParsed: unknown;
+      try {
+        rawParsed = JSON.parse(content);
+      } catch (err) {
+        throw new ExtractionResponseError({
+          summary: 'statement model response was not valid JSON',
+          rawResponse: content,
+          issues: (err as Error).message,
+        });
+      }
+      // Map the model's native schema → our ExtractionResult, then reuse the
+      // shared parse+validate (Zod, array-salvage) on the mapped object.
+      const mapped = mapStatementModelOutput(rawParsed as never);
+      const data = parseExtractionResponse(content, mapped);
+      return {
+        data,
+        telemetry: {
+          inputTokens: body.prompt_eval_count ?? 0,
+          outputTokens: body.eval_count ?? 0,
+          ms: Date.now() - start,
+          model: this.modelId,
+          costMicros: 0n,
+        },
+        rawJson: content,
+      };
+    } catch (err) {
+      if (err instanceof Error && (err.name === 'AbortError' || err.name === 'TimeoutError')) {
+        throw new Error(`statement model POST /api/chat timed out after ${this.timeoutMs} ms`);
+      }
+      throw err;
+    } finally {
+      clearTimeout(timer);
     }
   }
 
@@ -898,6 +982,11 @@ export class LocalGatewayProvider implements LlmProvider {
     }
 
     const { text } = prepareMarkdown(markdown, this.maxPromptTokens);
+
+    // Statement-model engine: route to /api/chat with the model's baked prompt.
+    if (this.statementModelMode) {
+      return this.callStatementModel(text);
+    }
 
     // One-shot reminder retry. When the gateway returns valid JSON
     // missing a required top-level field (the Vibe Gateway with

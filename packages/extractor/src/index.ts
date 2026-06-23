@@ -8,6 +8,7 @@ export * from './prompts/ocr-transcribe.js';
 export * from './exemplars.js';
 export * from './glm-ocr-client.js';
 export * from './vibe-ocr-client.js';
+export * from './statement-model.js';
 export * from './llm-client.js';
 export * from './multi-account-detector.js';
 export * from './image-batch.js';

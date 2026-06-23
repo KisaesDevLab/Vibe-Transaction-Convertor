@@ -188,9 +188,15 @@ const constructLocal = async (db: Db): Promise<LlmProvider> => {
   // Operator-tunable vision knobs (DB → env → default), passed through so the
   // /admin/llm-provider tuning controls take effect without a restart.
   const ai = await resolveAiSettings(db);
+  // Statement-model engine: route extraction through the purpose-built model on
+  // Ollama /api/chat (no system prompt; native schema mapped back). Overrides the
+  // text model with the configured statement model.
+  const statementMode = ai.extractionEngine === 'statement-model';
+  const effectiveModelId = statementMode ? ai.statementModel : modelId;
   return new LocalGatewayProvider({
     ...(baseUrl ? { baseUrl } : {}),
-    ...(modelId ? { modelId } : {}),
+    ...(effectiveModelId ? { modelId: effectiveModelId } : {}),
+    ...(statementMode ? { statementModelMode: true } : {}),
     ...(visionModelId ? { visionModelId } : {}),
     timeoutMs,
     ...(maxCompletionTokens != null ? { maxCompletionTokens } : {}),
