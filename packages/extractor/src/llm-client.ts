@@ -447,6 +447,11 @@ export interface LocalGatewayProviderOptions {
   // Prompt budget (tokens): caps how much statement markdown is sent before the
   // head/tail truncation kicks in. Operator setting / LLM_MAX_PROMPT_TOKENS.
   maxPromptTokens?: number | undefined;
+  // Hard cap on OUTPUT tokens for the text-extraction call (Ollama max_tokens).
+  // A transaction-heavy statement needs headroom or the model truncates the JSON
+  // array mid-row (finish_reason=length → "Unterminated string"). Resolved from
+  // the admin "Max output tokens" setting / LLM_MAX_COMPLETION_TOKENS.
+  maxCompletionTokens?: number | undefined;
   // GLM-OCR stage-1 engine (ADR-025). Scanned statement pages are transcribed
   // by a LOCAL GLM-OCR llama-server (OpenAI-compatible vision) instead of an
   // Ollama vision model — GLM-OCR is a purpose-built OCR engine. Each falls back
@@ -504,6 +509,8 @@ export class LocalGatewayProvider implements LlmProvider {
   private structuredOutputMode: 'grammar' | 'json_object';
   // See LocalGatewayProviderOptions.maxPromptTokens.
   private maxPromptTokens: number;
+  // See LocalGatewayProviderOptions.maxCompletionTokens.
+  private maxCompletionTokens: number;
   // GLM-OCR client options (ADR-025) — built once from the provider opts and
   // passed to ocrPdfPages on every OCR call. baseUrl unset ⇒ the OCR path throws.
   private glmOcr: GlmOcrClientOptions;
@@ -546,6 +553,10 @@ export class LocalGatewayProvider implements LlmProvider {
       opts.structuredOutputMode ??
       (process.env.LLM_LOCAL_STRUCTURED_OUTPUT === 'json_object' ? 'json_object' : 'grammar');
     this.maxPromptTokens = opts.maxPromptTokens ?? defaultPromptBudget();
+    // Default raised from the old 6000 — a real multi-page statement's JSON
+    // transaction list routinely exceeds 6000 output tokens and got truncated.
+    this.maxCompletionTokens =
+      opts.maxCompletionTokens ?? Number(process.env.LLM_MAX_COMPLETION_TOKENS ?? 16_000);
     // GLM-OCR config (ADR-025). Each field falls back to its GLM_OCR_* env
     // inside the GLM client's resolveConfig; we only forward operator overrides
     // and the shared fetcher (so tests can stub it). An undefined value here
@@ -663,7 +674,7 @@ export class LocalGatewayProvider implements LlmProvider {
     messages: Array<{ role: string; content: string }>,
     schema: object | undefined,
   ): Promise<{ content: string; inputTokens: number; outputTokens: number; ms: number }> {
-    const maxTokens = Number(process.env.LLM_MAX_COMPLETION_TOKENS ?? 6000);
+    const maxTokens = this.maxCompletionTokens;
     // One round-trip. `useGrammar` chooses between grammar-constrained
     // structured output (schema compiled to a GBNF grammar) and plain JSON
     // mode. Each call owns its own timeout so the json_object retry below gets a
@@ -730,6 +741,17 @@ export class LocalGatewayProvider implements LlmProvider {
             summary: 'local gateway returned an empty completion',
             rawResponse: JSON.stringify(body).slice(0, 8_000),
             ...(finish ? { issues: `finish_reason=${finish}` } : {}),
+          });
+        }
+        // Non-empty BUT truncated: the model hit max_tokens mid-JSON
+        // (finish_reason='length'). Returning it yields a cryptic
+        // "Unterminated string" parse error downstream, so surface an
+        // actionable message naming the cap the operator can raise.
+        if (body.choices?.[0]?.finish_reason === 'length') {
+          throw new ExtractionResponseError({
+            summary: `local gateway output truncated at max_tokens (${maxTokens})`,
+            rawResponse: content.slice(0, 8_000),
+            issues: `finish_reason=length; the statement's transaction list exceeds ${maxTokens} output tokens — raise the admin "Max output tokens" knob (or LLM_MAX_COMPLETION_TOKENS), and ensure the Ollama context window (OLLAMA_CONTEXT_LENGTH) has room for prompt + output`,
           });
         }
         return {

@@ -127,6 +127,32 @@ describe('LocalGatewayProvider', () => {
     expect(provider.id).toBe('local');
   });
 
+  it('throws an actionable error when the gateway truncates at max_tokens (finish_reason=length)', async () => {
+    // Non-empty BUT cut off mid-JSON — the real failure on a transaction-heavy
+    // statement. Must surface "truncated at max_tokens", not a JSON parse error.
+    const truncated = JSON.stringify(SAMPLE).slice(0, 40); // valid prefix, no closing
+    const provider = new LocalGatewayProvider({
+      baseUrl: 'http://gw.test',
+      fetcher: async () =>
+        okJsonResponse({ choices: [{ message: { content: truncated }, finish_reason: 'length' }] }),
+    });
+    await expect(provider.extract('# md')).rejects.toThrowError(/truncated at max_tokens/i);
+  });
+
+  it('sends the configured maxCompletionTokens as max_tokens (not the old 6000)', async () => {
+    let body: { max_tokens?: number } = {};
+    const provider = new LocalGatewayProvider({
+      baseUrl: 'http://gw.test',
+      maxCompletionTokens: 24000,
+      fetcher: async (_url, init) => {
+        body = JSON.parse((init as RequestInit).body as string) as typeof body;
+        return okJsonResponse({ choices: [{ message: { content: JSON.stringify(SAMPLE) } }] });
+      },
+    });
+    await provider.extract('# md');
+    expect(body.max_tokens).toBe(24000);
+  });
+
   it('strips `pattern` from the schema sent to the gateway (Ollama grammar safety)', async () => {
     let body: { response_format?: { json_schema?: { schema?: unknown } } } = {};
     const provider = new LocalGatewayProvider({

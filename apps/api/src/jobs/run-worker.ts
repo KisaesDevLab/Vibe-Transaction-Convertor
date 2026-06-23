@@ -18,7 +18,7 @@ const main = async (): Promise<void> => {
     logger.fatal('REDIS_URL must be set for the worker container');
     process.exit(1);
   }
-  const ext = startExtractionWorker();
+  const ext = await startExtractionWorker();
   const maint = startMaintenanceWorker();
   logger.info('worker container ready: extraction + maintenance');
 

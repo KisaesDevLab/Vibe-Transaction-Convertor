@@ -180,6 +180,11 @@ const constructLocal = async (db: Db): Promise<LlmProvider> => {
   const visionModelId =
     (await readSetting(db, KEY_OLLAMA_VISION_MODEL))?.valuePlaintext ?? undefined;
   const timeoutMs = await resolveLlmTimeoutMs(db);
+  // Output-token cap from the admin "Max output tokens" setting (DB → env →
+  // default). Wired to the LOCAL provider too — previously only Anthropic
+  // honored it, so a transaction-heavy statement truncated the local model's
+  // JSON mid-row (finish_reason=length → "Unterminated string").
+  const maxCompletionTokens = await resolveLlmMaxTokens(db);
   // Operator-tunable vision knobs (DB → env → default), passed through so the
   // /admin/llm-provider tuning controls take effect without a restart.
   const ai = await resolveAiSettings(db);
@@ -188,6 +193,7 @@ const constructLocal = async (db: Db): Promise<LlmProvider> => {
     ...(modelId ? { modelId } : {}),
     ...(visionModelId ? { visionModelId } : {}),
     timeoutMs,
+    ...(maxCompletionTokens != null ? { maxCompletionTokens } : {}),
     structuredOutputMode: ai.localStructuredOutput,
     maxPromptTokens: ai.maxPromptTokens,
     visionTimeoutMs: ai.visionTimeoutMs,

@@ -14,7 +14,9 @@ export const startWorkers = (): void => {
     logger.info('WORKER_INLINE=false — workers run in a separate process');
     return;
   }
-  startExtractionWorker();
+  // startExtractionWorker resolves its lock duration from the DB, so it's async;
+  // fire-and-forget here (inline mode) — it logs its own startup errors.
+  void startExtractionWorker();
   startMaintenanceWorker();
   started = true;
   logger.info('inline workers started: extraction + maintenance');

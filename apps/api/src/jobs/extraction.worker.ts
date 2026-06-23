@@ -1517,7 +1517,13 @@ export const finalizeJobFailure = async (
   return 'failed';
 };
 
-export const startExtractionWorker = (): Worker<ExtractionJobData> => {
+export const startExtractionWorker = async (): Promise<Worker<ExtractionJobData>> => {
+  // Job lock duration from the admin "Extraction job timeout" setting
+  // (DB → env → default). Read defensively so a DB hiccup at startup never
+  // blocks the worker from coming up.
+  const lockMs = await resolveAiSettings(db)
+    .then((ai) => ai.extractionTimeoutMs)
+    .catch(() => Number(process.env.VIBETC_EXTRACTION_TIMEOUT_MS ?? 1_800_000));
   return new Worker<ExtractionJobData>(
     QUEUE_EXTRACTION,
     async (job) => {
@@ -1541,7 +1547,7 @@ export const startExtractionWorker = (): Worker<ExtractionJobData> => {
       // Default 30 min (with the historical 60s buffer) covers that
       // and a noisy retry; GPU operators waste nothing because the
       // job finishes in seconds and releases the lock immediately.
-      lockDuration: Number(process.env.VIBETC_EXTRACTION_TIMEOUT_MS ?? 1_800_000) + 60_000,
+      lockDuration: lockMs + 60_000,
       concurrency: Math.max(1, Number(process.env.WORKER_CONCURRENCY ?? 1)),
     },
   );

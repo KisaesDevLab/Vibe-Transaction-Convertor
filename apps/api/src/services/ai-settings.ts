@@ -118,6 +118,19 @@ export const AI_SETTINGS: readonly AiSettingDef[] = [
     min: 1000,
     max: 120_000,
   },
+  {
+    id: 'extractionTimeoutMs',
+    key: 'extraction.timeout_ms',
+    env: 'VIBETC_EXTRACTION_TIMEOUT_MS',
+    kind: 'int',
+    group: 'extraction',
+    label: 'Extraction job timeout (restart required)',
+    help: 'Max wall-clock a single statement job may run before BullMQ treats it as orphaned (its lock duration). Raise only if a statement legitimately runs longer than the 30-min default; lowering risks duplicate work. Read at worker startup — takes effect on restart.',
+    default: '1800000',
+    min: 60_000,
+    max: 7_200_000,
+    unit: 'ms',
+  },
   // --- Scanned-statement OCR engine (ADR-026) ---
   {
     id: 'ocrEngine',
@@ -256,6 +269,7 @@ export interface ResolvedAiSettings {
   numCtx: number | undefined;
   localStructuredOutput: 'grammar' | 'json_object';
   maxPromptTokens: number;
+  extractionTimeoutMs: number;
   ocrEngine: 'vibe' | 'glm';
   vibeOcrUrl: string;
   vibeOcrApiKey: string;
@@ -320,6 +334,7 @@ export const resolveAiSettings = async (db: Db): Promise<ResolvedAiSettings> => 
     localStructuredOutput:
       raw(byId('localStructuredOutput')!) === 'json_object' ? 'json_object' : 'grammar',
     maxPromptTokens: intOf('maxPromptTokens'),
+    extractionTimeoutMs: intOf('extractionTimeoutMs'),
     ocrEngine: raw(byId('ocrEngine')!) === 'glm' ? 'glm' : 'vibe',
     vibeOcrUrl: raw(byId('vibeOcrUrl')!),
     vibeOcrApiKey: raw(byId('vibeOcrApiKey')!),
