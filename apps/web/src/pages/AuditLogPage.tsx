@@ -66,12 +66,23 @@ export function AuditLogPage() {
 
   const [actionInput, setActionInput] = useState(actionContains);
 
+  // The datetime-local inputs yield a timezone-less local wall-clock string
+  // (e.g. "2026-06-23T10:00"). The table renders r.at in the browser's local
+  // time, so the filter must mean the same local instant. Convert to a UTC
+  // instant before sending — otherwise the server parses the bare string as ITS
+  // own local time (UTC in the container), skewing the window by the operator's
+  // UTC offset (the reported "filter date doesn't match the log time" bug).
+  const localInputToIso = (local: string): string => {
+    const d = new Date(local);
+    return Number.isNaN(d.getTime()) ? local : d.toISOString();
+  };
+
   const queryParams: Record<string, string> = {};
   if (entityType) queryParams.entityType = entityType;
   if (entityId) queryParams.entityId = entityId;
   if (actorUserId) queryParams.actorUserId = actorUserId;
-  if (since) queryParams.since = since;
-  if (until) queryParams.until = until;
+  if (since) queryParams.since = localInputToIso(since);
+  if (until) queryParams.until = localInputToIso(until);
   if (actionContains) queryParams.actionContains = actionContains;
   if (mutationsOnly) queryParams.mutationsOnly = '1';
 
