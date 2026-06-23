@@ -240,6 +240,51 @@ const recoverProseWrappedJson = (raw: string): unknown | undefined => {
   }
 };
 
+// Some models (especially in json_object mode, with no grammar to constrain
+// shape) "compress" several same-date transactions into ONE object whose
+// `description` and `amount_cents` are PARALLEL ARRAYS, e.g.
+//   { posted_date, description: ["A","B"], amount_cents: [100, 200], … }
+// Expand each such object back into one transaction per array element so a
+// model quirk doesn't fail the whole statement. Scalars are broadcast to the
+// array length (and a short array repeats its last element); the Golden Rule +
+// review grid are the safety net for any row the model genuinely mangled.
+export const expandArrayTransactions = (parsed: unknown): unknown => {
+  if (typeof parsed !== 'object' || parsed === null) return parsed;
+  const obj = parsed as Record<string, unknown>;
+  if (!Array.isArray(obj.transactions)) return parsed;
+  const at = (v: unknown, isArr: boolean, i: number): unknown => {
+    if (!isArr) return v;
+    const arr = v as unknown[];
+    return arr[i] ?? arr[arr.length - 1];
+  };
+  const out: unknown[] = [];
+  for (const tx of obj.transactions) {
+    if (typeof tx !== 'object' || tx === null) {
+      out.push(tx);
+      continue;
+    }
+    const t = tx as Record<string, unknown>;
+    const descArr = Array.isArray(t.description);
+    const amtArr = Array.isArray(t.amount_cents);
+    if (!descArr && !amtArr) {
+      out.push(tx);
+      continue;
+    }
+    const len = Math.max(
+      descArr ? (t.description as unknown[]).length : 1,
+      amtArr ? (t.amount_cents as unknown[]).length : 1,
+    );
+    for (let i = 0; i < len; i += 1) {
+      out.push({
+        ...t,
+        description: at(t.description, descArr, i),
+        amount_cents: at(t.amount_cents, amtArr, i),
+      });
+    }
+  }
+  return { ...obj, transactions: out };
+};
+
 // Wraps JSON.parse + Zod validation in ExtractionResponseError so the
 // worker has a single error type to special-case for diagnostic
 // capture. Pass `alreadyParsed` for providers that hand us an already-
@@ -266,6 +311,8 @@ export const parseExtractionResponse = (
       }
     }
   }
+  // Salvage parallel-array "compressed" transactions before validation.
+  parsed = expandArrayTransactions(parsed);
   const result = ExtractionResult.safeParse(parsed);
   if (!result.success) {
     const issues = result.error.issues

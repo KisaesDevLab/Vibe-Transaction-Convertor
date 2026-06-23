@@ -6,6 +6,7 @@ import {
   LocalGatewayProvider,
   computeAnthropicCostMicros,
   describeAnthropicRequest,
+  expandArrayTransactions,
   parseExtractionResponse,
   sanitizeSchemaForOllama,
 } from './llm-client.js';
@@ -107,6 +108,70 @@ const okJsonResponse = (body: unknown): Response =>
     status: 200,
     headers: { 'content-type': 'application/json' },
   });
+
+describe('expandArrayTransactions (parallel-array salvage)', () => {
+  it('expands an object with parallel description + amount_cents arrays', () => {
+    const out = expandArrayTransactions({
+      transactions: [
+        {
+          posted_date: '2026-04-06',
+          description: ['TOAST A', 'TOAST B', 'TOAST C'],
+          amount_cents: [100, 200, 300],
+          source_page: 3,
+          confidence: 0.95,
+        },
+      ],
+    }) as { transactions: Array<Record<string, unknown>> };
+    expect(out.transactions).toHaveLength(3);
+    expect(out.transactions[1]).toMatchObject({
+      posted_date: '2026-04-06',
+      description: 'TOAST B',
+      amount_cents: 200,
+      source_page: 3,
+    });
+  });
+
+  it('broadcasts a scalar description across an amount_cents array (mismatched)', () => {
+    const out = expandArrayTransactions({
+      transactions: [{ description: 'TOAST DEP', amount_cents: [328, 50012, 391597] }],
+    }) as { transactions: Array<Record<string, unknown>> };
+    expect(out.transactions).toHaveLength(3);
+    expect(out.transactions.map((t) => t.amount_cents)).toEqual([328, 50012, 391597]);
+    expect(out.transactions.every((t) => t.description === 'TOAST DEP')).toBe(true);
+  });
+
+  it('leaves normal scalar transactions untouched', () => {
+    const input = { transactions: [{ description: 'X', amount_cents: 100 }] };
+    expect(expandArrayTransactions(input)).toEqual(input);
+  });
+
+  it('parseExtractionResponse salvages a compressed response end-to-end', () => {
+    const raw = JSON.stringify({
+      period: { start: '2026-04-01', end: '2026-04-30' },
+      balances: { opening_cents: 0, closing_cents: 600 },
+      source_date_format: { format: 'MDY', confidence: 0.9 },
+      transactions: [
+        {
+          posted_date: '2026-04-06',
+          description: ['A', 'B'],
+          amount_cents: [100, 200],
+          source_page: 1,
+          confidence: 0.95,
+        },
+        {
+          posted_date: '2026-04-07',
+          description: 'C',
+          amount_cents: 300,
+          source_page: 1,
+          confidence: 0.95,
+        },
+      ],
+    });
+    const result = parseExtractionResponse(raw);
+    expect(result.transactions).toHaveLength(3);
+    expect(result.transactions.map((t) => Number(t.amount_cents))).toEqual([100, 200, 300]);
+  });
+});
 
 describe('LocalGatewayProvider', () => {
   it('parses an OpenAI-shaped chat-completions response', async () => {
