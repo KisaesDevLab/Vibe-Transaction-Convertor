@@ -156,6 +156,9 @@ interface AttemptOutcome {
   // The raw model JSON for this attempt (post-parse source text) — captured so
   // the per-step audit log can show exactly what extraction received.
   rawJson: string | null;
+  // Salvage notes from parsing (e.g. "N transaction(s) dropped: amount
+  // unreadable") — surfaced as a review-hold so dropped rows aren't silent.
+  extractionNotes: string | null;
 }
 
 interface AttemptContext {
@@ -280,6 +283,7 @@ const attemptExtraction = async (
     openingBalanceCents: null,
     closingBalanceCents: null,
     rawJson: null,
+    extractionNotes: null,
   };
 
   let provider;
@@ -350,6 +354,7 @@ const attemptExtraction = async (
     closingBalanceCents: closingCents,
     repairApplied: null,
     rawJson: result.rawJson,
+    extractionNotes: result.data.notes ?? null,
   } as const;
 
   // AMBIGUOUS halts the worker regardless of fallback — secondary would
@@ -547,6 +552,7 @@ const attemptExtraction = async (
     openingBalanceCents: openingCents,
     closingBalanceCents: closingCents,
     rawJson: result.rawJson,
+    extractionNotes: result.data.notes ?? null,
   };
 };
 
@@ -1155,6 +1161,19 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
       policy = await resolveProviderPolicy(db);
       ({ primary, secondary } = providerOrderFor(policy));
     }
+    // The statement-model engine is local-only; when extraction is pinned to
+    // Anthropic it is silently bypassed (Anthropic runs the legacy prompt path).
+    // Surface that so the operator isn't confused about which path ran.
+    if (aiSettings.extractionEngine === 'statement-model' && primary === 'anthropic') {
+      logger.warn(
+        { stmtId },
+        'statement-model engine is set but extraction provider is Anthropic — the engine ' +
+          'applies to local extraction only and is being bypassed (Anthropic uses the legacy path)',
+      );
+      await logStep('engine-bypassed', {
+        note: 'statement-model engine bypassed: extraction provider is Anthropic (engine is local-only)',
+      });
+    }
     // Surface which provider + model is in use the moment extraction begins, so
     // the live processing UI can show it without waiting for the first LLM call
     // to return telemetry. The final persist (on success / halt) overwrites
@@ -1492,13 +1511,22 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
       reviewConfidenceThreshold > 0
         ? effectiveTxs.filter((t) => t.confidence < reviewConfidenceThreshold).length
         : 0;
-    const reviewHoldReason =
+    // Dropped-amount rows (salvaged rather than failing the statement) must be
+    // surfaced — the operator needs to add them manually since the model
+    // couldn't read their amounts and the DB can't store a null/zero amount.
+    const droppedAmountNote =
+      chosen.extractionNotes && /amount unreadable/i.test(chosen.extractionNotes)
+        ? chosen.extractionNotes
+        : null;
+    const lowConfidenceNote =
       lowConfidenceCount > 0
         ? `${lowConfidenceCount} of ${effectiveTxs.length} transaction(s) were extracted with ` +
           `low confidence (< ${reviewConfidenceThreshold}` +
           `${method === 'ocr' || method === 'hybrid' ? ', via OCR' : ''}). Verify their dates and ` +
           `amounts against the source statement before exporting.`
         : null;
+    const reviewHoldReason =
+      [droppedAmountNote, lowConfidenceNote].filter(Boolean).join(' ') || null;
 
     await db.transaction(async (tx) => {
       for (let i = 0; i < effectiveTxs.length; i += 1) {

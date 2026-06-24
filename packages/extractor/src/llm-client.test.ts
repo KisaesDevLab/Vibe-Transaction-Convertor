@@ -173,6 +173,47 @@ describe('expandArrayTransactions (parallel-array salvage)', () => {
   });
 });
 
+describe('parseExtractionResponse — null amount handling', () => {
+  const withRows = (rows: unknown[]) => ({
+    period: { start: '2026-05-01', end: '2026-05-31' },
+    balances: { opening_cents: 0, closing_cents: 100 },
+    source_date_format: { format: 'MDY', confidence: 0.9 },
+    transactions: rows,
+  });
+  const good = { posted_date: '2026-05-02', description: 'A', amount_cents: 100, source_page: 1 };
+  const nullAmt = {
+    posted_date: '2026-05-03',
+    description: 'B',
+    amount_cents: null,
+    source_page: 1,
+  };
+
+  it('signals (throws with nullAmountRows) when salvageAmounts=false', () => {
+    try {
+      parseExtractionResponse(JSON.stringify(withRows([good, nullAmt, nullAmt])), undefined, {
+        salvageAmounts: false,
+      });
+      throw new Error('should have thrown');
+    } catch (err) {
+      expect(err).toBeInstanceOf(ExtractionResponseError);
+      expect((err as ExtractionResponseError).nullAmountRows).toBe(2);
+    }
+  });
+
+  it('drops null-amount rows + notes them when salvaging (default), never failing', () => {
+    const out = parseExtractionResponse(JSON.stringify(withRows([good, nullAmt])));
+    expect(out.transactions).toHaveLength(1);
+    expect(out.transactions[0]!.description).toBe('A');
+    expect(out.notes).toMatch(/amount unreadable/i);
+  });
+
+  it('is a no-op when every amount is readable', () => {
+    const out = parseExtractionResponse(JSON.stringify(withRows([good])));
+    expect(out.transactions).toHaveLength(1);
+    expect(out.notes).toBeUndefined();
+  });
+});
+
 describe('LocalGatewayProvider', () => {
   it('parses an OpenAI-shaped chat-completions response', async () => {
     const provider = new LocalGatewayProvider({

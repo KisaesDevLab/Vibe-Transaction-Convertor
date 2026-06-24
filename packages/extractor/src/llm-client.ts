@@ -5,6 +5,7 @@ import { schemas } from '@vibe-tx-converter/shared';
 import {
   IMAGE_SYSTEM_PROMPT,
   SYSTEM_PROMPT,
+  amountReminderPromptFor,
   cleanupMarkdown,
   estimateTokens,
   imageUserPromptFor,
@@ -187,11 +188,16 @@ export class ExtractionResponseError extends Error {
   // otherwise. Providers consult this to decide whether to do a one-
   // shot reminder retry instead of bouncing to provider fallback.
   readonly missingTopLevelFields: string[];
+  // Number of transaction rows the LLM returned with a null / non-numeric
+  // amount_cents. Providers consult this to do a one-shot amount-recovery
+  // re-ask before salvaging (dropping) the still-unreadable rows.
+  readonly nullAmountRows: number;
   constructor(opts: {
     summary: string;
     rawResponse: string;
     issues?: string;
     missingTopLevelFields?: string[];
+    nullAmountRows?: number;
   }) {
     super(opts.issues ? `${opts.summary} (${opts.issues})` : opts.summary);
     this.name = 'ExtractionResponseError';
@@ -199,6 +205,7 @@ export class ExtractionResponseError extends Error {
     this.summary = opts.summary;
     if (opts.issues !== undefined) this.issues = opts.issues;
     this.missingTopLevelFields = opts.missingTopLevelFields ?? [];
+    this.nullAmountRows = opts.nullAmountRows ?? 0;
   }
 }
 
@@ -306,10 +313,52 @@ export const expandArrayTransactions = (parsed: unknown): unknown => {
 // capture. Pass `alreadyParsed` for providers that hand us an already-
 // parsed object (Anthropic tool_use); we still need rawResponse for
 // the audit log, so callers stringify it for us.
+// A transaction's amount is usable iff it's a finite number. The LLM sometimes
+// emits `null` for rows whose amount it couldn't read.
+const isUsableAmount = (v: unknown): boolean => typeof v === 'number' && Number.isFinite(v);
+
+// Either signal a re-ask (salvage=false → throw with the count) or drop the
+// unreadable-amount rows and append a note (salvage=true). Pass-through when the
+// shape isn't the expected { transactions: [...] }.
+const handleNullAmountRows = (parsed: unknown, rawResponse: string, salvage: boolean): unknown => {
+  if (parsed === null || typeof parsed !== 'object') return parsed;
+  const obj = parsed as { transactions?: unknown; notes?: unknown };
+  if (!Array.isArray(obj.transactions)) return parsed;
+  const bad = obj.transactions.filter(
+    (t) =>
+      t !== null &&
+      typeof t === 'object' &&
+      !isUsableAmount((t as { amount_cents?: unknown }).amount_cents),
+  );
+  if (bad.length === 0) return parsed;
+  if (!salvage) {
+    throw new ExtractionResponseError({
+      summary: `${bad.length} transaction(s) had a null/unreadable amount`,
+      rawResponse,
+      nullAmountRows: bad.length,
+    });
+  }
+  const kept = obj.transactions.filter(
+    (t) =>
+      t !== null &&
+      typeof t === 'object' &&
+      isUsableAmount((t as { amount_cents?: unknown }).amount_cents),
+  );
+  const note = `${bad.length} transaction(s) dropped: amount unreadable by the model — verify the source and add them manually.`;
+  const existingNote = typeof obj.notes === 'string' && obj.notes.length > 0 ? `${obj.notes} ` : '';
+  return { ...obj, transactions: kept, notes: `${existingNote}${note}`.slice(0, 2000) };
+};
+
 export const parseExtractionResponse = (
   rawResponse: string,
   alreadyParsed?: unknown,
+  opts: { salvageAmounts?: boolean } = {},
 ): ExtractionResult => {
+  // Default: salvage rows the LLM returned with a null/unreadable amount rather
+  // than failing the whole statement (the DB can't store null/zero amounts).
+  // Providers pass salvageAmounts=false on a non-final attempt so the null-amount
+  // signal triggers a one-shot re-ask to the LLM first.
+  const salvageAmounts = opts.salvageAmounts ?? true;
   let parsed = alreadyParsed;
   if (parsed === undefined) {
     try {
@@ -329,6 +378,9 @@ export const parseExtractionResponse = (
   }
   // Salvage parallel-array "compressed" transactions before validation.
   parsed = expandArrayTransactions(parsed);
+  // Handle rows with a null / non-numeric amount_cents. Either re-ask the LLM
+  // (signal) or drop them with a note — never let them fail the extraction.
+  parsed = handleNullAmountRows(parsed, rawResponse, salvageAmounts);
   const result = ExtractionResult.safeParse(parsed);
   if (!result.success) {
     const issues = result.error.issues
@@ -1108,7 +1160,11 @@ export class LocalGatewayProvider implements LlmProvider {
       totalOutputTokens += call.outputTokens;
       totalMs += call.ms;
       try {
-        const data = parseExtractionResponse(call.content);
+        // Final attempt salvages null-amount rows (drop + note); earlier
+        // attempts signal so we can re-ask the LLM first.
+        const data = parseExtractionResponse(call.content, undefined, {
+          salvageAmounts: attempt === 2,
+        });
         return {
           data,
           rawJson: call.content,
@@ -1121,13 +1177,19 @@ export class LocalGatewayProvider implements LlmProvider {
           },
         };
       } catch (err) {
-        if (
-          attempt < 2 &&
-          err instanceof ExtractionResponseError &&
-          err.missingTopLevelFields.length > 0
-        ) {
-          userPrompt = missingFieldsReminderPromptFor(text, err.missingTopLevelFields, promptOpts);
-          continue;
+        if (attempt < 2 && err instanceof ExtractionResponseError) {
+          if (err.missingTopLevelFields.length > 0) {
+            userPrompt = missingFieldsReminderPromptFor(
+              text,
+              err.missingTopLevelFields,
+              promptOpts,
+            );
+            continue;
+          }
+          if (err.nullAmountRows > 0) {
+            userPrompt = amountReminderPromptFor(text, err.nullAmountRows, promptOpts);
+            continue;
+          }
         }
         throw err;
       }
@@ -1657,7 +1719,11 @@ export class AnthropicProvider implements LlmProvider {
       totalOutputTokens += call.outputTokens;
       totalMs += call.ms;
       try {
-        const data = parseExtractionResponse(call.rawJson, call.toolInput);
+        // Final attempt salvages null-amount rows (drop + note); earlier
+        // attempts signal so we can re-ask Anthropic first.
+        const data = parseExtractionResponse(call.rawJson, call.toolInput, {
+          salvageAmounts: attempt === 2,
+        });
         return {
           data,
           rawJson: call.rawJson,
@@ -1675,13 +1741,19 @@ export class AnthropicProvider implements LlmProvider {
           },
         };
       } catch (err) {
-        if (
-          attempt < 2 &&
-          err instanceof ExtractionResponseError &&
-          err.missingTopLevelFields.length > 0
-        ) {
-          userPrompt = missingFieldsReminderPromptFor(text, err.missingTopLevelFields, promptOpts);
-          continue;
+        if (attempt < 2 && err instanceof ExtractionResponseError) {
+          if (err.missingTopLevelFields.length > 0) {
+            userPrompt = missingFieldsReminderPromptFor(
+              text,
+              err.missingTopLevelFields,
+              promptOpts,
+            );
+            continue;
+          }
+          if (err.nullAmountRows > 0) {
+            userPrompt = amountReminderPromptFor(text, err.nullAmountRows, promptOpts);
+            continue;
+          }
         }
         throw err;
       }

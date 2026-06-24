@@ -295,6 +295,30 @@ export const missingFieldsReminderPromptFor = (
   );
 };
 
+// Amount-recovery reminder. The LLM left one or more transactions with a null /
+// unreadable amount_cents. Re-ask it to read the amounts (the DB can't store a
+// null/zero amount, so an unfixed row would otherwise be dropped).
+export const amountReminderPromptFor = (
+  markdown: string,
+  nullCount: number,
+  opts: UserPromptOptions = {},
+): string => {
+  const overrideLine = opts.dateFormatOverride
+    ? `\nOperator override: interpret every date using the ` +
+      `**${opts.dateFormatOverride}** format.\n`
+    : '';
+  return (
+    `Your previous response left ${nullCount} transaction(s) with a null or ` +
+    `missing amount_cents. Re-read EVERY transaction line in the markdown below ` +
+    `and emit the FULL extraction JSON with a NUMERIC integer amount_cents (in ` +
+    `cents, signed: negative for debits/withdrawals, positive for ` +
+    `credits/deposits) for EVERY row. Never output null for amount_cents. If an ` +
+    `amount is genuinely unreadable, OMIT that transaction entirely rather than ` +
+    `emitting null. Output ONLY the JSON object, no prose.${overrideLine}\n\n` +
+    `=== STATEMENT MARKDOWN ===\n${markdown}\n=== END ===`
+  );
+};
+
 // Phase 16 item 6: repair-pass prompt. After the first extract fails to
 // reconcile (or has flagged suspect rows), we send a SECOND LLM call
 // containing the original markdown plus the failed transaction list and
