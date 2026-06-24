@@ -305,6 +305,12 @@ export const statements = vibetc.table(
     // Per-upload override of the firm-wide PDF processing strategy.
     // NULL = use the firm default from system_settings.
     processingStrategyOverride: pdfProcessingStrategy('processing_strategy_override'),
+    // The extracted text (local OCR transcription or text-layer markdown) that
+    // fed extraction — stored so operators can view exactly what the model read,
+    // for troubleshooting + documentation. Latest run only (re-extract
+    // overwrites); the per-step audit rows keep the historical copies.
+    extractedText: text('extracted_text'),
+    extractedTextSource: text('extracted_text_source'),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
   },

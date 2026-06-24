@@ -97,6 +97,35 @@ export const statementsRouter = (): Router => {
     }
   });
 
+  // View the stored extracted text (OCR transcription / text-layer markdown)
+  // that fed extraction — for troubleshooting + documentation. A dedicated
+  // endpoint so the detail response stays lean (the text can be large).
+  router.get('/:id/extracted-text', async (req, res, next) => {
+    try {
+      const id = String(req.params.id);
+      const rows = await db
+        .select({
+          extractedText: statements.extractedText,
+          extractedTextSource: statements.extractedTextSource,
+          extractionMethod: statements.extractionMethod,
+          updatedAt: statements.updatedAt,
+        })
+        .from(statements)
+        .where(eq(statements.id, id));
+      const row = rows[0];
+      if (!row) throw new NotFoundError(`statement ${id}`);
+      res.json({
+        text: row.extractedText ?? null,
+        source: row.extractedTextSource ?? null,
+        method: row.extractionMethod ?? null,
+        chars: row.extractedText ? row.extractedText.length : 0,
+        updatedAt: row.updatedAt,
+      });
+    } catch (err) {
+      next(err);
+    }
+  });
+
   router.get('/:id', async (req, res, next) => {
     try {
       const id = String(req.params.id);

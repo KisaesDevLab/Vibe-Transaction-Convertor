@@ -21,6 +21,7 @@ import {
   useDeleteTransaction,
   useEnrichStatement,
   useResolveCheckPayees,
+  useExtractedText,
   useReExtract,
   useRecomputeReconciliation,
   useSplitStatement,
@@ -95,6 +96,8 @@ export function StatementReviewPage() {
   const [selectedTx, setSelectedTx] = useState<TransactionRow | null>(null);
   const [splitOpen, setSplitOpen] = useState(false);
   const [reExtractOpen, setReExtractOpen] = useState(false);
+  const [showExtractedText, setShowExtractedText] = useState(false);
+  const extractedText = useExtractedText(statementId, showExtractedText);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [deletePdfOpen, setDeletePdfOpen] = useState(false);
   // Pull the parent account → company so the split modal can show only
@@ -258,6 +261,13 @@ export function StatementReviewPage() {
               {reExtract.isPending ? 'Enqueueing…' : 'Re-extract'}
             </button>
           ) : null}
+          <button
+            type="button"
+            onClick={() => setShowExtractedText((v) => !v)}
+            className="rounded-md border border-surface-muted px-3 py-1.5 text-sm hover:bg-surface-subtle"
+          >
+            {showExtractedText ? 'Hide extracted text' : 'View extracted text'}
+          </button>
           {isAdmin ? (
             <button
               type="button"
@@ -354,6 +364,34 @@ export function StatementReviewPage() {
               </span>
             </div>
           ) : null}
+        </div>
+      ) : null}
+
+      {showExtractedText ? (
+        <div className="rounded-md border border-surface-muted bg-surface-subtle p-3 text-sm">
+          <div className="mb-2 flex items-center justify-between">
+            <h2 className="text-base font-medium">Extracted text</h2>
+            {extractedText.data ? (
+              <span className="text-xs text-text-muted">
+                {extractedText.data.source ?? extractedText.data.method ?? 'unknown source'} ·{' '}
+                {extractedText.data.chars.toLocaleString()} chars
+              </span>
+            ) : null}
+          </div>
+          {extractedText.isLoading ? (
+            <p className="text-text-muted">Loading…</p>
+          ) : extractedText.isError ? (
+            <p className="text-red-700">Failed to load extracted text.</p>
+          ) : extractedText.data?.text ? (
+            <pre className="max-h-[28rem] overflow-auto whitespace-pre-wrap break-words rounded bg-surface-base p-3 font-mono text-xs leading-relaxed">
+              {extractedText.data.text}
+            </pre>
+          ) : (
+            <p className="text-text-muted">
+              No extracted text stored for this statement. It is captured on extractions run from
+              this version onward — re-extract to populate it.
+            </p>
+          )}
         </div>
       ) : null}
 

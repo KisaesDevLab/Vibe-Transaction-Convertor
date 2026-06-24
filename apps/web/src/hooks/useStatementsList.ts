@@ -266,6 +266,25 @@ export const useDeleteTransaction = (statementId: string) => {
 // statement already had.
 export type ReExtractStrategy = PdfProcessingStrategy | 'default';
 
+export interface ExtractedText {
+  text: string | null;
+  source: string | null;
+  method: 'text' | 'ocr' | 'hybrid' | null;
+  chars: number;
+  updatedAt: string;
+}
+
+// Lazily fetch the stored extracted text (OCR/text-layer markdown that fed
+// extraction). Disabled until `enabled` flips true (the operator opens the
+// viewer) so the potentially-large payload isn't fetched on every page load.
+export const useExtractedText = (statementId: string, enabled: boolean) =>
+  useQuery({
+    queryKey: ['statement', statementId, 'extracted-text'],
+    queryFn: () => api.get<ExtractedText>(`/api/statements/${statementId}/extracted-text`),
+    enabled,
+    staleTime: 60_000,
+  });
+
 export const useReExtract = (statementId: string) => {
   const qc = useQueryClient();
   return useMutation({

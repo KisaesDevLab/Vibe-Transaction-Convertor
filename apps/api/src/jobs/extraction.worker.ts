@@ -1110,6 +1110,25 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
       }
     }
 
+    // Persist the final extracted text (post header-crop) so operators can view
+    // exactly what fed extraction — troubleshooting + documentation. Latest run
+    // only; re-extract overwrites. Best-effort: never block extraction on it.
+    try {
+      await db
+        .update(statements)
+        .set({
+          extractedText: markdown,
+          extractedTextSource: method === 'text' ? 'text-layer' : `ocr:${aiSettings.ocrEngine}`,
+          updatedAt: sql`now()`,
+        })
+        .where(eq(statements.id, stmtId));
+    } catch (err) {
+      logger.warn(
+        { stmtId, err: (err as Error).message },
+        'failed to persist extracted text (continuing)',
+      );
+    }
+
     await checkCancelled(stmtId);
 
     // Two-provider orchestration. Each attempt runs the LLM call + repair
