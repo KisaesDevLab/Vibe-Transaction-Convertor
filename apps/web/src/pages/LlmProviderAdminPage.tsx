@@ -1180,7 +1180,7 @@ function OllamaField({
 // setting falls back to its env var / default; blanking a field clears the
 // override. int/float/string commit on blur+Enter; bool/enum commit on change.
 const AI_GROUP_LABELS: Record<AiSetting['group'], string> = {
-  vision: 'Check-payee vision fallback (Ollama)',
+  vision: 'Ollama runtime — statement model + check-payee vision',
   ocr: 'Scanned-statement OCR (GLM-OCR)',
   extraction: 'Text extraction (Ollama)',
   safety: 'Review safety net',
