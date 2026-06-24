@@ -101,6 +101,68 @@ interface StatementModelRaw {
   transactions?: Array<Record<string, unknown>> | null;
 }
 
+// Split page-marked markdown (`# Page N`) into per-page chunks. The statement
+// models take ONE page per call (whole-statement output truncates at 25k+
+// tokens), so the engine loops over these. No markers → one page.
+export const splitMarkdownPages = (text: string): Array<{ pageNum: number; text: string }> => {
+  const marker = /^#\s*Page\s+(\d+)\s*$/gim;
+  const matches = [...text.matchAll(marker)];
+  if (matches.length === 0) return [{ pageNum: 1, text: text.trim() }];
+  const pages: Array<{ pageNum: number; text: string }> = [];
+  for (let i = 0; i < matches.length; i += 1) {
+    const m = matches[i]!;
+    const start = (m.index ?? 0) + m[0].length;
+    const end = i + 1 < matches.length ? (matches[i + 1]!.index ?? text.length) : text.length;
+    const body = text.slice(start, end).trim();
+    if (body.length > 0) pages.push({ pageNum: Number(m[1]), text: body });
+  }
+  return pages.length > 0 ? pages : [{ pageNum: 1, text: text.trim() }];
+};
+
+const objKeys = (v: unknown): number => (v && typeof v === 'object' ? Object.keys(v).length : 0);
+const numField = (o: unknown, key: string): number | null => {
+  const v = o && typeof o === 'object' ? (o as Record<string, unknown>)[key] : undefined;
+  return typeof v === 'number' && Number.isFinite(v) ? v : null;
+};
+
+// Merge per-page native outputs into one. Transactions are concatenated in page
+// order with source_page stamped from the page index (per-page calls all say
+// page 1). Metadata is taken from the first page that carries it; opening comes
+// from the first page that prints it, closing from the LAST.
+export const mergeStatementPages = (
+  pages: Array<{ pageNum: number; raw: Record<string, unknown> }>,
+): Record<string, unknown> => {
+  const firstWith = (key: string): unknown =>
+    pages
+      .map((p) => p.raw[key])
+      .find((v) => v != null && (typeof v !== 'object' || objKeys(v) > 0)) ?? null;
+  const transactions: unknown[] = [];
+  for (const p of pages) {
+    const arr = Array.isArray(p.raw.transactions) ? (p.raw.transactions as unknown[]) : [];
+    for (const t of arr) {
+      transactions.push(
+        t && typeof t === 'object' ? { ...(t as object), source_page: p.pageNum } : t,
+      );
+    }
+  }
+  const opening = pages
+    .map((p) => numField(p.raw.balances, 'opening_balance_cents'))
+    .find((v) => v !== null);
+  const closing = [...pages]
+    .reverse()
+    .map((p) => numField(p.raw.balances, 'closing_balance_cents'))
+    .find((v) => v !== null);
+  return {
+    account: firstWith('account'),
+    institution: firstWith('institution'),
+    period: firstWith('period'),
+    balances: { opening_balance_cents: opening ?? null, closing_balance_cents: closing ?? null },
+    source_date_format: firstWith('source_date_format'),
+    confidence: pages.map((p) => p.raw.confidence).find((c) => typeof c === 'number') ?? null,
+    transactions,
+  };
+};
+
 const str = (v: unknown): string | null => (typeof v === 'string' && v.length > 0 ? v : null);
 const intOrNull = (v: unknown): number | null =>
   typeof v === 'number' && Number.isFinite(v) ? Math.round(v) : null;
@@ -161,12 +223,54 @@ export const mapStatementModelOutput = (raw: StatementModelRaw): Record<string, 
   // so derive the bounds from the transaction dates when the model omits them.
   const isoStart = str(raw.period?.start_date);
   const isoEnd = str(raw.period?.end_date);
+
+  // Cross-page year drift: per-page calls past page 1 don't see the period
+  // header, so the model guesses the year (e.g. 2023 instead of 2026). When the
+  // statement period is known, snap each transaction's year to whichever
+  // period-boundary year places the MM-DD inside the period.
+  if (isoStart && ISO.test(isoStart) && isoEnd && ISO.test(isoEnd)) {
+    const yStart = isoStart.slice(0, 4);
+    const yEnd = isoEnd.slice(0, 4);
+    const years = yStart === yEnd ? [yStart] : [yStart, yEnd];
+    for (const t of transactions) {
+      if (typeof t.posted_date !== 'string') continue;
+      const mmdd = t.posted_date.slice(5);
+      for (const y of years) {
+        const cand = `${y}-${mmdd}`;
+        if (cand >= isoStart && cand <= isoEnd) {
+          t.posted_date = cand;
+          break;
+        }
+      }
+    }
+  }
+
   const txDates = transactions
     .map((t) => t.posted_date)
     .filter((d): d is string => typeof d === 'string' && ISO.test(d))
     .sort();
   const periodStartOut = isoStart && ISO.test(isoStart) ? isoStart : (txDates[0] ?? null);
   const periodEndOut = isoEnd && ISO.test(isoEnd) ? isoEnd : (txDates[txDates.length - 1] ?? null);
+
+  // Deterministic reconciliation: the per-page model can't see the whole
+  // statement's balances, so derive them from the running-balance chain when
+  // it's printed. closing = rb of the last row that prints one; opening = that
+  // first row's rb minus its amount. Printed opening (page-1 header) is trusted;
+  // closing is derived. Both fall back to the model's stated balances.
+  const firstRb = transactions.find((t) => typeof t.running_balance_cents === 'number');
+  const lastRb = [...transactions]
+    .reverse()
+    .find((t) => typeof t.running_balance_cents === 'number');
+  const derivedOpening =
+    firstRb && typeof firstRb.running_balance_cents === 'number'
+      ? firstRb.running_balance_cents - firstRb.amount_cents
+      : null;
+  const derivedClosing =
+    lastRb && typeof lastRb.running_balance_cents === 'number'
+      ? lastRb.running_balance_cents
+      : null;
+  const modelOpening = intOrNull(raw.balances?.opening_balance_cents);
+  const modelClosing = intOrNull(raw.balances?.closing_balance_cents);
 
   const out: Record<string, unknown> = {
     account: {
@@ -177,8 +281,8 @@ export const mapStatementModelOutput = (raw: StatementModelRaw): Record<string, 
     institution: { name: str(raw.institution?.name), intu_org_hint: null },
     period: { start: periodStartOut, end: periodEndOut },
     balances: {
-      opening_cents: intOrNull(raw.balances?.opening_balance_cents) ?? 0,
-      closing_cents: intOrNull(raw.balances?.closing_balance_cents) ?? 0,
+      opening_cents: modelOpening ?? derivedOpening ?? 0,
+      closing_cents: derivedClosing ?? modelClosing ?? 0,
     },
     source_date_format: { format: fmt, confidence: docConfidence },
     transactions,

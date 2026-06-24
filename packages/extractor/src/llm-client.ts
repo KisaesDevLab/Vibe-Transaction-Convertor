@@ -14,7 +14,12 @@ import {
 } from './prompts/extract.js';
 import { exemplarsAsMessages } from './exemplars.js';
 import { ocrPdfPages, type GlmOcrClientOptions } from './glm-ocr-client.js';
-import { STATEMENT_MODEL_FORMAT, mapStatementModelOutput } from './statement-model.js';
+import {
+  STATEMENT_MODEL_FORMAT,
+  mapStatementModelOutput,
+  mergeStatementPages,
+  splitMarkdownPages,
+} from './statement-model.js';
 
 // Phase 12 item 11: prompt budget. The Vibe Gateway hosts Qwen3-8B with a
 // 32K context, which after exemplars + system prompt + completion reserve
@@ -722,14 +727,18 @@ export class LocalGatewayProvider implements LlmProvider {
     }
   }
 
-  // Statement-model engine: one /api/chat round-trip to a purpose-built
-  // statement model. No system prompt (the model bakes its own); the model
-  // emits its native schema, which we map back to ExtractionResult so the rest
-  // of the pipeline (Zod, reconciler, exporters) is unchanged.
-  private async callStatementModel(text: string): Promise<ExtractResult> {
+  // One /api/chat round-trip for a SINGLE page. No system prompt (the model
+  // bakes its own); returns the model's native parsed JSON + token counts.
+  private async callStatementModelRaw(
+    text: string,
+  ): Promise<{
+    raw: Record<string, unknown>;
+    content: string;
+    inputTokens: number;
+    outputTokens: number;
+  }> {
     const ctl = new AbortController();
     const timer = setTimeout(() => ctl.abort(), this.timeoutMs);
-    const start = Date.now();
     try {
       const res = await this.fetcher(`${this.baseUrl}/api/chat`, {
         method: 'POST',
@@ -772,20 +781,11 @@ export class LocalGatewayProvider implements LlmProvider {
           issues: (err as Error).message,
         });
       }
-      // Map the model's native schema → our ExtractionResult, then reuse the
-      // shared parse+validate (Zod, array-salvage) on the mapped object.
-      const mapped = mapStatementModelOutput(rawParsed as never);
-      const data = parseExtractionResponse(content, mapped);
       return {
-        data,
-        telemetry: {
-          inputTokens: body.prompt_eval_count ?? 0,
-          outputTokens: body.eval_count ?? 0,
-          ms: Date.now() - start,
-          model: this.modelId,
-          costMicros: 0n,
-        },
-        rawJson: content,
+        raw: rawParsed as Record<string, unknown>,
+        content,
+        inputTokens: body.prompt_eval_count ?? 0,
+        outputTokens: body.eval_count ?? 0,
       };
     } catch (err) {
       if (err instanceof Error && (err.name === 'AbortError' || err.name === 'TimeoutError')) {
@@ -795,6 +795,44 @@ export class LocalGatewayProvider implements LlmProvider {
     } finally {
       clearTimeout(timer);
     }
+  }
+
+  // Statement-model engine entry. Splits the page-marked markdown and calls the
+  // model ONE page per call (whole-statement output truncates at 25k+ tokens),
+  // then merges the native per-page outputs (source_page stamped from the page
+  // index) and maps to ExtractionResult. The rest of the pipeline (Zod,
+  // reconciler, exporters) is unchanged.
+  private async callStatementModel(markdown: string): Promise<ExtractResult> {
+    const start = Date.now();
+    const pages = splitMarkdownPages(markdown);
+    const results: Array<{ pageNum: number; raw: Record<string, unknown> }> = [];
+    const contents: string[] = [];
+    let inputTokens = 0;
+    let outputTokens = 0;
+    for (const page of pages) {
+      const r = await this.callStatementModelRaw(page.text);
+      results.push({ pageNum: page.pageNum, raw: r.raw });
+      contents.push(r.content);
+      inputTokens += r.inputTokens;
+      outputTokens += r.outputTokens;
+    }
+    // Always merge (stamps source_page from the page index; single page is a
+    // no-op merge of one page).
+    const merged = mergeStatementPages(results);
+    const mapped = mapStatementModelOutput(merged as never);
+    const rawJson = pages.length === 1 ? contents[0]! : JSON.stringify(merged);
+    const data = parseExtractionResponse(rawJson, mapped);
+    return {
+      data,
+      telemetry: {
+        inputTokens,
+        outputTokens,
+        ms: Date.now() - start,
+        model: this.modelId,
+        costMicros: 0n,
+      },
+      rawJson,
+    };
   }
 
   // Single round-trip to the gateway. Returns raw content + per-call
