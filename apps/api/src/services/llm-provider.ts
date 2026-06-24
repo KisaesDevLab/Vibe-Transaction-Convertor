@@ -179,6 +179,10 @@ interface ProviderOverrides {
   temperature?: number;
   numCtx?: number;
   maxPromptTokens?: number;
+  // Only the EXTRACTION process drives the statement-model engine. For other
+  // processes (cleanse/category/check) on local, the statement model must NOT
+  // replace their per-process model — so they pass this false/undefined.
+  applyStatementEngine?: boolean;
 }
 
 const constructLocal = async (db: Db, overrides: ProviderOverrides = {}): Promise<LlmProvider> => {
@@ -201,7 +205,12 @@ const constructLocal = async (db: Db, overrides: ProviderOverrides = {}): Promis
   // Statement-model engine: route extraction through the purpose-built model on
   // Ollama /api/chat (no system prompt; native schema mapped back). Overrides the
   // text model with the configured statement model.
-  const statementMode = ai.extractionEngine === 'statement-model';
+  // Statement-model engine applies ONLY to the extraction process. A cleanse /
+  // category / check process routed to local keeps its own per-process model
+  // even when the engine is enabled — otherwise it would silently run on
+  // qwen2.5-stmt (GAP 4).
+  const statementMode =
+    ai.extractionEngine === 'statement-model' && overrides.applyStatementEngine === true;
   // Per the matrix design: the statement-model engine keeps its own model; the
   // per-process model override only applies to the non-engine path.
   const effectiveModelId = statementMode ? ai.statementModel : (overrides.modelId ?? modelId);
@@ -295,12 +304,15 @@ export const buildProvider = async (db: Db): Promise<LlmProvider> => {
 // differ. Returns the resolved providerId so callers can audit-log egress.
 const overridesFor = (
   cfg: Awaited<ReturnType<typeof resolveProcessConfig>>,
+  proc: ProcessId,
 ): ProviderOverrides => ({
   ...(cfg.model ? { modelId: cfg.model } : {}),
   ...(cfg.maxTokens != null ? { maxCompletionTokens: cfg.maxTokens } : {}),
   ...(cfg.temperature != null ? { temperature: cfg.temperature } : {}),
   ...(cfg.numCtx != null ? { numCtx: cfg.numCtx } : {}),
   ...(cfg.promptBudget != null ? { maxPromptTokens: cfg.promptBudget } : {}),
+  // Only extraction drives the statement-model engine.
+  applyStatementEngine: proc === 'extraction',
 });
 
 // Build a specific provider id with a process's tuning overrides applied. Used
@@ -312,8 +324,22 @@ export const buildProviderForProcessId = async (
   id: ProviderId,
 ): Promise<LlmProvider> => {
   const cfg = await resolveProcessConfig(db, proc);
-  const overrides = overridesFor(cfg);
+  const overrides = overridesFor(cfg, proc);
   return id === 'local' ? constructLocal(db, overrides) : constructAnthropic(db, overrides);
+};
+
+// Resolve a process's effective provider + model label WITHOUT building the
+// provider — for UI/status badges. Reflects the per-process matrix (model
+// override, or the provider default), not the global model.
+export const resolveProcessLabel = async (
+  db: Db,
+  proc: ProcessId,
+): Promise<{ provider: ProviderId; model: string }> => {
+  const cfg = await resolveProcessConfig(db, proc);
+  const provider: ProviderId =
+    cfg.provider === 'default' ? await resolveProviderId(db) : cfg.provider;
+  const model = cfg.model ?? (await resolveModelLabelForProvider(db, provider));
+  return { provider, model };
 };
 
 // Resolve a process's provider (default = global policy) AND apply its overrides.
@@ -327,7 +353,7 @@ export const buildProviderForProcess = async (
     cfg.provider === 'default' ? await resolveProviderId(db) : cfg.provider;
   const provider =
     providerId === 'local'
-      ? await constructLocal(db, overridesFor(cfg))
-      : await constructAnthropic(db, overridesFor(cfg));
+      ? await constructLocal(db, overridesFor(cfg, proc))
+      : await constructAnthropic(db, overridesFor(cfg, proc));
   return { provider, providerId };
 };

@@ -69,13 +69,18 @@ export const useArchiveCategory = () => {
 // Toggle status for the two enrichment features. Drives whether the
 // "Cleanse descriptions" and "Assign categories" buttons appear on the
 // review page.
+export interface EnrichmentProcessLabel {
+  provider: 'local' | 'anthropic';
+  model: string;
+}
+
 export interface EnrichmentTogglesStatus {
   cleanseEnabled: boolean;
   categoryEnabled: boolean;
-  // The provider + model enrichment will run on (default provider). Optional
-  // for back-compat with older API responses.
-  provider?: 'local' | 'anthropic';
-  model?: string;
+  // Per-process provider + model (the matrix) for each pass. Optional for
+  // back-compat with older API responses.
+  cleanse?: EnrichmentProcessLabel;
+  category?: EnrichmentProcessLabel;
 }
 
 export const useEnrichmentToggles = () =>

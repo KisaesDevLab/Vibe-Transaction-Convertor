@@ -38,11 +38,7 @@ import {
   enrichmentCache,
   type EnrichmentCacheKey,
 } from './enrichment-cache.js';
-import {
-  buildProviderForProcess,
-  resolveModelLabelForProvider,
-  resolveProviderId,
-} from './llm-provider.js';
+import { buildProviderForProcess, resolveProcessLabel } from './llm-provider.js';
 import { readSettingPlain, upsertSetting } from './system-settings.js';
 
 export interface EnrichOptions {
@@ -482,17 +478,21 @@ export const enrichmentToggleStatus = async (
 ): Promise<{
   cleanseEnabled: boolean;
   categoryEnabled: boolean;
-  provider: 'local' | 'anthropic';
-  model: string;
+  cleanse: { provider: 'local' | 'anthropic'; model: string };
+  category: { provider: 'local' | 'anthropic'; model: string };
 }> => {
-  // Enrichment runs on the default provider (buildProvider) — surface which
-  // provider + model it will use so the UI can show it before/while running.
-  const provider = await resolveProviderId(db);
+  // Cleanse and category are independent processes — surface each one's
+  // per-process provider + model (the matrix), not the global default, so the
+  // UI shows the model the operator actually configured for that process.
+  const [cleanse, category] = await Promise.all([
+    resolveProcessLabel(db, 'cleanse'),
+    resolveProcessLabel(db, 'category'),
+  ]);
   return {
     cleanseEnabled: await isToggleEnabled(db, 'enrichment.cleanse_enabled'),
     categoryEnabled: await isToggleEnabled(db, 'enrichment.category_enabled'),
-    provider,
-    model: await resolveModelLabelForProvider(db, provider),
+    cleanse,
+    category,
   };
 };
 

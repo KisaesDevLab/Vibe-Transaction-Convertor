@@ -518,19 +518,24 @@ export function StatementReviewPage() {
           {(enrichmentToggles.data?.cleanseEnabled || enrichmentToggles.data?.categoryEnabled) && (
             <div className="flex flex-wrap items-center gap-2 rounded-lg border border-surface-muted bg-white p-3 text-sm">
               <span className="text-ink-muted">AI enrichment:</span>
-              {enrichmentToggles.data?.model ? (
-                <span className="text-xs">
-                  {enrich.isPending ? (
-                    <span className="text-blue-700">
-                      running on {enrichmentToggles.data.model}…
-                    </span>
-                  ) : (
-                    <span className="text-ink-subtle">
-                      uses {enrichmentToggles.data.provider} · {enrichmentToggles.data.model}
-                    </span>
-                  )}
-                </span>
-              ) : null}
+              <span className="text-xs text-ink-subtle">
+                {enrichmentToggles.data?.cleanseEnabled && enrichmentToggles.data?.cleanse ? (
+                  <span>
+                    cleanse: {enrichmentToggles.data.cleanse.provider} ·{' '}
+                    {enrichmentToggles.data.cleanse.model}
+                  </span>
+                ) : null}
+                {enrichmentToggles.data?.cleanseEnabled &&
+                enrichmentToggles.data?.categoryEnabled ? (
+                  <span className="mx-1 text-surface-muted">|</span>
+                ) : null}
+                {enrichmentToggles.data?.categoryEnabled && enrichmentToggles.data?.category ? (
+                  <span>
+                    category: {enrichmentToggles.data.category.provider} ·{' '}
+                    {enrichmentToggles.data.category.model}
+                  </span>
+                ) : null}
+              </span>
               {enrichmentToggles.data?.cleanseEnabled && canEnrich ? (
                 <button
                   type="button"

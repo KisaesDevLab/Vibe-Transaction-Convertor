@@ -1162,7 +1162,7 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
     // which differs only when a provider fallback fires.
     await setStatus(stmtId, 'extracting', {
       llmProvider: primary,
-      llmModelVersion: await resolveModelLabelForProvider(db, primary),
+      llmModelVersion: extractionCfg.model ?? (await resolveModelLabelForProvider(db, primary)),
     });
     let attemptCtx: AttemptContext = {
       stmtId,
@@ -1248,7 +1248,8 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
       // final persist still records whichever attempt's result is chosen.
       await setStatus(stmtId, 'extracting', {
         llmProvider: resolvedSecondary,
-        llmModelVersion: await resolveModelLabelForProvider(db, resolvedSecondary),
+        llmModelVersion:
+          extractionCfg.model ?? (await resolveModelLabelForProvider(db, resolvedSecondary)),
       });
       const secondStart = Date.now();
       const second = await attemptExtraction(resolvedSecondary, ctx);
