@@ -99,6 +99,56 @@ describe('mapStatementModelOutput', () => {
     expect(parsed.balances.closing_cents).toBe(1_075_000);
   });
 
+  it('drops a "Beginning Balance" marker row (not a transaction) so it cannot double-count', () => {
+    const r = {
+      period: { start_date: '2026-05-01', end_date: '2026-05-31' },
+      balances: { opening_balance_cents: 1_000_000, closing_balance_cents: 1_120_000 },
+      transactions: [
+        {
+          date: '2026-05-01',
+          source_text: '05/01  Beginning Balance  10,000.00  10,000.00',
+          amount_cents: 1_000_000,
+          running_balance_cents: 1_000_000,
+          source_page: 1,
+        },
+        {
+          date: '2026-05-04',
+          source_text: '05/04  DEPOSIT  1,200.00  11,200.00',
+          amount_cents: 120_000,
+          running_balance_cents: 1_120_000,
+          source_page: 1,
+        },
+      ],
+    };
+    const parsed = schemas.extraction.ExtractionResult.parse(mapStatementModelOutput(r));
+    expect(parsed.transactions).toHaveLength(1); // marker dropped
+    expect(parsed.transactions[0]!.description).toContain('DEPOSIT');
+  });
+
+  it('surfaces date-dropped rows in notes (never silent)', () => {
+    const r = {
+      period: { start_date: null, end_date: null }, // no period → no date fallback
+      balances: { opening_balance_cents: 0, closing_balance_cents: 100 },
+      transactions: [
+        { date: '2026-05-04', amount_cents: 100, source_page: 1 },
+        { date: 'not-a-date', amount_cents: 50, source_page: 1 },
+      ],
+    };
+    const mapped = mapStatementModelOutput(r) as { notes?: string; transactions: unknown[] };
+    expect(mapped.transactions).toHaveLength(1);
+    expect(mapped.notes).toMatch(/no readable date/);
+  });
+
+  it('clamps a bogus source_page (0) to a schema-valid 1', () => {
+    const r = {
+      period: { start_date: '2026-05-01', end_date: '2026-05-31' },
+      balances: { opening_balance_cents: 0, closing_balance_cents: 100 },
+      transactions: [{ date: '2026-05-04', amount_cents: 100, source_page: 0 }],
+    };
+    const parsed = schemas.extraction.ExtractionResult.parse(mapStatementModelOutput(r));
+    expect(parsed.transactions[0]!.source_page).toBe(1);
+  });
+
   it('snaps a wrong-year transaction date into the statement period', () => {
     const r = {
       period: { start_date: '2026-05-01', end_date: '2026-05-31' },

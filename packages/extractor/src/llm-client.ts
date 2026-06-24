@@ -729,9 +729,7 @@ export class LocalGatewayProvider implements LlmProvider {
 
   // One /api/chat round-trip for a SINGLE page. No system prompt (the model
   // bakes its own); returns the model's native parsed JSON + token counts.
-  private async callStatementModelRaw(
-    text: string,
-  ): Promise<{
+  private async callStatementModelRaw(text: string): Promise<{
     raw: Record<string, unknown>;
     content: string;
     inputTokens: number;
@@ -810,7 +808,24 @@ export class LocalGatewayProvider implements LlmProvider {
     let inputTokens = 0;
     let outputTokens = 0;
     for (const page of pages) {
-      const r = await this.callStatementModelRaw(page.text);
+      let r;
+      try {
+        r = await this.callStatementModelRaw(page.text);
+      } catch (err) {
+        // Fail-fast, but name the page so the audit shows where it broke (the
+        // model returns nothing useful for the whole statement if one page dies).
+        const msg = err instanceof Error ? err.message : String(err);
+        if (err instanceof ExtractionResponseError) {
+          throw new ExtractionResponseError({
+            summary: `statement model failed on page ${page.pageNum}: ${err.summary}`,
+            rawResponse: err.rawResponse,
+            ...(err.issues !== undefined ? { issues: err.issues } : {}),
+          });
+        }
+        throw new Error(
+          `statement model failed on page ${page.pageNum} of ${pages.length}: ${msg}`,
+        );
+      }
       results.push({ pageNum: page.pageNum, raw: r.raw });
       contents.push(r.content);
       inputTokens += r.inputTokens;
@@ -820,7 +835,9 @@ export class LocalGatewayProvider implements LlmProvider {
     // no-op merge of one page).
     const merged = mergeStatementPages(results);
     const mapped = mapStatementModelOutput(merged as never);
-    const rawJson = pages.length === 1 ? contents[0]! : JSON.stringify(merged);
+    // Audit = the raw per-page model completions (what the model actually
+    // returned), not the synthesized merge.
+    const rawJson = contents.length === 1 ? contents[0]! : contents.join('\n--- page break ---\n');
     const data = parseExtractionResponse(rawJson, mapped);
     return {
       data,

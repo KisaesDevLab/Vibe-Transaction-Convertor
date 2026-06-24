@@ -184,20 +184,30 @@ export const mapStatementModelOutput = (raw: StatementModelRaw): Record<string, 
   const acctType = raw.account?.account_type;
   const periodStart = str(raw.period?.start_date);
 
-  let dropped = 0;
+  // Balance-marker rows ("Beginning/Opening/Previous Balance") are not
+  // transactions — some models emit them with the opening figure in the amount
+  // column, which double-counts and corrupts the derived opening. Drop them.
+  // Matches anywhere — source_text carries the date/amount prefix
+  // ("04/01  Beginning Balance  2,178.46  2,178.46"), so it can't be anchored.
+  const BALANCE_MARKER = /\b(beginning|opening|previous|starting|ending|closing)\s+balance\b/i;
+
+  let amountDropped = 0;
+  let dateDropped = 0;
   const transactions = (raw.transactions ?? [])
     .map((t) => {
       const amount = intOrNull(t.amount_cents);
       if (amount === null) {
-        dropped += 1;
+        amountDropped += 1;
         return null;
       }
+      const descText = str(t.source_text) ?? str(t.payee) ?? '';
+      if (BALANCE_MARKER.test(descText)) return null; // not a transaction
       const date = str(t.date);
       const postedDate =
         date && ISO.test(date) ? date : periodStart && ISO.test(periodStart) ? periodStart : null;
       const trntypeRaw =
         typeof t.trntype === 'string' ? TRNTYPE_MAP[t.trntype.toUpperCase()] : undefined;
-      const description = (str(t.source_text) ?? str(t.payee) ?? '[unreadable]').slice(0, 500);
+      const description = (descText || '[unreadable]').slice(0, 500);
       return {
         // Grounded raw line drives FITID + OFX <MEMO>; the model's `payee`
         // (cleaned merchant) goes to description when no source_text.
@@ -210,13 +220,20 @@ export const mapStatementModelOutput = (raw: StatementModelRaw): Record<string, 
         // (which the check-resolver fills from cancelled-check images). Leave null.
         payee: null,
         ...(trntypeRaw ? { trntype: trntypeRaw } : {}),
-        source_page: intOrNull(t.source_page) ?? 1,
+        source_page: Math.max(1, intOrNull(t.source_page) ?? 1),
         // The model emits only a doc-level confidence; apply it per row so the
         // per-row review-hold gate keeps working.
         confidence: docConfidence,
       };
     })
-    .filter((t): t is NonNullable<typeof t> => t !== null && t.posted_date !== null);
+    .filter((t): t is NonNullable<typeof t> => {
+      if (t === null) return false;
+      if (t.posted_date === null) {
+        dateDropped += 1; // surfaced in notes below — never silent
+        return false;
+      }
+      return true;
+    });
 
   // period.start/end are required ISO dates. A whole-statement call may not
   // surface the header prose (the header-crop read does, in the full pipeline),
@@ -287,9 +304,10 @@ export const mapStatementModelOutput = (raw: StatementModelRaw): Record<string, 
     source_date_format: { format: fmt, confidence: docConfidence },
     transactions,
   };
-  if (dropped > 0) {
-    out.notes = `${dropped} row(s) dropped: no readable amount.`;
-  }
+  const noteParts: string[] = [];
+  if (amountDropped > 0) noteParts.push(`${amountDropped} row(s) dropped: no readable amount`);
+  if (dateDropped > 0) noteParts.push(`${dateDropped} row(s) dropped: no readable date`);
+  if (noteParts.length > 0) out.notes = `${noteParts.join('; ')}.`;
   return out;
 };
 

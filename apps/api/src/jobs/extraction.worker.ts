@@ -1061,6 +1061,9 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
           firstPage: 1,
           lastPage: 1,
           cropHeightPx: Math.round(2.0 * headerDpi), // top ~2 inches
+          // Distinct outDir — rasterizePdf wipes its outDir, so never share the
+          // OCR rasters' `pages/<base>` dir.
+          outDir: `${data.sourcePdfPath}.header`,
         });
         let headerText = '';
         if (headerRasters[0]) {
