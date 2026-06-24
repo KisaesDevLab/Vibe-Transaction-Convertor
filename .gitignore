@@ -14,3 +14,6 @@ tmp/
 test-results/
 playwright-report/
 apps/web/e2e/.reachability.json
+
+# dev server restart logs
+apps/*/dev-restart.log*

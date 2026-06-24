@@ -15,7 +15,20 @@ import { systemSettings } from '../db/schema.js';
 import { ValidationError } from '../lib/errors.js';
 
 export type AiSettingKind = 'int' | 'float' | 'string' | 'bool' | 'enum';
-export type AiSettingGroup = 'vision' | 'ocr' | 'extraction' | 'safety';
+export type AiSettingGroup =
+  | 'vision'
+  | 'ocr'
+  | 'extraction'
+  | 'safety'
+  | 'proc-extraction'
+  | 'proc-cleanse'
+  | 'proc-category'
+  | 'proc-check';
+
+// The four LLM processes the operator can route independently (provider / model
+// / tokens), via the per-process settings generated below.
+export const PROCESS_IDS = ['extraction', 'cleanse', 'category', 'check'] as const;
+export type ProcessId = (typeof PROCESS_IDS)[number];
 
 export interface AiSettingDef {
   id: string; // stable id used by the API + UI
@@ -32,7 +45,7 @@ export interface AiSettingDef {
   unit?: string; // shown in the UI (e.g. 'ms')
 }
 
-export const AI_SETTINGS: readonly AiSettingDef[] = [
+const BASE_AI_SETTINGS: readonly AiSettingDef[] = [
   // --- Check-payee vision fallback (Ollama qwen3-vl) ---
   // These govern ONLY the check-payee fallback vision call (callOllamaVision).
   // Scanned-statement OCR runs on GLM-OCR (ADR-025), not an Ollama vision model.
@@ -280,6 +293,101 @@ export const AI_SETTINGS: readonly AiSettingDef[] = [
   },
 ];
 
+// --- Per-process provider matrix ---------------------------------------------
+// For each of the four LLM processes, the operator can pick the provider
+// (default = follow the global routing policy), the model, and tuning knobs
+// (max output tokens, temperature, num_ctx, prompt budget). Generated so all
+// four processes stay identical. Resolved by resolveProcessConfig() and applied
+// by buildProviderForProcess() in llm-provider.ts.
+
+const processDefs = (proc: ProcessId): AiSettingDef[] => {
+  const group = `proc-${proc}` as AiSettingGroup;
+  const ENV = `VIBETC_PROC_${proc.toUpperCase()}`;
+  const providerNote =
+    proc === 'check'
+      ? ' Check images are always OCR-transcribed locally; Anthropic only ever receives the transcribed text.'
+      : '';
+  const modelNote =
+    proc === 'extraction'
+      ? ' Ignored when the statement-model engine is enabled (it uses its own model).'
+      : '';
+  return [
+    {
+      id: `${proc}Provider`,
+      key: `llm.process.${proc}.provider`,
+      env: `${ENV}_PROVIDER`,
+      kind: 'enum',
+      group,
+      label: 'Provider',
+      help: `Which provider runs this process. "default" follows the global routing policy.${providerNote}`,
+      default: 'default',
+      enumValues: ['default', 'local', 'anthropic'],
+    },
+    {
+      id: `${proc}Model`,
+      key: `llm.process.${proc}.model`,
+      env: `${ENV}_MODEL`,
+      kind: 'string',
+      group,
+      label: 'Model',
+      help: `Model id for this process. Blank = the provider's configured default model.${modelNote}`,
+      default: '',
+    },
+    {
+      id: `${proc}MaxTokens`,
+      key: `llm.process.${proc}.max_tokens`,
+      env: `${ENV}_MAX_TOKENS`,
+      kind: 'int',
+      group,
+      label: 'Max output tokens',
+      help: 'Cap on the response length for this process. Blank = the provider default.',
+      default: '',
+      min: 256,
+      max: 200_000,
+    },
+    {
+      id: `${proc}Temperature`,
+      key: `llm.process.${proc}.temperature`,
+      env: `${ENV}_TEMPERATURE`,
+      kind: 'float',
+      group,
+      label: 'Temperature',
+      help: '0 = deterministic. Blank = the provider default (0 for Ollama).',
+      default: '',
+      min: 0,
+      max: 2,
+    },
+    {
+      id: `${proc}NumCtx`,
+      key: `llm.process.${proc}.num_ctx`,
+      env: `${ENV}_NUM_CTX`,
+      kind: 'int',
+      group,
+      label: 'Context window (num_ctx, Ollama only)',
+      help: 'Ollama input window for this process. Blank = the model default. Ignored by Anthropic.',
+      default: '',
+      min: 512,
+      max: 131_072,
+    },
+    {
+      id: `${proc}PromptBudget`,
+      key: `llm.process.${proc}.prompt_budget`,
+      env: `${ENV}_PROMPT_BUDGET`,
+      kind: 'int',
+      group,
+      label: 'Input/prompt budget (tokens)',
+      help: 'Max input tokens of markdown sent before truncation. Blank = the provider default.',
+      default: '',
+      min: 1_000,
+      max: 200_000,
+    },
+  ];
+};
+
+const PROCESS_SETTINGS: readonly AiSettingDef[] = PROCESS_IDS.flatMap(processDefs);
+
+export const AI_SETTINGS: readonly AiSettingDef[] = [...BASE_AI_SETTINGS, ...PROCESS_SETTINGS];
+
 const byId = (id: string): AiSettingDef | undefined => AI_SETTINGS.find((s) => s.id === id);
 
 export interface ResolvedAiSettings {
@@ -324,6 +432,44 @@ const loadRaw = async (db: Db): Promise<(def: AiSettingDef) => string> => {
     const ev = process.env[def.env];
     if (ev != null && ev.length > 0) return ev;
     return def.default;
+  };
+};
+
+export interface ResolvedProcessConfig {
+  provider: 'default' | 'local' | 'anthropic';
+  model: string | null;
+  maxTokens: number | null;
+  temperature: number | null;
+  numCtx: number | null;
+  promptBudget: number | null;
+}
+
+// Resolve the per-process provider matrix for one process (DB → env → default
+// per setting). 'default' provider means "follow the global routing policy";
+// null fields mean "use the provider's configured default".
+export const resolveProcessConfig = async (
+  db: Db,
+  proc: ProcessId,
+): Promise<ResolvedProcessConfig> => {
+  const raw = await loadRaw(db);
+  const str = (id: string): string => {
+    const def = byId(id);
+    return def ? raw(def) : '';
+  };
+  const num = (id: string): number | null => {
+    const s = str(id);
+    if (!s) return null;
+    const n = Number(s);
+    return Number.isFinite(n) ? n : null;
+  };
+  const prov = str(`${proc}Provider`);
+  return {
+    provider: prov === 'local' || prov === 'anthropic' ? prov : 'default',
+    model: str(`${proc}Model`) || null,
+    maxTokens: num(`${proc}MaxTokens`),
+    temperature: num(`${proc}Temperature`),
+    numCtx: num(`${proc}NumCtx`),
+    promptBudget: num(`${proc}PromptBudget`),
   };
 };
 

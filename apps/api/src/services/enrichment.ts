@@ -38,7 +38,11 @@ import {
   enrichmentCache,
   type EnrichmentCacheKey,
 } from './enrichment-cache.js';
-import { buildProvider, resolveModelLabelForProvider, resolveProviderId } from './llm-provider.js';
+import {
+  buildProviderForProcess,
+  resolveModelLabelForProvider,
+  resolveProviderId,
+} from './llm-provider.js';
 import { readSettingPlain, upsertSetting } from './system-settings.js';
 
 export interface EnrichOptions {
@@ -277,61 +281,94 @@ export const enrichStatement = async (
   let providerId: 'local' | 'anthropic' | null = null;
 
   if (missing.length > 0) {
-    const provider = await buildProvider(db);
-    providerId = provider.id;
-    await checkMonthlyCap(db, provider.id);
+    const categoryNames = activeCategories.map((c) => c.name);
+    const txForPrompt = missing.map((t, i) => ({
+      index: i,
+      raw_description: t.description,
+      amount_cents: Number(t.amountCents),
+      trntype: t.trntype,
+    }));
 
-    const systemPrompt = enrichmentSystemPromptFor({
-      cleanse: opts.cleanse,
-      categorize: opts.categorize,
-      accountType,
-      categories: activeCategories.map((c) => ({
-        name: c.name,
-        description: c.description ?? null,
-      })),
-      mode: promptOverrides.mode,
-      cleanseRulesOverride: promptOverrides.cleanseRules,
-      categorizeRulesOverride: promptOverrides.categorizeRules,
-      fullSystemPromptOverride: promptOverrides.fullSystemPrompt,
-    });
-    const userPrompt = enrichmentUserPromptFor({
-      transactions: missing.map((t, i) => ({
-        index: i,
-        raw_description: t.description,
-        amount_cents: Number(t.amountCents),
-        trntype: t.trntype,
-      })),
-    });
-    const jsonSchema = schemas.enrichment.buildEnrichmentJsonSchema({
-      cleanse: opts.cleanse,
-      categorize: opts.categorize,
-      categoryNames: activeCategories.map((c) => c.name),
-    });
+    // Cleanse and category are INDEPENDENT processes — each has its own provider
+    // / model / token settings (the per-process matrix). Run each requested pass
+    // as its own LLM call, then merge the results by row index.
+    interface CleanseFields {
+      cleansedDescription: string | null;
+      merchantName: string | null;
+      processor: string | null;
+      transactionType: string | null;
+      isOpaque: boolean | null;
+      confidence: string | null;
+    }
+    const cleanseByIndex = new Map<number, CleanseFields>();
+    const categoryByIndex = new Map<number, string | null>();
+    const modelLabels: string[] = [];
 
-    const completion = await provider.complete({
-      systemPrompt,
-      userPrompt,
-      schema: jsonSchema,
-      schemaName: 'transaction_enrichment',
-    });
-    llmCalls = 1;
-    costMicros = completion.telemetry.costMicros;
-    model = completion.telemetry.model;
+    const runPass = async (proc: 'cleanse' | 'category'): Promise<void> => {
+      const isCleanse = proc === 'cleanse';
+      const built = await buildProviderForProcess(db, proc);
+      providerId = built.providerId;
+      await checkMonthlyCap(db, built.providerId);
+      const systemPrompt = enrichmentSystemPromptFor({
+        cleanse: isCleanse,
+        categorize: !isCleanse,
+        accountType,
+        categories: activeCategories.map((c) => ({
+          name: c.name,
+          description: c.description ?? null,
+        })),
+        mode: promptOverrides.mode,
+        cleanseRulesOverride: promptOverrides.cleanseRules,
+        categorizeRulesOverride: promptOverrides.categorizeRules,
+        fullSystemPromptOverride: promptOverrides.fullSystemPrompt,
+      });
+      const userPrompt = enrichmentUserPromptFor({ transactions: txForPrompt });
+      const jsonSchema = schemas.enrichment.buildEnrichmentJsonSchema({
+        cleanse: isCleanse,
+        categorize: !isCleanse,
+        categoryNames,
+      });
+      const completion = await built.provider.complete({
+        systemPrompt,
+        userPrompt,
+        schema: jsonSchema,
+        schemaName: 'transaction_enrichment',
+      });
+      llmCalls += 1;
+      costMicros += completion.telemetry.costMicros;
+      modelLabels.push(`${proc}:${completion.telemetry.model}`);
+      const parsed = schemas.enrichment.EnrichmentResponse.parse(completion.data);
+      for (const out of parsed.transactions) {
+        if (isCleanse) {
+          cleanseByIndex.set(out.index, {
+            cleansedDescription: out.cleansed_description ?? null,
+            merchantName: out.merchant_name ?? null,
+            processor: out.processor ?? null,
+            transactionType: out.transaction_type ?? null,
+            isOpaque: out.is_opaque ?? null,
+            confidence: out.confidence ?? null,
+          });
+        } else {
+          categoryByIndex.set(out.index, out.category ?? null);
+        }
+      }
+    };
 
-    const parsed = schemas.enrichment.EnrichmentResponse.parse(completion.data);
-    // Re-attach LLM output to the matching missing-tx by index. Schema
-    // requires every row to come back; if the LLM somehow emits fewer,
-    // skip the unfilled tail.
-    for (const out of parsed.transactions) {
-      const tx = missing[out.index];
-      if (!tx) continue;
-      const cleansedDescription = opts.cleanse ? (out.cleansed_description ?? null) : null;
-      const categoryName = opts.categorize ? (out.category ?? null) : null;
-      const merchantName = opts.cleanse ? (out.merchant_name ?? null) : null;
-      const processor = opts.cleanse ? (out.processor ?? null) : null;
-      const transactionType = opts.cleanse ? (out.transaction_type ?? null) : null;
-      const isOpaque = opts.cleanse ? (out.is_opaque ?? null) : null;
-      const confidence = opts.cleanse ? (out.confidence ?? null) : null;
+    if (opts.cleanse) await runPass('cleanse');
+    if (opts.categorize) await runPass('category');
+    model = modelLabels.join(' + ') || null;
+
+    // Merge the (independent) cleanse + category outputs per missing row.
+    for (let i = 0; i < missing.length; i += 1) {
+      const tx = missing[i]!;
+      const c = cleanseByIndex.get(i);
+      const cleansedDescription = opts.cleanse ? (c?.cleansedDescription ?? null) : null;
+      const categoryName = opts.categorize ? (categoryByIndex.get(i) ?? null) : null;
+      const merchantName = opts.cleanse ? (c?.merchantName ?? null) : null;
+      const processor = opts.cleanse ? (c?.processor ?? null) : null;
+      const transactionType = opts.cleanse ? (c?.transactionType ?? null) : null;
+      const isOpaque = opts.cleanse ? (c?.isOpaque ?? null) : null;
+      const confidence = opts.cleanse ? (c?.confidence ?? null) : null;
       resolved.push({
         txId: tx.id,
         cleansedDescription,
@@ -342,8 +379,8 @@ export const enrichStatement = async (
         isOpaque,
         confidence,
       });
-      // Best-effort cache write so the same merchant on the next
-      // statement is a hit. A failing Redis silently no-ops.
+      // Best-effort cache write so the same merchant on the next statement is a
+      // hit. A failing Redis silently no-ops.
       void enrichmentCache.set(cacheKeyFor(tx.description), {
         ...(cleansedDescription !== null ? { cleansedDescription } : {}),
         ...(categoryName !== null ? { category: categoryName } : {}),

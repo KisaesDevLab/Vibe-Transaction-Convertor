@@ -31,7 +31,7 @@ import type { Db } from '../db/client.js';
 import { statements, transactions } from '../db/schema.js';
 import { NotFoundError, ValidationError } from '../lib/errors.js';
 import { logger } from '../lib/logger.js';
-import { buildProviderForId } from './llm-provider.js';
+import { buildProviderForId, buildProviderForProcess } from './llm-provider.js';
 
 export interface CheckResolveResult {
   txCount: number; // total transactions on the statement
@@ -90,7 +90,8 @@ export const resolveCheckPayees = async (db: Db, stmtId: string): Promise<CheckR
   }
 
   // Local provider. Check reading runs on-appliance: GLM-OCR (primary) +
-  // Ollama qwen3-vl (fallback); page images never egress (ADR-025).
+  // Ollama qwen3-vl (fallback); page images never egress (ADR-025). This
+  // provider ALWAYS reads the images locally regardless of the matrix.
   let provider;
   try {
     provider = await buildProviderForId(db, 'local');
@@ -99,6 +100,26 @@ export const resolveCheckPayees = async (db: Db, stmtId: string): Promise<CheckR
       `local provider not available: ${(err as Error).message}. ` +
         'Ensure GLM-OCR (GLM_OCR_URL) and Ollama (with qwen3-vl pulled) are reachable (see /admin/llm-provider).',
     );
+  }
+
+  // Text-parse provider from the per-process "check" matrix. Parses the
+  // structured check fields from the LOCAL GLM-OCR transcription, so it may be
+  // Anthropic (text-only — images never reach it). Falls back to the local
+  // provider if the configured one can't be built (e.g. Anthropic without a key).
+  let textProvider = provider;
+  let textProviderId: 'local' | 'anthropic' = 'local';
+  try {
+    const built = await buildProviderForProcess(db, 'check');
+    textProvider = built.provider;
+    textProviderId = built.providerId;
+  } catch (err) {
+    logger.warn(
+      { stmtId, err: (err as Error).message },
+      'check text-parse provider unavailable — using local',
+    );
+  }
+  if (textProviderId === 'anthropic') {
+    logger.info({ stmtId }, 'check payee text-parse routed to Anthropic (transcription text only)');
   }
 
   // Rasterize the PDF at 300 DPI PNG (small check thumbnails need the fidelity)
@@ -147,7 +168,7 @@ export const resolveCheckPayees = async (db: Db, stmtId: string): Promise<CheckR
         primaryFailedHard = true;
         break;
       }
-      const result = await provider.complete({
+      const result = await textProvider.complete({
         systemPrompt: CHECK_RESOLVE_SYSTEM_PROMPT,
         userPrompt: `${CHECK_RESOLVE_USER_PROMPT}\n\nTranscribed check text:\n${ocr.text}`,
         schema: CHECK_RESOLVE_JSON_SCHEMA,

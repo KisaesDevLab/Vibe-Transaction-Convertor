@@ -192,6 +192,29 @@ describe('LocalGatewayProvider', () => {
     expect(provider.id).toBe('local');
   });
 
+  it('threads the configured temperature into the extract request (default 0)', async () => {
+    let sentTemp: number | undefined;
+    const capture = (init: RequestInit | undefined): Response => {
+      sentTemp = JSON.parse(String(init?.body)).temperature;
+      return okJsonResponse({ choices: [{ message: { content: JSON.stringify(SAMPLE) } }] });
+    };
+    // Default (no option) → temperature 0.
+    const def = new LocalGatewayProvider({
+      baseUrl: 'http://gw.test',
+      fetcher: async (_u, init) => capture(init),
+    });
+    await def.extract('# md');
+    expect(sentTemp).toBe(0);
+    // Explicit override → that value.
+    const warm = new LocalGatewayProvider({
+      baseUrl: 'http://gw.test',
+      temperature: 0.4,
+      fetcher: async (_u, init) => capture(init),
+    });
+    await warm.extract('# md');
+    expect(sentTemp).toBe(0.4);
+  });
+
   it('statement-model: retries a transient per-page failure (fetch failed) and recovers', async () => {
     const prev = process.env.VIBETC_STATEMENT_PAGE_RETRY_MS;
     process.env.VIBETC_STATEMENT_PAGE_RETRY_MS = '0'; // no backoff in test

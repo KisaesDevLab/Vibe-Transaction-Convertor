@@ -29,6 +29,7 @@ import { accounts, statements, systemSettings, transactions } from '../db/schema
 import { logger } from '../lib/logger.js';
 import {
   buildProviderForId,
+  buildProviderForProcessId,
   invalidateProviderCache,
   providerOrderFor,
   resolveModelLabelForProvider,
@@ -38,7 +39,7 @@ import {
 } from '../services/llm-provider.js';
 import { resolvePdfStrategy } from '../services/pdf-strategy.js';
 import { resolveCheckPayees } from '../services/check-resolver.js';
-import { resolveAiSettings } from '../services/ai-settings.js';
+import { resolveAiSettings, resolveProcessConfig } from '../services/ai-settings.js';
 import { resolveExtractionSystemPrompt } from '../services/extraction-prompt.js';
 import { writeAudit } from '../services/audit.js';
 
@@ -283,7 +284,9 @@ const attemptExtraction = async (
 
   let provider;
   try {
-    provider = await buildProviderForId(db, providerId);
+    // Extraction process: apply the matrix model/token/temperature knobs to the
+    // chosen provider id (primary or secondary fallback).
+    provider = await buildProviderForProcessId(db, 'extraction', providerId);
   } catch (err) {
     return { providerId, rejection: 'http', error: err as Error, ...empty };
   }
@@ -1138,12 +1141,20 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
     // An operator-forced provider (the "Process via Anthropic" button on a failed
     // statement) pins THIS run to one provider with no fallback, overriding the
     // global routing policy. Otherwise use the configured policy.
-    policy = data.providerOverride
-      ? data.providerOverride === 'anthropic'
-        ? 'anthropic-only'
-        : 'local-only'
-      : await resolveProviderPolicy(db);
-    ({ primary, secondary } = providerOrderFor(policy));
+    // Precedence: a manual "Process via Anthropic" override pins the provider;
+    // else the extraction process matrix (if its provider is explicit) pins it
+    // with no fallback; else the global routing policy (with fallback).
+    const extractionCfg = await resolveProcessConfig(db, 'extraction');
+    if (data.providerOverride) {
+      policy = data.providerOverride === 'anthropic' ? 'anthropic-only' : 'local-only';
+      ({ primary, secondary } = providerOrderFor(policy));
+    } else if (extractionCfg.provider !== 'default') {
+      policy = extractionCfg.provider === 'anthropic' ? 'anthropic-only' : 'local-only';
+      ({ primary, secondary } = providerOrderFor(policy));
+    } else {
+      policy = await resolveProviderPolicy(db);
+      ({ primary, secondary } = providerOrderFor(policy));
+    }
     // Surface which provider + model is in use the moment extraction begins, so
     // the live processing UI can show it without waiting for the first LLM call
     // to return telemetry. The final persist (on success / halt) overwrites

@@ -98,7 +98,15 @@ interface ProviderStatus {
 
 interface AiSetting {
   id: string;
-  group: 'vision' | 'ocr' | 'extraction' | 'safety';
+  group:
+    | 'vision'
+    | 'ocr'
+    | 'extraction'
+    | 'safety'
+    | 'proc-extraction'
+    | 'proc-cleanse'
+    | 'proc-category'
+    | 'proc-check';
   kind: 'int' | 'float' | 'string' | 'bool' | 'enum';
   label: string;
   help: string;
@@ -1184,6 +1192,10 @@ const AI_GROUP_LABELS: Record<AiSetting['group'], string> = {
   ocr: 'Scanned-statement OCR (GLM-OCR)',
   extraction: 'Text extraction (Ollama)',
   safety: 'Review safety net',
+  'proc-extraction': 'Process · Statement extraction',
+  'proc-cleanse': 'Process · Cleanse description',
+  'proc-category': 'Process · Assign category',
+  'proc-check': 'Process · Resolve check payees',
 };
 
 function AiTuningSection({
@@ -1195,14 +1207,26 @@ function AiTuningSection({
   disabled: boolean;
   onSave: (id: string, value: string) => Promise<void>;
 }) {
-  const groups: AiSetting['group'][] = ['vision', 'ocr', 'extraction', 'safety'];
+  const groups: AiSetting['group'][] = [
+    'proc-extraction',
+    'proc-cleanse',
+    'proc-category',
+    'proc-check',
+    'vision',
+    'ocr',
+    'extraction',
+    'safety',
+  ];
   return (
     <section className="rounded-lg border border-surface-muted bg-white p-4">
       <h2 className="text-base font-medium">Local model tuning</h2>
       <p className="mt-1 text-xs text-ink-subtle">
-        Vision/OCR performance and safety knobs. Each falls back to its env var / default — blank a
-        field to reset. Changes apply on the next extraction. The <code>[db/env/default]</code> tag
-        shows where the current value comes from.
+        Per-process provider/model/token routing (top), plus vision/OCR performance and safety
+        knobs. For each process, provider <code>default</code> follows the routing policy above;
+        blank a model/token field to use the provider default. Check images are always OCR&apos;d
+        locally — Anthropic only sees transcribed text. Each falls back to its env var / default.
+        Changes apply on the next extraction. The <code>[db/env/default]</code> tag shows where the
+        current value comes from.
       </p>
       {groups.map((g) => {
         const items = settings.filter((s) => s.group === g);

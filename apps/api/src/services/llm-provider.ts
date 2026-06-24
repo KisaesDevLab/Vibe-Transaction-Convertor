@@ -7,7 +7,7 @@ import {
 
 import type { Db } from '../db/client.js';
 import { unwrapSecret } from '../lib/secrets.js';
-import { resolveAiSettings } from './ai-settings.js';
+import { resolveAiSettings, resolveProcessConfig, type ProcessId } from './ai-settings.js';
 import { getMergedPriceTable } from './pricing.js';
 import { readSetting } from './system-settings.js';
 
@@ -171,7 +171,17 @@ export const invalidateProviderCache = (): void => {
   cache.clear();
 };
 
-const constructLocal = async (db: Db): Promise<LlmProvider> => {
+// Per-process overrides applied on top of the resolved provider settings. Empty
+// for the global providers; populated by buildProviderForProcess.
+interface ProviderOverrides {
+  modelId?: string;
+  maxCompletionTokens?: number;
+  temperature?: number;
+  numCtx?: number;
+  maxPromptTokens?: number;
+}
+
+const constructLocal = async (db: Db, overrides: ProviderOverrides = {}): Promise<LlmProvider> => {
   // Ollama base URL + text/vision model tags are operator-configurable from
   // /admin/llm-provider. Each falls back to its env default in the provider
   // constructor when the DB has no override.
@@ -192,20 +202,26 @@ const constructLocal = async (db: Db): Promise<LlmProvider> => {
   // Ollama /api/chat (no system prompt; native schema mapped back). Overrides the
   // text model with the configured statement model.
   const statementMode = ai.extractionEngine === 'statement-model';
-  const effectiveModelId = statementMode ? ai.statementModel : modelId;
+  // Per the matrix design: the statement-model engine keeps its own model; the
+  // per-process model override only applies to the non-engine path.
+  const effectiveModelId = statementMode ? ai.statementModel : (overrides.modelId ?? modelId);
+  const effectiveMaxTokens = overrides.maxCompletionTokens ?? maxCompletionTokens;
+  const effectiveNumCtx = overrides.numCtx ?? ai.numCtx;
+  const effectivePromptTokens = overrides.maxPromptTokens ?? ai.maxPromptTokens;
   return new LocalGatewayProvider({
     ...(baseUrl ? { baseUrl } : {}),
     ...(effectiveModelId ? { modelId: effectiveModelId } : {}),
     ...(statementMode ? { statementModelMode: true } : {}),
     ...(visionModelId ? { visionModelId } : {}),
     timeoutMs,
-    ...(maxCompletionTokens != null ? { maxCompletionTokens } : {}),
+    ...(effectiveMaxTokens != null ? { maxCompletionTokens: effectiveMaxTokens } : {}),
     structuredOutputMode: ai.localStructuredOutput,
-    maxPromptTokens: ai.maxPromptTokens,
+    maxPromptTokens: effectivePromptTokens,
     visionTimeoutMs: ai.visionTimeoutMs,
     visionMaxTokens: ai.visionMaxTokens,
     keepAlive: ai.keepAlive,
-    ...(ai.numCtx != null ? { numCtx: ai.numCtx } : {}),
+    ...(effectiveNumCtx != null ? { numCtx: effectiveNumCtx } : {}),
+    ...(overrides.temperature != null ? { temperature: overrides.temperature } : {}),
     ...(ai.visionThink != null ? { visionThink: ai.visionThink } : {}),
     // GLM-OCR stage-1 engine (ADR-025). URL/model/timeout/concurrency resolved
     // DB→env→default; an empty URL leaves it to the GLM_OCR_URL env (and the
@@ -217,7 +233,10 @@ const constructLocal = async (db: Db): Promise<LlmProvider> => {
   });
 };
 
-const constructAnthropic = async (db: Db): Promise<LlmProvider> => {
+const constructAnthropic = async (
+  db: Db,
+  overrides: ProviderOverrides = {},
+): Promise<LlmProvider> => {
   const keyRow = await readSetting(db, KEY_ANTHROPIC_KEY);
   let apiKey: string | undefined;
   if (keyRow?.valueEncrypted) {
@@ -229,7 +248,11 @@ const constructAnthropic = async (db: Db): Promise<LlmProvider> => {
     throw new Error('anthropic provider requested but no API key in DB or ANTHROPIC_API_KEY env');
   }
   const modelRow = await readSetting(db, KEY_ANTHROPIC_MODEL);
-  const model = modelRow?.valuePlaintext ?? process.env.ANTHROPIC_MODEL ?? 'claude-sonnet-4-6';
+  const model =
+    overrides.modelId ??
+    modelRow?.valuePlaintext ??
+    process.env.ANTHROPIC_MODEL ??
+    'claude-sonnet-4-6';
   // Merge curated defaults + operator overrides so worker cost rollups
   // include any models the operator added on /admin/llm-provider.
   const priceTable = await getMergedPriceTable(db);
@@ -237,7 +260,7 @@ const constructAnthropic = async (db: Db): Promise<LlmProvider> => {
   // from /admin/llm-provider instead of an env-only ANTHROPIC_BASE_URL.
   const baseUrl = await resolveAnthropicBaseUrl(db);
   const timeoutMs = await resolveLlmTimeoutMs(db);
-  const maxTokens = await resolveLlmMaxTokens(db);
+  const maxTokens = overrides.maxCompletionTokens ?? (await resolveLlmMaxTokens(db));
   const { maxPromptTokens } = await resolveAiSettings(db);
   return new AnthropicProvider({
     apiKey,
@@ -246,7 +269,8 @@ const constructAnthropic = async (db: Db): Promise<LlmProvider> => {
     baseUrl,
     timeoutMs,
     maxTokens,
-    maxPromptTokens,
+    maxPromptTokens: overrides.maxPromptTokens ?? maxPromptTokens,
+    ...(overrides.temperature != null ? { temperature: overrides.temperature } : {}),
   });
 };
 
@@ -263,4 +287,47 @@ export const buildProviderForId = async (db: Db, id: ProviderId): Promise<LlmPro
 export const buildProvider = async (db: Db): Promise<LlmProvider> => {
   const id = await resolveProviderId(db);
   return buildProviderForId(db, id);
+};
+
+// Build a provider for a specific process (extraction / cleanse / category /
+// check) honoring the per-process matrix: provider (default = global policy),
+// model, and tuning knobs. Constructed fresh (not cached) since each process can
+// differ. Returns the resolved providerId so callers can audit-log egress.
+const overridesFor = (
+  cfg: Awaited<ReturnType<typeof resolveProcessConfig>>,
+): ProviderOverrides => ({
+  ...(cfg.model ? { modelId: cfg.model } : {}),
+  ...(cfg.maxTokens != null ? { maxCompletionTokens: cfg.maxTokens } : {}),
+  ...(cfg.temperature != null ? { temperature: cfg.temperature } : {}),
+  ...(cfg.numCtx != null ? { numCtx: cfg.numCtx } : {}),
+  ...(cfg.promptBudget != null ? { maxPromptTokens: cfg.promptBudget } : {}),
+});
+
+// Build a specific provider id with a process's tuning overrides applied. Used
+// by the extraction worker, which resolves its own primary/secondary order
+// (policy + fallback) but still wants the extraction process's model/token knobs.
+export const buildProviderForProcessId = async (
+  db: Db,
+  proc: ProcessId,
+  id: ProviderId,
+): Promise<LlmProvider> => {
+  const cfg = await resolveProcessConfig(db, proc);
+  const overrides = overridesFor(cfg);
+  return id === 'local' ? constructLocal(db, overrides) : constructAnthropic(db, overrides);
+};
+
+// Resolve a process's provider (default = global policy) AND apply its overrides.
+// Returns the providerId so callers can audit-log egress.
+export const buildProviderForProcess = async (
+  db: Db,
+  proc: ProcessId,
+): Promise<{ provider: LlmProvider; providerId: ProviderId }> => {
+  const cfg = await resolveProcessConfig(db, proc);
+  const providerId: ProviderId =
+    cfg.provider === 'default' ? await resolveProviderId(db) : cfg.provider;
+  const provider =
+    providerId === 'local'
+      ? await constructLocal(db, overridesFor(cfg))
+      : await constructAnthropic(db, overridesFor(cfg));
+  return { provider, providerId };
 };

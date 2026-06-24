@@ -500,6 +500,9 @@ export interface LocalGatewayProviderOptions {
   visionMaxTokens?: number | undefined;
   keepAlive?: string | undefined;
   numCtx?: number | undefined;
+  // Sampling temperature for the text-extraction / completion calls (0 =
+  // deterministic, the default). Per-process override from the provider matrix.
+  temperature?: number | undefined;
   visionThink?: boolean | undefined;
   // Local text-extraction structured-output mode. 'grammar' (default) constrains
   // generation with the JSON-schema grammar and falls back to json_object on a
@@ -563,6 +566,7 @@ export class LocalGatewayProvider implements LlmProvider {
   private visionTimeoutMs: number;
   private keepAlive: string;
   private numCtx: number | undefined;
+  private temperature: number;
   // Hard output cap for the vision call (Ollama `num_predict`). Without it the
   // model can generate unbounded JSON for a large statement and, under the
   // grammar-constrained `format` decode on a slow/CPU host, blow past the
@@ -616,6 +620,7 @@ export class LocalGatewayProvider implements LlmProvider {
     const numCtxEnv = Number(process.env.OLLAMA_NUM_CTX ?? '');
     this.numCtx =
       opts.numCtx ?? (Number.isFinite(numCtxEnv) && numCtxEnv > 0 ? numCtxEnv : undefined);
+    this.temperature = opts.temperature ?? 0;
     const thinkEnv = process.env.OLLAMA_VISION_THINK;
     this.visionThink =
       opts.visionThink ?? (thinkEnv === 'on' ? true : thinkEnv === 'off' ? false : undefined);
@@ -755,7 +760,10 @@ export class LocalGatewayProvider implements LlmProvider {
           model: this.modelId,
           stream: false,
           format: STATEMENT_MODEL_FORMAT,
-          options: { temperature: 0, ...(this.numCtx ? { num_ctx: this.numCtx } : {}) },
+          options: {
+            temperature: this.temperature,
+            ...(this.numCtx ? { num_ctx: this.numCtx } : {}),
+          },
           ...(this.keepAlive ? { keep_alive: this.keepAlive } : {}),
           messages: [{ role: 'user', content: `<statement_ocr>\n${text}\n</statement_ocr>` }],
         }),
@@ -919,7 +927,7 @@ export class LocalGatewayProvider implements LlmProvider {
                     json_schema: { name: 'extraction', schema: sanitizeSchemaForOllama(schema) },
                   }
                 : { type: 'json_object' },
-            temperature: 0,
+            temperature: this.temperature,
             max_tokens: maxTokens,
           }),
           signal: ctl.signal,
@@ -1158,7 +1166,7 @@ export class LocalGatewayProvider implements LlmProvider {
               schema: sanitizeSchemaForOllama(opts.schema),
             },
           },
-          temperature: 0,
+          temperature: this.temperature,
           max_tokens: opts.maxOutputTokens ?? Number(process.env.LLM_MAX_COMPLETION_TOKENS ?? 6000),
         }),
         signal: ctl.signal,
@@ -1362,6 +1370,9 @@ export interface AnthropicProviderOptions {
   // as the local provider (LLM_MAX_PROMPT_TOKENS); threaded so both providers
   // honor the operator's value.
   maxPromptTokens?: number | undefined;
+  // Sampling temperature. Omitted from the request when undefined (Anthropic
+  // default applies); set by the per-process provider matrix.
+  temperature?: number | undefined;
   fetcher?: typeof fetch | undefined;
   // Operator-mergeable price table. When set, replaces the curated
   // defaults. Used by buildProvider to pass DB-backed pricing through
@@ -1377,6 +1388,7 @@ export class AnthropicProvider implements LlmProvider {
   private timeoutMs: number;
   private maxTokens: number;
   private maxPromptTokens: number;
+  private temperature: number | undefined;
   private fetcher: typeof fetch;
   private priceTable: AnthropicPriceTable;
 
@@ -1392,6 +1404,7 @@ export class AnthropicProvider implements LlmProvider {
     this.timeoutMs = opts.timeoutMs ?? Number(process.env.LLM_TIMEOUT_MS ?? 60_000);
     this.maxTokens = opts.maxTokens ?? Number(process.env.LLM_MAX_COMPLETION_TOKENS ?? 32_000);
     this.maxPromptTokens = opts.maxPromptTokens ?? defaultPromptBudget();
+    this.temperature = opts.temperature;
     this.fetcher = opts.fetcher ?? fetch;
     this.priceTable = opts.priceTable ?? ANTHROPIC_PRICE_TABLE_DEFAULT;
   }
@@ -1527,6 +1540,7 @@ export class AnthropicProvider implements LlmProvider {
           model: this.model,
           system,
           max_tokens: sentMaxTokens,
+          ...(this.temperature != null ? { temperature: this.temperature } : {}),
           tools: [tool],
           tool_choice: { type: 'tool', name: tool.name },
           messages,
@@ -1703,6 +1717,7 @@ export class AnthropicProvider implements LlmProvider {
           model: this.model,
           system: opts.systemPrompt,
           max_tokens: sentMaxTokens,
+          ...(this.temperature != null ? { temperature: this.temperature } : {}),
           tools: [tool],
           tool_choice: { type: 'tool', name: toolName },
           messages,
