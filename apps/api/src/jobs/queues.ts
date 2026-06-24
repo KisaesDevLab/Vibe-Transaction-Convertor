@@ -23,6 +23,10 @@ export interface ExtractionJobData {
   accountId: string;
   sourcePdfHash: string;
   sourcePdfPath: string;
+  // Operator-forced provider for THIS run, overriding the global routing policy.
+  // Set when the operator clicks "Process via Anthropic" on a failed statement —
+  // the deliberate, audit-logged egress carve-out. Absent = use the policy.
+  providerOverride?: 'local' | 'anthropic' | undefined;
 }
 
 let _extractionQueue: Queue<ExtractionJobData> | undefined;

@@ -269,11 +269,14 @@ export type ReExtractStrategy = PdfProcessingStrategy | 'default';
 export const useReExtract = (statementId: string) => {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (input?: { strategy?: ReExtractStrategy }) =>
-      api.post<{ ok: boolean }>(
-        `/api/statements/${statementId}/re-extract`,
-        input?.strategy ? { strategy: input.strategy } : {},
-      ),
+    // `provider: 'anthropic'` forces this run through Anthropic (the deliberate,
+    // audit-logged egress carve-out) regardless of the routing policy — used by
+    // the "Process via Anthropic" action on a failed statement.
+    mutationFn: (input?: { strategy?: ReExtractStrategy; provider?: 'local' | 'anthropic' }) =>
+      api.post<{ ok: boolean }>(`/api/statements/${statementId}/re-extract`, {
+        ...(input?.strategy ? { strategy: input.strategy } : {}),
+        ...(input?.provider ? { provider: input.provider } : {}),
+      }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['statement', statementId] }),
   });
 };

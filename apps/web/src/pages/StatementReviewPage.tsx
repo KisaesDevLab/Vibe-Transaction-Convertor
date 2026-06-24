@@ -320,6 +320,40 @@ export function StatementReviewPage() {
       {s.errorMessage ? (
         <div className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-900">
           <strong>Extraction failed.</strong> {s.errorMessage}
+          {!s.sourcePdfDeleted ? (
+            <div className="mt-2 flex items-center gap-3">
+              <button
+                type="button"
+                disabled={reExtract.isPending}
+                onClick={() => {
+                  if (
+                    window.confirm(
+                      'Process this statement via Anthropic? This sends the statement text to ' +
+                        "Anthropic's API — the one external service this app uses. The send is " +
+                        'audit-logged. Continue?',
+                    )
+                  ) {
+                    reExtract.mutate(
+                      { provider: 'anthropic' },
+                      {
+                        onSuccess: () => toast.success('Re-processing via Anthropic…'),
+                        onError: (err) =>
+                          toast.error(
+                            err instanceof ApiError ? err.message : 'Anthropic re-process failed',
+                          ),
+                      },
+                    );
+                  }
+                }}
+                className="rounded-md border border-red-400 px-3 py-1.5 text-xs font-medium text-red-800 hover:bg-red-100 disabled:opacity-50"
+              >
+                {reExtract.isPending ? 'Enqueueing…' : 'Process via Anthropic'}
+              </button>
+              <span className="text-xs text-red-700">
+                Sends to Anthropic (external) — needs an Anthropic API key configured in Admin.
+              </span>
+            </div>
+          ) : null}
         </div>
       ) : null}
 

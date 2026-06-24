@@ -915,6 +915,17 @@ export const statementsRouter = (): Router => {
           }
           strategyUpdate = { processingStrategyOverride: parsed.value };
         }
+        // Optional provider override. "anthropic" is the deliberate, audit-logged
+        // egress carve-out — the operator clicked "Process via Anthropic" on a
+        // failed statement. It pins this run to that provider with no fallback.
+        const requestedProvider = (req.body as { provider?: unknown } | undefined)?.provider;
+        let providerOverride: 'local' | 'anthropic' | undefined;
+        if (requestedProvider !== undefined && requestedProvider !== null) {
+          if (requestedProvider !== 'local' && requestedProvider !== 'anthropic') {
+            throw new ValidationError('provider must be "local" or "anthropic"');
+          }
+          providerOverride = requestedProvider;
+        }
         // Wipe prior transactions so the new run isn't deduped against the
         // old FITIDs. Keep the source PDF.
         await db.delete(transactions).where(eq(transactions.statementId, id));
@@ -935,20 +946,22 @@ export const statementsRouter = (): Router => {
           accountId: stmt.accountId,
           sourcePdfHash: stmt.sourcePdfHash,
           sourcePdfPath: stmt.sourcePdfPath,
+          ...(providerOverride ? { providerOverride } : {}),
         });
+        const auditPayload: Record<string, unknown> = {};
+        if (strategyUpdate) {
+          auditPayload.processingStrategyOverride = strategyUpdate.processingStrategyOverride;
+          auditPayload.previousOverride = stmt.processingStrategyOverride ?? null;
+        }
+        // The egress carve-out: record the forced provider so a deliberate
+        // Anthropic send is always attributable.
+        if (providerOverride) auditPayload.providerOverride = providerOverride;
         await writeAudit(db, {
           actorUserId: req.user!.id,
           entityType: 'statement',
           entityId: id,
           action: 'statement.re-extract',
-          ...(strategyUpdate
-            ? {
-                payload: {
-                  processingStrategyOverride: strategyUpdate.processingStrategyOverride,
-                  previousOverride: stmt.processingStrategyOverride ?? null,
-                },
-              }
-            : {}),
+          ...(Object.keys(auditPayload).length > 0 ? { payload: auditPayload } : {}),
         });
         res.json({ ok: true });
       } catch (err) {

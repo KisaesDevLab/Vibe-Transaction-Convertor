@@ -1116,7 +1116,14 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
     // pass in memory without persisting anything; the orchestrator picks
     // the better outcome and commits it once at the end.
     currentPhase = 'extracting';
-    policy = await resolveProviderPolicy(db);
+    // An operator-forced provider (the "Process via Anthropic" button on a failed
+    // statement) pins THIS run to one provider with no fallback, overriding the
+    // global routing policy. Otherwise use the configured policy.
+    policy = data.providerOverride
+      ? data.providerOverride === 'anthropic'
+        ? 'anthropic-only'
+        : 'local-only'
+      : await resolveProviderPolicy(db);
     ({ primary, secondary } = providerOrderFor(policy));
     // Surface which provider + model is in use the moment extraction begins, so
     // the live processing UI can show it without waiting for the first LLM call
