@@ -1511,12 +1511,14 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
       reviewConfidenceThreshold > 0
         ? effectiveTxs.filter((t) => t.confidence < reviewConfidenceThreshold).length
         : 0;
-    // Dropped-amount rows (salvaged rather than failing the statement) must be
-    // surfaced — the operator needs to add them manually since the model
-    // couldn't read their amounts and the DB can't store a null/zero amount.
+    // Zero-amount rows (the model couldn't read the amount; coerced to 0 rather
+    // than failing the statement) must be surfaced — the operator fills in the
+    // real amount before exporting.
+    const zeroAmountCount = effectiveTxs.filter((t) => t.amountCents === 0n).length;
     const droppedAmountNote =
-      chosen.extractionNotes && /amount unreadable/i.test(chosen.extractionNotes)
-        ? chosen.extractionNotes
+      zeroAmountCount > 0
+        ? `${zeroAmountCount} transaction(s) have a zero/unreadable amount (set to 0) — verify ` +
+          `and correct each against the source statement before exporting.`
         : null;
     const lowConfidenceNote =
       lowConfidenceCount > 0

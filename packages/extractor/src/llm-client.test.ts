@@ -200,11 +200,12 @@ describe('parseExtractionResponse — null amount handling', () => {
     }
   });
 
-  it('drops null-amount rows + notes them when salvaging (default), never failing', () => {
+  it('coerces null-amount rows to 0 + keeps them + notes when salvaging (default)', () => {
     const out = parseExtractionResponse(JSON.stringify(withRows([good, nullAmt])));
-    expect(out.transactions).toHaveLength(1);
-    expect(out.transactions[0]!.description).toBe('A');
-    expect(out.notes).toMatch(/amount unreadable/i);
+    expect(out.transactions).toHaveLength(2); // kept, not dropped
+    const b = out.transactions.find((t) => t.description === 'B');
+    expect(b!.amount_cents).toBe(0); // coerced
+    expect(out.notes).toMatch(/unreadable amount/i);
   });
 
   it('is a no-op when every amount is readable', () => {

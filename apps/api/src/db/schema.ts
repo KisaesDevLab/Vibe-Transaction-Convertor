@@ -405,7 +405,9 @@ export const transactions = vibetc.table(
       t.normalizedDescription,
       t.seqInDay,
     ),
-    amountNonZero: check('transactions_amount_nonzero', sql`${t.amountCents} <> 0`),
+    // NOTE: the former `transactions_amount_nonzero` CHECK was dropped in
+    // migration 0017 — the extractor coerces an unreadable amount to 0 and keeps
+    // the row (flagged for review) rather than failing the whole statement.
     businessCategoryIdx: index('transactions_business_category_idx').on(t.businessCategoryId),
   }),
 );

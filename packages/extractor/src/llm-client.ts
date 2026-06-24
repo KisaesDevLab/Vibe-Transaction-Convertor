@@ -317,9 +317,10 @@ export const expandArrayTransactions = (parsed: unknown): unknown => {
 // emits `null` for rows whose amount it couldn't read.
 const isUsableAmount = (v: unknown): boolean => typeof v === 'number' && Number.isFinite(v);
 
-// Either signal a re-ask (salvage=false → throw with the count) or drop the
-// unreadable-amount rows and append a note (salvage=true). Pass-through when the
-// shape isn't the expected { transactions: [...] }.
+// Either signal a re-ask (salvage=false → throw with the count) or COERCE the
+// unreadable-amount rows to 0 and KEEP them (salvage=true) — the operator would
+// rather see a transaction with a 0/missing amount (flagged for review) than
+// lose the whole statement. Pass-through when the shape isn't { transactions }.
 const handleNullAmountRows = (parsed: unknown, rawResponse: string, salvage: boolean): unknown => {
   if (parsed === null || typeof parsed !== 'object') return parsed;
   const obj = parsed as { transactions?: unknown; notes?: unknown };
@@ -332,21 +333,23 @@ const handleNullAmountRows = (parsed: unknown, rawResponse: string, salvage: boo
   );
   if (bad.length === 0) return parsed;
   if (!salvage) {
+    // Give the LLM one focused re-ask to fill the amounts before we coerce.
     throw new ExtractionResponseError({
       summary: `${bad.length} transaction(s) had a null/unreadable amount`,
       rawResponse,
       nullAmountRows: bad.length,
     });
   }
-  const kept = obj.transactions.filter(
-    (t) =>
-      t !== null &&
-      typeof t === 'object' &&
-      isUsableAmount((t as { amount_cents?: unknown }).amount_cents),
+  const coerced = obj.transactions.map((t) =>
+    t !== null &&
+    typeof t === 'object' &&
+    !isUsableAmount((t as { amount_cents?: unknown }).amount_cents)
+      ? { ...(t as object), amount_cents: 0 }
+      : t,
   );
-  const note = `${bad.length} transaction(s) dropped: amount unreadable by the model — verify the source and add them manually.`;
+  const note = `${bad.length} transaction(s) had an unreadable amount — set to 0 and flagged for review; verify and correct each before exporting.`;
   const existingNote = typeof obj.notes === 'string' && obj.notes.length > 0 ? `${obj.notes} ` : '';
-  return { ...obj, transactions: kept, notes: `${existingNote}${note}`.slice(0, 2000) };
+  return { ...obj, transactions: coerced, notes: `${existingNote}${note}`.slice(0, 2000) };
 };
 
 export const parseExtractionResponse = (
