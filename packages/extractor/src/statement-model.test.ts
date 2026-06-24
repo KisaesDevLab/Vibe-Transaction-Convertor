@@ -171,6 +171,29 @@ describe('splitMarkdownPages', () => {
   it('returns one page when there are no markers', () => {
     expect(splitMarkdownPages('just text')).toEqual([{ pageNum: 1, text: 'just text' }]);
   });
+
+  it('splits a SINGLE blob with inline `<!-- page N -->` references (GLM/Paddle OCR)', () => {
+    const blob =
+      '<!-- page 1 -->\n05/02 ALPHA 100.00\n<!-- page 2 -->\n05/10 BRAVO -50.00\n<!-- page 3 -->\n05/20 CHARLIE -10.00';
+    const pages = splitMarkdownPages(blob);
+    expect(pages.map((p) => p.pageNum)).toEqual([1, 2, 3]);
+    expect(pages[0]!.text).toContain('ALPHA');
+    expect(pages[1]!.text).toContain('BRAVO');
+    expect(pages[2]!.text).toContain('CHARLIE');
+    // Critically: no page's text bleeds into another (one page per call).
+    expect(pages[0]!.text).not.toContain('BRAVO');
+  });
+
+  it('falls back to form-feed (\\f) page breaks when there are no markers', () => {
+    const pages = splitMarkdownPages('page one text\f page two text\f page three text');
+    expect(pages).toHaveLength(3);
+    expect(pages[1]!.text).toContain('page two');
+  });
+
+  it('handles `### Page N` (deeper heading) and case-insensitive "page"', () => {
+    const pages = splitMarkdownPages('### page 1\nrow a\n### PAGE 2\nrow b');
+    expect(pages.map((p) => p.pageNum)).toEqual([1, 2]);
+  });
 });
 
 describe('mergeStatementPages', () => {

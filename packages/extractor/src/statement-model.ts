@@ -101,20 +101,38 @@ interface StatementModelRaw {
   transactions?: Array<Record<string, unknown>> | null;
 }
 
-// Split page-marked markdown (`# Page N`) into per-page chunks. The statement
-// models take ONE page per call (whole-statement output truncates at 25k+
-// tokens), so the engine loops over these. No markers → one page.
+// Split page-marked markdown into per-page chunks. The statement models take
+// ONE page per call (whole-statement output truncates at 25k+ tokens), so the
+// engine loops over these. Robust to BOTH page-marker conventions:
+//   - `# Page N`  (the worker adds these when joining per-page OCR/text)
+//   - `<!-- page N -->`  (GLM-OCR / Vibe-PaddleOCR emit these INLINE when the
+//      whole document comes back in one markdown blob)
+// Falls back to form-feed (\f, pdftotext) breaks, then to a single page.
 export const splitMarkdownPages = (text: string): Array<{ pageNum: number; text: string }> => {
-  const marker = /^#\s*Page\s+(\d+)\s*$/gim;
+  // A `# Page N` markdown header (line-anchored) OR a `<!-- page N -->` comment.
+  const marker = /(?:^[ \t]{0,3}#{1,6}\s*page\s+(\d+)\b[^\n]*$)|(?:<!--\s*page\s+(\d+)\s*-->)/gim;
   const matches = [...text.matchAll(marker)];
-  if (matches.length === 0) return [{ pageNum: 1, text: text.trim() }];
+  if (matches.length === 0) {
+    // No explicit markers — try form-feed page breaks before giving up.
+    if (text.includes('\f')) {
+      const parts = text
+        .split('\f')
+        .map((t) => t.trim())
+        .filter((t) => t.length > 0);
+      if (parts.length > 1) return parts.map((t, i) => ({ pageNum: i + 1, text: t }));
+    }
+    return [{ pageNum: 1, text: text.trim() }];
+  }
   const pages: Array<{ pageNum: number; text: string }> = [];
   for (let i = 0; i < matches.length; i += 1) {
     const m = matches[i]!;
     const start = (m.index ?? 0) + m[0].length;
     const end = i + 1 < matches.length ? (matches[i + 1]!.index ?? text.length) : text.length;
     const body = text.slice(start, end).trim();
-    if (body.length > 0) pages.push({ pageNum: Number(m[1]), text: body });
+    const n = Number(m[1] ?? m[2]);
+    if (body.length > 0) {
+      pages.push({ pageNum: Number.isFinite(n) && n > 0 ? n : i + 1, text: body });
+    }
   }
   return pages.length > 0 ? pages : [{ pageNum: 1, text: text.trim() }];
 };

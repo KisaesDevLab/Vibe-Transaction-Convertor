@@ -1036,12 +1036,15 @@ export class LocalGatewayProvider implements LlmProvider {
       throw new Error('ollama vision extract: retry loop exhausted unexpectedly');
     }
 
-    const { text } = prepareMarkdown(markdown, this.maxPromptTokens);
-
-    // Statement-model engine: route to /api/chat with the model's baked prompt.
+    // Statement-model engine: split per page and send one page per /api/chat
+    // call (each page is small). Pass the RAW markdown — do NOT apply the
+    // whole-statement prompt budget here: head/tail-truncating before the page
+    // split would silently drop middle pages, defeating the per-page design.
     if (this.statementModelMode) {
-      return this.callStatementModel(text);
+      return this.callStatementModel(markdown);
     }
+
+    const { text } = prepareMarkdown(markdown, this.maxPromptTokens);
 
     // One-shot reminder retry. When the gateway returns valid JSON
     // missing a required top-level field (the Vibe Gateway with
