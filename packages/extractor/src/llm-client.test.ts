@@ -192,6 +192,63 @@ describe('LocalGatewayProvider', () => {
     expect(provider.id).toBe('local');
   });
 
+  it('statement-model: retries a transient per-page failure (fetch failed) and recovers', async () => {
+    const prev = process.env.VIBETC_STATEMENT_PAGE_RETRY_MS;
+    process.env.VIBETC_STATEMENT_PAGE_RETRY_MS = '0'; // no backoff in test
+    try {
+      let calls = 0;
+      const provider = new LocalGatewayProvider({
+        baseUrl: 'http://gw.test',
+        modelId: 'qwen2.5-stmt',
+        statementModelMode: true,
+        fetcher: async () => {
+          calls += 1;
+          if (calls === 1) throw new TypeError('fetch failed'); // transient blip
+          return okJsonResponse({
+            message: {
+              content: JSON.stringify({
+                period: { start_date: '2026-05-01', end_date: '2026-05-31' },
+                balances: { opening_balance_cents: 0, closing_balance_cents: 100 },
+                transactions: [
+                  { date: '2026-05-01', source_text: 'ROW', amount_cents: 100, source_page: 1 },
+                ],
+              }),
+            },
+            prompt_eval_count: 5,
+            eval_count: 5,
+          });
+        },
+      });
+      const r = await provider.extract('# Page 1\n\nROW 1.00');
+      expect(calls).toBe(2); // 1 fail + 1 retry-success
+      expect(r.data.transactions).toHaveLength(1);
+    } finally {
+      if (prev === undefined) delete process.env.VIBETC_STATEMENT_PAGE_RETRY_MS;
+      else process.env.VIBETC_STATEMENT_PAGE_RETRY_MS = prev;
+    }
+  });
+
+  it('statement-model: fails with page context after exhausting retries', async () => {
+    const prev = process.env.VIBETC_STATEMENT_PAGE_RETRY_MS;
+    process.env.VIBETC_STATEMENT_PAGE_RETRY_MS = '0';
+    try {
+      const provider = new LocalGatewayProvider({
+        baseUrl: 'http://gw.test',
+        modelId: 'qwen2.5-stmt',
+        statementModelMode: true,
+        fetcher: async () => {
+          throw new TypeError('fetch failed');
+        },
+      });
+      await expect(provider.extract('# Page 1\n\nROW\n\n# Page 2\n\nROW2')).rejects.toThrowError(
+        /page 1 of 2 after 3 attempts: fetch failed/i,
+      );
+    } finally {
+      if (prev === undefined) delete process.env.VIBETC_STATEMENT_PAGE_RETRY_MS;
+      else process.env.VIBETC_STATEMENT_PAGE_RETRY_MS = prev;
+    }
+  });
+
   it('throws an actionable error when the gateway truncates at max_tokens (finish_reason=length)', async () => {
     // Non-empty BUT cut off mid-JSON — the real failure on a transaction-heavy
     // statement. Must surface "truncated at max_tokens", not a JSON parse error.

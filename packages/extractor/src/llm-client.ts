@@ -28,6 +28,16 @@ import {
 const PROMPT_BUDGET_RESERVE = 4_000;
 const defaultPromptBudget = (): number => Number(process.env.LLM_MAX_PROMPT_TOKENS ?? 24_000);
 
+// Statement-model per-page resilience: a transient blip on one page shouldn't
+// discard the whole statement. Retry that page up to N attempts with linear
+// backoff (non-4xx errors only). Read at call-time so operators can tune them
+// (and tests can drop the backoff). VIBETC_STATEMENT_PAGE_ATTEMPTS /
+// VIBETC_STATEMENT_PAGE_RETRY_MS.
+const statementPageMaxAttempts = (): number =>
+  Math.max(1, Number(process.env.VIBETC_STATEMENT_PAGE_ATTEMPTS ?? 3));
+const statementPageRetryBaseMs = (): number =>
+  Math.max(0, Number(process.env.VIBETC_STATEMENT_PAGE_RETRY_MS ?? 1_500));
+
 // Compact, PII-free description of an Anthropic /v1/messages request, for
 // attaching to a 4xx error so an operator can diagnose a 400 from the app
 // trace alone: it reports the model, the max_tokens we sent, and the message
@@ -807,23 +817,46 @@ export class LocalGatewayProvider implements LlmProvider {
     const contents: string[] = [];
     let inputTokens = 0;
     let outputTokens = 0;
+    const maxAttempts = statementPageMaxAttempts();
+    const retryBaseMs = statementPageRetryBaseMs();
     for (const page of pages) {
-      let r;
-      try {
-        r = await this.callStatementModelRaw(page.text);
-      } catch (err) {
-        // Fail-fast, but name the page so the audit shows where it broke (the
-        // model returns nothing useful for the whole statement if one page dies).
+      let r: Awaited<ReturnType<typeof this.callStatementModelRaw>> | undefined;
+      let lastErr: unknown;
+      // Per-page resilience: a single transient blip (network "fetch failed",
+      // connection reset, timeout, 5xx, or a one-off bad generation) on page N
+      // must not discard the whole statement. Retry that page a few times with
+      // backoff before failing. A 4xx is a real client error — don't retry.
+      for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+        try {
+          r = await this.callStatementModelRaw(page.text);
+          lastErr = undefined;
+          break;
+        } catch (err) {
+          lastErr = err;
+          const msg = err instanceof Error ? err.message : String(err);
+          const isClient4xx = /HTTP 4\d\d/.test(msg);
+          if (isClient4xx || attempt === maxAttempts) break;
+          // Linear backoff — gives Ollama a moment to recover / reload the model
+          // between the sequential per-page calls.
+          if (retryBaseMs > 0) {
+            await new Promise((res) => setTimeout(res, retryBaseMs * attempt));
+          }
+        }
+      }
+      if (!r) {
+        // Exhausted retries (or non-retryable). Fail the whole run — better than
+        // silently producing a statement missing page N. Name the page.
+        const err = lastErr;
         const msg = err instanceof Error ? err.message : String(err);
         if (err instanceof ExtractionResponseError) {
           throw new ExtractionResponseError({
-            summary: `statement model failed on page ${page.pageNum}: ${err.summary}`,
+            summary: `statement model failed on page ${page.pageNum} of ${pages.length} after ${maxAttempts} attempts: ${err.summary}`,
             rawResponse: err.rawResponse,
             ...(err.issues !== undefined ? { issues: err.issues } : {}),
           });
         }
         throw new Error(
-          `statement model failed on page ${page.pageNum} of ${pages.length}: ${msg}`,
+          `statement model failed on page ${page.pageNum} of ${pages.length} after ${maxAttempts} attempts: ${msg}`,
         );
       }
       results.push({ pageNum: page.pageNum, raw: r.raw });
