@@ -185,6 +185,14 @@ export interface RasterizeOptions {
   // JPEG quality 1–100 (pdftoppm -jpegopt quality=N). Default 80 — a good
   // legibility/size trade for statement text. Ignored for PNG.
   jpegQuality?: number;
+  // Restrict to a page range (pdftoppm -f / -l, 1-based). Used by the
+  // statement-model header-crop, which only needs page 1.
+  firstPage?: number;
+  lastPage?: number;
+  // Crop the rendered page to the top N pixels (pdftoppm -H). The header-crop
+  // renders just the top band of page 1 so the OCR reads the bank/account/
+  // period/balance prose without the dense transaction table beneath it.
+  cropHeightPx?: number;
 }
 
 export interface RasterizedPage {
@@ -224,8 +232,15 @@ export const rasterizePdf = async (
   await mkdir(outDir, { recursive: true });
   const prefix = join(outDir, 'page');
   const codecArgs = format === 'jpeg' ? ['-jpeg', '-jpegopt', `quality=${jpegQuality}`] : ['-png'];
+  const rangeArgs = [
+    ...(opts.firstPage ? ['-f', String(opts.firstPage)] : []),
+    ...(opts.lastPage ? ['-l', String(opts.lastPage)] : []),
+    ...(opts.cropHeightPx && opts.cropHeightPx > 0
+      ? ['-H', String(Math.floor(opts.cropHeightPx))]
+      : []),
+  ];
   try {
-    await execFileP('pdftoppm', [...codecArgs, '-r', String(dpi), path, prefix], {
+    await execFileP('pdftoppm', [...codecArgs, ...rangeArgs, '-r', String(dpi), path, prefix], {
       maxBuffer: 64 * 1024 * 1024,
     });
   } catch (err) {

@@ -1044,6 +1044,69 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
       markdown,
     );
 
+    // Header-crop read (ADR-pending; integration doc §3). The statement-model
+    // engine reads transactions PER PAGE, but a table-dominated page-1 OCR can
+    // drop the bank/account/period/balance prose. For scanned statements, OCR
+    // just the top band of page 1 and prepend it so the per-page model picks up
+    // the header. Best-effort — a failure never blocks extraction.
+    if (
+      aiSettings.extractionEngine === 'statement-model' &&
+      (method === 'ocr' || method === 'hybrid')
+    ) {
+      try {
+        const headerDpi = aiSettings.ocrDpi || 150;
+        const headerRasters = await rasterizePdf(data.sourcePdfPath, {
+          dpi: headerDpi,
+          format: 'png',
+          firstPage: 1,
+          lastPage: 1,
+          cropHeightPx: Math.round(2.0 * headerDpi), // top ~2 inches
+        });
+        let headerText = '';
+        if (headerRasters[0]) {
+          const buf = await readFile(headerRasters[0].path);
+          if (aiSettings.ocrEngine === 'vibe' && aiSettings.vibeOcrUrl) {
+            const hr = await vibeOcrFile(buf, 'header.png', 'image/png', {
+              baseUrl: aiSettings.vibeOcrUrl,
+              ...(aiSettings.vibeOcrApiKey ? { apiKey: aiSettings.vibeOcrApiKey } : {}),
+              timeoutMs: aiSettings.vibeOcrTimeoutMs,
+            });
+            headerText = hr.pages
+              .map((p) => p.markdown)
+              .join('\n')
+              .trim();
+          } else {
+            const lp = await buildProviderForId(db, 'local');
+            const hr = await lp.ocrToMarkdown({
+              images: [{ data: buf, mediaType: 'image/png' }],
+              systemPrompt: OCR_TRANSCRIBE_SYSTEM_PROMPT,
+              userPrompt: OCR_TRANSCRIBE_USER_PROMPT,
+            });
+            headerText = hr.markdown.trim();
+          }
+        }
+        if (headerText) {
+          const p1 = markdown.match(/^#\s*Page\s+1\s*$/im);
+          if (p1 && p1.index != null) {
+            const at = p1.index + p1[0].length;
+            markdown = `${markdown.slice(0, at)}\n\n${headerText}\n${markdown.slice(at)}`;
+          } else {
+            markdown = `# Page 1\n\n${headerText}\n\n${markdown}`;
+          }
+          await logStep(
+            'header-crop',
+            { chars: headerText.length, engine: aiSettings.ocrEngine },
+            headerText,
+          );
+        }
+      } catch (err) {
+        logger.warn(
+          { stmtId, err: (err as Error).message },
+          'header-crop read failed (continuing)',
+        );
+      }
+    }
+
     await checkCancelled(stmtId);
 
     // Two-provider orchestration. Each attempt runs the LLM call + repair
