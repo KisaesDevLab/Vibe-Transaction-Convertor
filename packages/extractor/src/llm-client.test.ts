@@ -215,6 +215,59 @@ describe('parseExtractionResponse — null amount handling', () => {
   });
 });
 
+describe('parseExtractionResponse — field + structural salvage (never fail on a bad field)', () => {
+  const base = (overrides: Record<string, unknown>, tx: Record<string, unknown>) => ({
+    period: { start: '2026-05-01', end: '2026-05-31' },
+    balances: { opening_cents: 0, closing_cents: 100 },
+    source_date_format: { format: 'MDY', confidence: 0.9 },
+    transactions: [
+      { posted_date: '2026-05-02', description: 'A', amount_cents: 100, source_page: 1, ...tx },
+    ],
+    ...overrides,
+  });
+
+  it('normalizes a non-ISO MM/DD/YYYY date', () => {
+    const out = parseExtractionResponse(JSON.stringify(base({}, { posted_date: '05/15/2026' })));
+    expect(out.transactions[0]!.posted_date).toBe('2026-05-15');
+  });
+
+  it('falls back an invalid calendar date (2026-02-30) to the period start', () => {
+    const out = parseExtractionResponse(JSON.stringify(base({}, { posted_date: '2026-02-30' })));
+    expect(out.transactions[0]!.posted_date).toBe('2026-05-01'); // period.start
+    expect(out.notes).toMatch(/unreadable date/i);
+  });
+
+  it('derives a missing period from transaction dates', () => {
+    const out = parseExtractionResponse(JSON.stringify(base({ period: null }, {})));
+    expect(out.period.start).toBe('2026-05-02');
+    expect(out.period.end).toBe('2026-05-02');
+  });
+
+  it('defaults missing balances to 0 instead of failing', () => {
+    const out = parseExtractionResponse(JSON.stringify(base({ balances: null }, {})));
+    expect(out.balances.opening_cents).toBe(0);
+    expect(out.balances.closing_cents).toBe(0);
+  });
+
+  it('coerces field-local quirks: empty desc, page 0, confidence 1.5, numeric check_number', () => {
+    const out = parseExtractionResponse(
+      JSON.stringify(
+        base({}, { description: '', source_page: 0, confidence: 1.5, check_number: 1234 }),
+      ),
+    );
+    const t = out.transactions[0]!;
+    expect(t.description).toBe('[unreadable]');
+    expect(t.source_page).toBe(1);
+    expect(t.confidence).toBe(1);
+    expect(t.check_number).toBe('1234');
+  });
+
+  it('defaults a missing source_date_format to MDY', () => {
+    const out = parseExtractionResponse(JSON.stringify(base({ source_date_format: null }, {})));
+    expect(out.source_date_format.format).toBe('MDY');
+  });
+});
+
 describe('LocalGatewayProvider', () => {
   it('parses an OpenAI-shaped chat-completions response', async () => {
     const provider = new LocalGatewayProvider({
@@ -358,8 +411,8 @@ describe('LocalGatewayProvider', () => {
     });
     // The regex `pattern` (which silently disables Ollama's grammar) is gone…
     expect(JSON.stringify(body.response_format?.json_schema?.schema)).not.toContain('pattern');
-    // …but Zod still enforces the date format after parsing — a bad date is
-    // rejected even though the gateway grammar never saw the pattern.
+    // …and a non-ISO date is now SALVAGED (normalized) rather than rejected, so
+    // one bad date never fails the whole statement.
     const bad = JSON.stringify({
       ...SAMPLE,
       transactions: [{ ...SAMPLE.transactions[0], posted_date: '03/03/2026' }],
@@ -368,7 +421,8 @@ describe('LocalGatewayProvider', () => {
       baseUrl: 'http://gw.test',
       fetcher: async () => okJsonResponse({ choices: [{ message: { content: bad } }] }),
     });
-    await expect(strict.extract('# md')).rejects.toBeInstanceOf(ExtractionResponseError);
+    const r = await strict.extract('# md');
+    expect(r.data.transactions[0]?.posted_date).toBe('2026-03-03'); // normalized, not rejected
   });
 
   it('sends systemPromptOverride as the system message (text path); falls back to default', async () => {
@@ -444,10 +498,9 @@ describe('LocalGatewayProvider', () => {
     expect(r.telemetry.outputTokens).toBe(10);
   });
 
-  it('does not retry when the error is at a deeper path (no missing top-level fields)', async () => {
-    // A transaction with an invalid date is a path-2 error; the retry
-    // is only meant to recover from a relaxed-gateway "forgot a top-
-    // level key" failure, not from semantic content errors.
+  it('salvages a deeper-path bad date (→ period start) instead of failing or retrying', async () => {
+    // An unparseable date used to be a hard path-2 fail; now it is salvaged to
+    // the period start so the statement completes — in a single call (no retry).
     const broken = JSON.stringify({
       ...SAMPLE,
       transactions: [{ ...SAMPLE.transactions[0], posted_date: 'not-a-date' }],
@@ -460,7 +513,8 @@ describe('LocalGatewayProvider', () => {
         return okJsonResponse({ choices: [{ message: { content: broken } }] });
       },
     });
-    await expect(provider.extract('md')).rejects.toBeInstanceOf(ExtractionResponseError);
+    const r = await provider.extract('md');
+    expect(r.data.transactions[0]?.posted_date).toBe('2026-03-01'); // SAMPLE.period.start
     expect(callCount).toBe(1);
   });
 

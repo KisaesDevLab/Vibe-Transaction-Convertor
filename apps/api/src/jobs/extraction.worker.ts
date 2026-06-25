@@ -1422,22 +1422,23 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
       chosen.rawJson ?? undefined,
     );
 
-    // Empty-tx fallback path can still land here when no secondary was
-    // available. Treat as an inserted-zero outcome — the operator sees
-    // `review` status with zero transactions and reconciliation=verified
-    // (no movement) or discrepancy if balances mismatch.
-    if (chosen.periodStart === null || chosen.periodEnd === null) {
-      throw new Error('extraction outcome missing period bounds');
-    }
-    if (chosen.openingBalanceCents === null || chosen.closingBalanceCents === null) {
-      throw new Error('extraction outcome missing balance bounds');
-    }
+    // Missing period / balances must NOT fail the statement — both are nullable
+    // on the statement row. Degrade to review: period stays null (stored as-is),
+    // balances default to 0 so the Golden Rule can still run (it will flag a
+    // discrepancy, which is the correct signal). Flagged for the review-hold.
+    const missingBoundsNote =
+      chosen.periodStart === null ||
+      chosen.periodEnd === null ||
+      chosen.openingBalanceCents === null ||
+      chosen.closingBalanceCents === null
+        ? 'Statement period and/or opening/closing balance could not be read — verify before exporting.'
+        : null;
     if (!chosen.reconciled) {
-      // Empty-txs path with no secondary: synthesize a reconciliation
-      // result so the persistence block below can record status.
+      // Empty-txs path with no secondary: synthesize a reconciliation result so
+      // the persistence block below can record status. Balances default to 0.
       chosen.reconciled = reconcileGoldenRule({
-        openingBalanceCents: chosen.openingBalanceCents,
-        closingBalanceCents: chosen.closingBalanceCents,
+        openingBalanceCents: chosen.openingBalanceCents ?? 0n,
+        closingBalanceCents: chosen.closingBalanceCents ?? 0n,
         transactions: [],
         periodStart: chosen.periodStart,
         periodEnd: chosen.periodEnd,
@@ -1527,8 +1528,13 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
           `${method === 'ocr' || method === 'hybrid' ? ', via OCR' : ''}). Verify their dates and ` +
           `amounts against the source statement before exporting.`
         : null;
-    const reviewHoldReason =
-      [droppedAmountNote, lowConfidenceNote].filter(Boolean).join(' ') || null;
+
+    // Rows that fail to insert (e.g. a regex-valid but invalid calendar date the
+    // DB rejects) are skipped — captured here — rather than aborting the whole
+    // statement. Collected inside the loop, folded into the review-hold below.
+    const skippedRows: string[] = [];
+    // Hoisted so the post-commit logStep can report whether a hold was set.
+    let reviewHoldReason: string | null = null;
 
     await db.transaction(async (tx) => {
       for (let i = 0; i < effectiveTxs.length; i += 1) {
@@ -1547,26 +1553,60 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
           ...(txn.checkNumber ? { checkNumber: txn.checkNumber } : {}),
           ...(txn.trntypeHint ? { llmHint: txn.trntypeHint } : {}),
         });
-        await tx
-          .insert(transactions)
-          .values({
-            statementId: stmtId,
-            seqInDay: seq,
-            postedDate: txn.postedDate,
-            description: txn.description,
-            normalizedDescription: normalizeDescription(txn.description),
-            amountCents: txn.amountCents,
-            runningBalanceCents: txn.runningBalanceCents,
-            checkNumber: txn.checkNumber,
-            payee: txn.payee,
-            trntype,
-            fitid,
-            sourcePage: txn.sourcePage,
-            sourceBboxJson: null,
-            confidence: txn.confidence,
-          })
-          .onConflictDoNothing();
+        try {
+          // SAVEPOINT per row: a Postgres error poisons the whole transaction,
+          // so each insert runs in its own nested transaction. A bad row rolls
+          // back only itself; the rest of the statement still persists.
+          await tx.transaction(async (sp) => {
+            await sp
+              .insert(transactions)
+              .values({
+                statementId: stmtId,
+                seqInDay: seq,
+                postedDate: txn.postedDate,
+                description: txn.description,
+                normalizedDescription: normalizeDescription(txn.description),
+                amountCents: txn.amountCents,
+                runningBalanceCents: txn.runningBalanceCents,
+                checkNumber: txn.checkNumber,
+                payee: txn.payee,
+                trntype,
+                fitid,
+                sourcePage: txn.sourcePage,
+                sourceBboxJson: null,
+                confidence: txn.confidence,
+              })
+              .onConflictDoNothing();
+          });
+        } catch (rowErr) {
+          skippedRows.push(
+            `${txn.postedDate} "${txn.description.slice(0, 40)}" (${String((rowErr as Error).message).slice(0, 100)})`,
+          );
+          logger.warn(
+            { stmtId, row: i, err: (rowErr as Error).message },
+            'transaction row skipped (could not be persisted) — continuing',
+          );
+        }
       }
+
+      const skippedNote =
+        skippedRows.length > 0
+          ? `${skippedRows.length} transaction(s) could not be saved and were skipped (see audit log) — ` +
+            `add them manually if needed: ${skippedRows.slice(0, 5).join('; ')}.`
+          : null;
+      // Build the review-hold AFTER the loop so skipped rows are included. Every
+      // salvage signal that the operator should verify is folded in here.
+      reviewHoldReason =
+        [
+          missingBoundsNote,
+          chosen.extractionNotes,
+          droppedAmountNote,
+          skippedNote,
+          lowConfidenceNote,
+        ]
+          .filter(Boolean)
+          .join(' ')
+          .slice(0, 4000) || null;
 
       const updated = await tx
         .update(statements)

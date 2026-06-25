@@ -32,21 +32,20 @@ describe('ExtractionResult (nested)', () => {
     ).toThrow();
   });
 
-  it('rejects non-integer amount_cents', () => {
-    expect(() =>
-      ExtractionResult.parse({
-        ...sampleNested,
-        transactions: [
-          {
-            posted_date: '2026-03-03',
-            description: 'x',
-            amount_cents: 12.5,
-            source_page: 1,
-            confidence: 1,
-          },
-        ],
-      }),
-    ).toThrow();
+  it('rounds a non-integer amount_cents instead of rejecting (salvage)', () => {
+    const r = ExtractionResult.parse({
+      ...sampleNested,
+      transactions: [
+        {
+          posted_date: '2026-03-03',
+          description: 'x',
+          amount_cents: 12.5,
+          source_page: 1,
+          confidence: 1,
+        },
+      ],
+    });
+    expect(r.transactions[0]!.amount_cents).toBe(13); // rounded, not rejected
   });
 
   it('defaults account and institution to empty objects', () => {

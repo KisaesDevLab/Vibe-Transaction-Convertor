@@ -38,23 +38,60 @@ export type SourceDateFormat = z.infer<typeof SourceDateFormatEnum>;
 
 const DateString = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'YYYY-MM-DD required');
 
+// --- Field-local salvage preprocessors -------------------------------------
+// The LLM occasionally emits a wrong-typed / out-of-range / over-length value
+// for a single field. Zod's safeParse is atomic over the whole result, so one
+// bad field would otherwise fail the ENTIRE statement. These coerce/clamp the
+// value to something valid BEFORE the strict validator runs, so a single row's
+// quirk never sinks the extraction. (Cross-row salvage — dates/period/balances —
+// runs earlier in parseExtractionResponse.)
+const coerceIntOrPass = (v: unknown): unknown =>
+  typeof v === 'number' && Number.isFinite(v)
+    ? Math.round(v)
+    : typeof v === 'string' && v.trim() !== '' && Number.isFinite(Number(v))
+      ? Math.round(Number(v))
+      : v;
+const coerceStrTrunc =
+  (max: number) =>
+  (v: unknown): unknown =>
+    v == null ? v : String(v).slice(0, max);
+
 export const ExtractionTransaction = z.object({
   posted_date: DateString,
-  description: z.string().min(1).max(500),
-  amount_cents: z.number().int(),
-  running_balance_cents: z.number().int().nullable().optional(),
-  check_number: z.string().max(40).nullable().optional(),
+  description: z.preprocess((v) => {
+    const s = typeof v === 'string' ? v.trim() : '';
+    return (s.length > 0 ? s : '[unreadable]').slice(0, 500);
+  }, z.string().min(1).max(500)),
+  amount_cents: z.preprocess(coerceIntOrPass, z.number().int()),
+  running_balance_cents: z.preprocess(
+    (v) => (v == null ? v : coerceIntOrPass(v)),
+    z.number().int().nullable().optional(),
+  ),
+  check_number: z.preprocess(coerceStrTrunc(40), z.string().max(40).nullable().optional()),
   // The party a check is made out to ("Pay to the order of"), read from the
   // cancelled-check image when present. Drives the OFX <NAME> field for
   // check transactions. Null for non-check rows or when not visible.
-  payee: z.string().max(200).nullable().optional(),
-  // The model may emit null (explicitly "type unknown") or omit it entirely;
-  // both mean "infer downstream" — inferTrntype derives the type from the amount
-  // sign + description and uses this only as a hint. Normalize null → undefined
-  // so the inferred hint type stays `Trntype | undefined`.
-  trntype: TrntypeEnum.nullish().transform((v) => v ?? undefined),
-  source_page: z.number().int().min(1),
-  confidence: z.number().min(0).max(1).default(1),
+  payee: z.preprocess(coerceStrTrunc(200), z.string().max(200).nullable().optional()),
+  // The model may emit null/undefined ("type unknown") or an out-of-vocab value
+  // (e.g. "WITHDRAWAL") — both mean "infer downstream". Map anything not in the
+  // enum to undefined so a stray hint never fails the row; inferTrntype derives
+  // the authoritative type from the amount sign + description.
+  trntype: z.preprocess(
+    (v) =>
+      typeof v === 'string' && (TrntypeEnum.options as readonly string[]).includes(v)
+        ? v
+        : undefined,
+    TrntypeEnum.nullish().transform((v) => v ?? undefined),
+  ),
+  source_page: z.preprocess((v) => {
+    const n = Math.round(Number(v));
+    return Number.isFinite(n) && n >= 1 ? n : 1;
+  }, z.number().int().min(1)),
+  confidence: z.preprocess((v) => {
+    if (v == null) return 1;
+    const n = Number(v);
+    return Number.isFinite(n) ? Math.min(1, Math.max(0, n)) : 1;
+  }, z.number().min(0).max(1).default(1)),
 });
 export type ExtractionTransaction = z.infer<typeof ExtractionTransaction>;
 
@@ -91,13 +128,20 @@ export const ExtractionDateFormat = z.object({
 });
 
 export const ExtractionResult = z.object({
-  account: ExtractionAccount.default({}),
-  institution: ExtractionInstitution.default({}),
+  // Absorb an explicit `null` (not just omission) into the default object.
+  account: z.preprocess((v) => v ?? undefined, ExtractionAccount.default({})),
+  institution: z.preprocess((v) => v ?? undefined, ExtractionInstitution.default({})),
+  // period / balances / source_date_format are filled (derived or defaulted) by
+  // the parse-time salvage in parseExtractionResponse before this runs, so they
+  // stay strict here to keep the DB invariants (ISO dates, integer cents).
   period: ExtractionPeriod,
   balances: ExtractionBalances,
   transactions: z.array(ExtractionTransaction),
   source_date_format: ExtractionDateFormat,
-  notes: z.string().max(2000).optional(),
+  notes: z.preprocess(
+    (v) => (typeof v === 'string' ? v.slice(0, 2000) : v),
+    z.string().max(2000).optional(),
+  ),
 });
 export type ExtractionResult = z.infer<typeof ExtractionResult>;
 

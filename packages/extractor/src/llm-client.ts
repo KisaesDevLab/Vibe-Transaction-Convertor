@@ -313,9 +313,179 @@ export const expandArrayTransactions = (parsed: unknown): unknown => {
 // capture. Pass `alreadyParsed` for providers that hand us an already-
 // parsed object (Anthropic tool_use); we still need rawResponse for
 // the audit log, so callers stringify it for us.
-// A transaction's amount is usable iff it's a finite number. The LLM sometimes
-// emits `null` for rows whose amount it couldn't read.
-const isUsableAmount = (v: unknown): boolean => typeof v === 'number' && Number.isFinite(v);
+// A transaction's amount is usable iff it's a finite number OR a numeric string
+// (the schema preprocess rounds/parses those). Truly-unreadable values (null,
+// non-numeric) are coerced to 0 + flagged by handleNullAmountRows.
+const isUsableAmount = (v: unknown): boolean =>
+  (typeof v === 'number' && Number.isFinite(v)) ||
+  (typeof v === 'string' && v.trim() !== '' && Number.isFinite(Number(v)));
+
+const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const isValidIsoDate = (s: unknown): s is string => {
+  if (typeof s !== 'string' || !ISO_DATE_RE.test(s)) return false;
+  const [y, m, d] = s.split('-').map(Number);
+  if (m! < 1 || m! > 12 || d! < 1 || d! > 31) return false;
+  const dt = new Date(Date.UTC(y!, m! - 1, d!));
+  return dt.getUTCFullYear() === y && dt.getUTCMonth() === m! - 1 && dt.getUTCDate() === d;
+};
+// Coerce a common non-ISO date (M/D/YYYY, MDY assumption — v1 is en-US) to ISO.
+const tryNormalizeDate = (s: unknown): string | null => {
+  if (isValidIsoDate(s)) return s;
+  if (typeof s !== 'string') return null;
+  const m = s.trim().match(/^(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{2,4})$/);
+  if (m) {
+    const [, mo, d, yRaw] = m;
+    const y = yRaw!.length === 2 ? `20${yRaw}` : yRaw!;
+    const iso = `${y}-${mo!.padStart(2, '0')}-${d!.padStart(2, '0')}`;
+    if (isValidIsoDate(iso)) return iso;
+  }
+  return null;
+};
+const intOrNull = (v: unknown): number | null =>
+  typeof v === 'number' && Number.isFinite(v)
+    ? Math.round(v)
+    : typeof v === 'string' && v.trim() !== '' && Number.isFinite(Number(v))
+      ? Math.round(Number(v))
+      : null;
+
+// Cross-row / top-level salvage so a missing-or-malformed date, period, balance,
+// or date-format never fails the WHOLE statement. Mirrors mapStatementModelOutput
+// (the statement-model engine), brought to the text + Anthropic paths. Always
+// runs (coerces); rows that remain undateable after every fallback are dropped
+// with a note (they can't be stored). Returns the salvaged object + a notes list.
+const salvageStructure = (parsed: unknown): { value: unknown; notes: string[] } => {
+  const notes: string[] = [];
+  if (parsed === null || typeof parsed !== 'object') return { value: parsed, notes };
+  const obj = parsed as Record<string, unknown>;
+  if (!Array.isArray(obj.transactions)) return { value: parsed, notes };
+  const period = (obj.period ?? {}) as { start?: unknown; end?: unknown };
+
+  // Pass 1: normalize each row's date; carry the previous valid date for "ditto"
+  // continuation rows.
+  let prevDate: string | null = null;
+  let dateFixed = 0;
+  const rows = obj.transactions.map((t) => {
+    if (t === null || typeof t !== 'object') return t;
+    const row = t as Record<string, unknown>;
+    const norm = tryNormalizeDate(row.posted_date);
+    if (norm) {
+      prevDate = norm;
+      if (norm !== row.posted_date) dateFixed += 1;
+      return { ...row, posted_date: norm };
+    }
+    // Unreadable date: ditto the previous valid row's date.
+    if (prevDate) {
+      dateFixed += 1;
+      return { ...row, posted_date: prevDate };
+    }
+    return row; // still undateable — resolved against the period below or dropped
+  });
+
+  // Derive the period from the model's value (if valid) or the min/max row dates.
+  const txDates = rows
+    .map((t) => (t && typeof t === 'object' ? (t as Record<string, unknown>).posted_date : null))
+    .filter(isValidIsoDate)
+    .sort();
+  const periodStart = isValidIsoDate(period.start) ? period.start : (txDates[0] ?? null);
+  const periodEnd = isValidIsoDate(period.end) ? period.end : (txDates[txDates.length - 1] ?? null);
+  if (!isValidIsoDate(period.start) || !isValidIsoDate(period.end)) {
+    if (periodStart && periodEnd) notes.push('statement period derived from transaction dates');
+  }
+
+  // Pass 2: any still-undateable row → period start; if even that is unknown,
+  // drop it (a row with no date can't be persisted).
+  let dropped = 0;
+  const finalRows = rows
+    .map((t) => {
+      if (t && typeof t === 'object') {
+        const row = t as Record<string, unknown>;
+        if (!isValidIsoDate(row.posted_date)) {
+          if (periodStart) {
+            dateFixed += 1;
+            return { ...row, posted_date: periodStart };
+          }
+          dropped += 1;
+          return null;
+        }
+      }
+      return t;
+    })
+    .filter((t) => t !== null);
+  if (dateFixed > 0)
+    notes.push(
+      `${dateFixed} row(s) had an unreadable date — set to a fallback; verify before exporting`,
+    );
+  if (dropped > 0) notes.push(`${dropped} row(s) dropped: no readable date`);
+
+  // Balances: derive from the running-balance chain, else default to 0.
+  const bal = (obj.balances ?? {}) as { opening_cents?: unknown; closing_cents?: unknown };
+  const firstRb = finalRows.find(
+    (t) =>
+      t &&
+      typeof t === 'object' &&
+      typeof (t as Record<string, unknown>).running_balance_cents === 'number',
+  ) as Record<string, unknown> | undefined;
+  const lastRb = [...finalRows]
+    .reverse()
+    .find(
+      (t) =>
+        t &&
+        typeof t === 'object' &&
+        typeof (t as Record<string, unknown>).running_balance_cents === 'number',
+    ) as Record<string, unknown> | undefined;
+  const openCoerced = intOrNull(bal.opening_cents);
+  const closeCoerced = intOrNull(bal.closing_cents);
+  const derivedOpen =
+    firstRb && typeof firstRb.running_balance_cents === 'number'
+      ? (firstRb.running_balance_cents as number) - (intOrNull(firstRb.amount_cents) ?? 0)
+      : null;
+  const derivedClose =
+    lastRb && typeof lastRb.running_balance_cents === 'number'
+      ? (lastRb.running_balance_cents as number)
+      : null;
+  const opening = openCoerced ?? derivedOpen ?? 0;
+  const closing = derivedClose ?? closeCoerced ?? 0;
+  if (openCoerced === null || closeCoerced === null) {
+    notes.push(
+      'opening/closing balance was missing — derived or defaulted; reconciliation may not tie',
+    );
+  }
+
+  // source_date_format: default a missing/invalid one to MDY (v1 is en-US).
+  const sdf = (obj.source_date_format ?? {}) as { format?: unknown; confidence?: unknown };
+  const validFormats = ['MDY', 'DMY', 'YMD', 'TEXTUAL', 'AMBIGUOUS'];
+  const fmt =
+    typeof sdf.format === 'string' && validFormats.includes(sdf.format) ? sdf.format : 'MDY';
+  const sdfConf =
+    typeof sdf.confidence === 'number' && sdf.confidence >= 0 && sdf.confidence <= 1
+      ? sdf.confidence
+      : 0.5;
+
+  return {
+    value: {
+      ...obj,
+      transactions: finalRows,
+      period: {
+        ...(typeof obj.period === 'object' && obj.period ? obj.period : {}),
+        start: periodStart,
+        end: periodEnd,
+      },
+      balances: {
+        ...(typeof obj.balances === 'object' && obj.balances ? obj.balances : {}),
+        opening_cents: opening,
+        closing_cents: closing,
+      },
+      source_date_format: {
+        ...(typeof obj.source_date_format === 'object' && obj.source_date_format
+          ? obj.source_date_format
+          : {}),
+        format: fmt,
+        confidence: sdfConf,
+      },
+    },
+    notes,
+  };
+};
 
 // Either signal a re-ask (salvage=false → throw with the count) or COERCE the
 // unreadable-amount rows to 0 and KEEP them (salvage=true) — the operator would
@@ -381,9 +551,23 @@ export const parseExtractionResponse = (
   }
   // Salvage parallel-array "compressed" transactions before validation.
   parsed = expandArrayTransactions(parsed);
+  // Cross-row / top-level salvage: coerce unreadable dates, derive a missing
+  // period / balances, default a missing date-format — so none of these fails
+  // the whole statement. Always runs.
+  const structural = salvageStructure(parsed);
+  parsed = structural.value;
   // Handle rows with a null / non-numeric amount_cents. Either re-ask the LLM
-  // (signal) or drop them with a note — never let them fail the extraction.
+  // (signal) or coerce them to 0 + flag — never let them fail the extraction.
   parsed = handleNullAmountRows(parsed, rawResponse, salvageAmounts);
+  // Merge any structural-salvage notes into the result's notes for review.
+  if (structural.notes.length > 0 && parsed && typeof parsed === 'object') {
+    const o = parsed as { notes?: unknown };
+    const existing = typeof o.notes === 'string' && o.notes.length > 0 ? `${o.notes} ` : '';
+    parsed = {
+      ...(parsed as object),
+      notes: `${existing}${structural.notes.join('; ')}.`.slice(0, 2000),
+    };
+  }
   const result = ExtractionResult.safeParse(parsed);
   if (!result.success) {
     const issues = result.error.issues

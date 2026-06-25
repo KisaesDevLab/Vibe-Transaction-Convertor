@@ -205,25 +205,34 @@ export const resolveCheckPayees = async (db: Db, stmtId: string): Promise<CheckR
     costMicros = 0n;
     let fallbackModel: string | null = null;
     for (const batch of batches) {
-      const result = await provider.completeWithImages({
-        systemPrompt: CHECK_RESOLVE_SYSTEM_PROMPT,
-        userPrompt: CHECK_RESOLVE_USER_PROMPT,
-        schema: CHECK_RESOLVE_JSON_SCHEMA,
-        schemaName: 'emit_checks',
-        maxOutputTokens: 4096,
-        images: batch.images,
-      });
-      costMicros += result.telemetry.costMicros;
-      fallbackModel = result.telemetry.model;
-      const parsed = schemas.checkResolve.CheckResolveResult.safeParse(result.data);
-      if (!parsed.success) {
+      // One bad/illegible batch (vision timeout / HTTP error) must not sink the
+      // whole run or discard payees already matched — mirror the primary loop.
+      try {
+        const result = await provider.completeWithImages({
+          systemPrompt: CHECK_RESOLVE_SYSTEM_PROMPT,
+          userPrompt: CHECK_RESOLVE_USER_PROMPT,
+          schema: CHECK_RESOLVE_JSON_SCHEMA,
+          schemaName: 'emit_checks',
+          maxOutputTokens: 4096,
+          images: batch.images,
+        });
+        costMicros += result.telemetry.costMicros;
+        fallbackModel = result.telemetry.model;
+        const parsed = schemas.checkResolve.CheckResolveResult.safeParse(result.data);
+        if (!parsed.success) {
+          logger.warn(
+            { stmtId, startPage: batch.startPage, issues: parsed.error.issues.slice(0, 3) },
+            'check-resolve (vision fallback) batch did not match schema; skipping',
+          );
+          continue;
+        }
+        extracted.push(...parsed.data.checks);
+      } catch (err) {
         logger.warn(
-          { stmtId, startPage: batch.startPage, issues: parsed.error.issues.slice(0, 3) },
-          'check-resolve (vision fallback) batch did not match schema; skipping',
+          { stmtId, startPage: batch.startPage, err: (err as Error).message },
+          'check-resolve (vision fallback) batch failed; skipping',
         );
-        continue;
       }
-      extracted.push(...parsed.data.checks);
     }
     model = fallbackModel;
   }
