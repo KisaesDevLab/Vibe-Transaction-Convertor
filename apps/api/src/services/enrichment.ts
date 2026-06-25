@@ -92,6 +92,11 @@ const isToggleEnabled = async (db: Db, key: string): Promise<boolean> => {
   return v.toLowerCase() !== 'false' && v !== '0';
 };
 
+// When a row carries a check payee, the cleanse pass scores how reasonable that
+// payee is for the transaction; above this confidence the payee is adopted as
+// the cleansed display description.
+const PAYEE_USE_CONFIDENCE_THRESHOLD = 0.7;
+
 const PROMPT_KEY_MODE = 'enrichment.prompt.mode';
 const PROMPT_KEY_CLEANSE_RULES = 'enrichment.prompt.cleanse_rules';
 const PROMPT_KEY_CATEGORIZE_RULES = 'enrichment.prompt.categorize_rules';
@@ -253,7 +258,10 @@ export const enrichStatement = async (
   const missing: typeof candidateTxs = [];
   let cacheHits = 0;
   for (const tx of candidateTxs) {
-    const hit = await enrichmentCache.get(cacheKeyFor(tx.description));
+    // A row with a check payee is scored against that per-row payee during
+    // cleanse, so it can't use the description-keyed cache — always re-run it.
+    const skipCache = opts.cleanse && !!tx.payee;
+    const hit = skipCache ? null : await enrichmentCache.get(cacheKeyFor(tx.description));
     if (hit) {
       cacheHits += 1;
       resolved.push({
@@ -283,6 +291,7 @@ export const enrichStatement = async (
       raw_description: t.description,
       amount_cents: Number(t.amountCents),
       trntype: t.trntype,
+      ...(t.payee ? { payee: t.payee } : {}),
     }));
 
     // Cleanse and category are INDEPENDENT processes — each has its own provider
@@ -295,6 +304,7 @@ export const enrichStatement = async (
       transactionType: string | null;
       isOpaque: boolean | null;
       confidence: string | null;
+      payeeConfidence: number | null;
     }
     const cleanseByIndex = new Map<number, CleanseFields>();
     const categoryByIndex = new Map<number, string | null>();
@@ -343,6 +353,7 @@ export const enrichStatement = async (
             transactionType: out.transaction_type ?? null,
             isOpaque: out.is_opaque ?? null,
             confidence: out.confidence ?? null,
+            payeeConfidence: out.payee_confidence ?? null,
           });
         } else {
           categoryByIndex.set(out.index, out.category ?? null);
@@ -358,13 +369,21 @@ export const enrichStatement = async (
     for (let i = 0; i < missing.length; i += 1) {
       const tx = missing[i]!;
       const c = cleanseByIndex.get(i);
-      const cleansedDescription = opts.cleanse ? (c?.cleansedDescription ?? null) : null;
+      let cleansedDescription = opts.cleanse ? (c?.cleansedDescription ?? null) : null;
       const categoryName = opts.categorize ? (categoryByIndex.get(i) ?? null) : null;
       const merchantName = opts.cleanse ? (c?.merchantName ?? null) : null;
       const processor = opts.cleanse ? (c?.processor ?? null) : null;
       const transactionType = opts.cleanse ? (c?.transactionType ?? null) : null;
       const isOpaque = opts.cleanse ? (c?.isOpaque ?? null) : null;
       const confidence = opts.cleanse ? (c?.confidence ?? null) : null;
+      // Payee adoption: when the row has a check payee and the model judges it a
+      // reasonable match (> threshold), use the payee as the cleansed display
+      // description — it's the most accurate counterparty name we have.
+      let adoptedPayee = false;
+      if (opts.cleanse && tx.payee && (c?.payeeConfidence ?? 0) > PAYEE_USE_CONFIDENCE_THRESHOLD) {
+        cleansedDescription = tx.payee;
+        adoptedPayee = true;
+      }
       resolved.push({
         txId: tx.id,
         cleansedDescription,
@@ -376,16 +395,19 @@ export const enrichStatement = async (
         confidence,
       });
       // Best-effort cache write so the same merchant on the next statement is a
-      // hit. A failing Redis silently no-ops.
-      void enrichmentCache.set(cacheKeyFor(tx.description), {
-        ...(cleansedDescription !== null ? { cleansedDescription } : {}),
-        ...(categoryName !== null ? { category: categoryName } : {}),
-        ...(merchantName !== null ? { merchantName } : {}),
-        ...(processor !== null ? { processor } : {}),
-        ...(transactionType !== null ? { transactionType } : {}),
-        ...(isOpaque !== null ? { isOpaque } : {}),
-        ...(confidence !== null ? { confidence } : {}),
-      });
+      // hit. Skip rows whose cleanse adopted a per-row payee — the result is
+      // not a pure function of the (description-keyed) cache.
+      if (!adoptedPayee) {
+        void enrichmentCache.set(cacheKeyFor(tx.description), {
+          ...(cleansedDescription !== null ? { cleansedDescription } : {}),
+          ...(categoryName !== null ? { category: categoryName } : {}),
+          ...(merchantName !== null ? { merchantName } : {}),
+          ...(processor !== null ? { processor } : {}),
+          ...(transactionType !== null ? { transactionType } : {}),
+          ...(isOpaque !== null ? { isOpaque } : {}),
+          ...(confidence !== null ? { confidence } : {}),
+        });
+      }
     }
   }
 

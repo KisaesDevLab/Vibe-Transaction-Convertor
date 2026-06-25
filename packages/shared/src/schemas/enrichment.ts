@@ -41,6 +41,10 @@ export const EnrichmentInputTransaction = z.object({
   raw_description: z.string().min(1),
   amount_cents: z.number().int(),
   trntype: z.string().nullable().optional(),
+  // The payee read off a cancelled check (when present). The cleanse pass judges
+  // whether it's a reasonable match for the description and reports
+  // payee_confidence; the caller adopts it as the description above a threshold.
+  payee: z.string().nullable().optional(),
 });
 export type EnrichmentInputTransaction = z.infer<typeof EnrichmentInputTransaction>;
 
@@ -75,6 +79,10 @@ export const EnrichedTransaction = z.object({
   transaction_type: z.string().max(40).nullable().optional(),
   is_opaque: z.boolean().nullable().optional(),
   confidence: z.string().max(10).nullable().optional(),
+  // 0.0–1.0 — how reasonable the supplied `payee` is for this transaction
+  // (description + amount + trntype). null when no payee was supplied. The
+  // caller adopts the payee as the cleansed description when this exceeds 0.7.
+  payee_confidence: z.number().min(0).max(1).nullable().optional(),
 });
 export type EnrichedTransaction = z.infer<typeof EnrichedTransaction>;
 
@@ -143,6 +151,13 @@ export const buildEnrichmentJsonSchema = (opts: {
       type: 'string',
       enum: [...ENRICHMENT_CONFIDENCE_BANDS],
       description: 'Self-reported confidence band.',
+    };
+    itemProperties.payee_confidence = {
+      type: ['number', 'null'],
+      minimum: 0,
+      maximum: 1,
+      description:
+        'When a "payee" is supplied for the row, 0.0–1.0 = how reasonable that payee is for this transaction (description + amount + trntype). null when no payee was supplied.',
     };
     // All required (merchant_name/processor allow null) so the model always
     // emits them — left optional, some models silently drop merchant_name.

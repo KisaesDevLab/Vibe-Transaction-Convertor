@@ -33,8 +33,18 @@ export const DEFAULT_JSON_OUTPUT_FRAMING =
 export const DEFAULT_CLEANSE_RULES =
   `CLEANSING — for each transaction produce these fields: cleansed_description\n` +
   `(<= ${ENRICHMENT_CLEANSED_MAX_LENGTH} chars), merchant_name, processor,\n` +
-  `transaction_type, is_opaque, confidence. Behave like a deterministic parser,\n` +
-  `not a creative assistant.\n` +
+  `transaction_type, is_opaque, confidence, payee_confidence. Behave like a\n` +
+  `deterministic parser, not a creative assistant.\n` +
+  `\n` +
+  `PAYEE REASONABLENESS — some rows include a "payee" field (read from a\n` +
+  `cancelled check). When a payee is provided, judge how reasonable it is for\n` +
+  `THIS transaction given the raw_description, amount sign, and trntype, and set\n` +
+  `payee_confidence to 0.0-1.0 (1.0 = the payee clearly and accurately names the\n` +
+  `counterparty; low = it looks garbled, mismatched, or unrelated to the row).\n` +
+  `A check row whose description is just "CHECK 1042" with payee "John's Plumbing"\n` +
+  `is highly reasonable (≈0.95). When no payee is provided, set payee_confidence\n` +
+  `to null. Do NOT fold the payee into cleansed_description yourself — only score\n` +
+  `it; the caller decides whether to adopt it.\n` +
   `\n` +
   `CORE PRINCIPLE — EXTRACT, NEVER INVENT. Every character of the\n` +
   `merchant/counterparty name MUST be derivable from tokens in that row's\n` +
@@ -218,6 +228,7 @@ interface UserPromptInput {
     raw_description: string;
     amount_cents: number;
     trntype?: string | null | undefined;
+    payee?: string | null | undefined;
   }>;
 }
 
@@ -233,6 +244,7 @@ export const enrichmentUserPromptFor = (input: UserPromptInput): string => {
         raw_description: t.raw_description,
         amount_cents: t.amount_cents,
         ...(t.trntype ? { trntype: t.trntype } : {}),
+        ...(t.payee ? { payee: t.payee } : {}),
       })),
     },
     null,

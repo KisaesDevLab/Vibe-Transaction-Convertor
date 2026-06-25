@@ -5,6 +5,7 @@ import {
   DEFAULT_CLEANSE_RULES,
   DEFAULT_FULL_SYSTEM_PROMPT,
   enrichmentSystemPromptFor,
+  enrichmentUserPromptFor,
 } from './enrich.js';
 
 const CATEGORIES = [
@@ -139,5 +140,27 @@ describe('enrichmentSystemPromptFor', () => {
       expect(out).toContain(DEFAULT_CATEGORIZE_RULES);
       expect(out).toContain('  - Income: Money in');
     });
+  });
+});
+
+describe('enrichmentUserPromptFor', () => {
+  it('includes a payee in the row payload when present (and omits when absent)', () => {
+    const out = enrichmentUserPromptFor({
+      transactions: [
+        { index: 0, raw_description: 'CHECK 1042', amount_cents: -5000, payee: "John's Plumbing" },
+        { index: 1, raw_description: 'AMZN MKTP', amount_cents: -1200 },
+      ],
+    });
+    expect(out).toContain('"payee": "John\'s Plumbing"');
+    // The second row has no payee key.
+    const rows = JSON.parse(out.split('=== INPUT ===\n')[1]!.split('\n=== END ===')[0]!);
+    expect(rows.transactions[1].payee).toBeUndefined();
+  });
+});
+
+describe('DEFAULT_CLEANSE_RULES', () => {
+  it('instructs the model to score payee_confidence without folding it in', () => {
+    expect(DEFAULT_CLEANSE_RULES).toContain('payee_confidence');
+    expect(DEFAULT_CLEANSE_RULES).toMatch(/do not fold the payee/i);
   });
 });
