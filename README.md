@@ -1,3 +1,5 @@
+[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/I3D3227TTP)
+
 # Vibe Transactions Converter
 
 > Convert bank and credit-card PDF statements into CSV, OFX 2.x XML, QFX, and
