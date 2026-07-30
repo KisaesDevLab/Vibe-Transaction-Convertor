@@ -10,6 +10,7 @@ export * from './glm-ocr-client.js';
 export * from './vibe-ocr-client.js';
 export * from './statement-model.js';
 export * from './llm-client.js';
+export * from './router-provider.js';
 export * from './multi-account-detector.js';
 export * from './image-batch.js';
 export * from './merge-extraction.js';

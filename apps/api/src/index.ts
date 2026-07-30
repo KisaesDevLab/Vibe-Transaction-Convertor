@@ -1,8 +1,10 @@
+import { registerTxconvTaskClasses } from '@vibe-tx-converter/extractor';
 import { db } from './db/client.js';
 import { runMigrations } from './db/migrate.js';
 import { startWorkers } from './jobs/index.js';
 import { runBootChecks } from './lib/boot-checks.js';
 import { logger } from './lib/logger.js';
+import { aiMode } from './services/llm-provider.js';
 import { seedFidirIfEmpty } from './services/fidir-seeder.js';
 import { createApp } from './server.js';
 
@@ -35,6 +37,16 @@ const main = async (): Promise<void> => {
   const app = createApp();
   app.listen(port, () => {
     logger.info({ port }, 'api listening');
+    // MIG-6: router mode only; non-blocking with retry — AI paths fail
+    // closed at the router until registration lands, which is correct.
+    if (aiMode() === 'router') {
+      registerTxconvTaskClasses({
+        baseUrl: process.env.VIBE_AI_ROUTER_URL ?? '',
+        token: process.env.VIBE_AI_TOKEN ?? '',
+        version: process.env.npm_package_version,
+        log: (level, msg) => logger[level]({}, `vibe-router: ${msg}`),
+      });
+    }
   });
 };
 

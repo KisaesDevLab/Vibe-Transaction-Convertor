@@ -147,7 +147,10 @@ const promptVersionFor = (o: EnrichmentPromptOverrides): string => {
 // Mirrors extraction.worker.ts cap-check (lines 166-193). When the
 // caller is the local provider, this is a no-op — only Anthropic charges
 // per call, so only Anthropic gets capped.
-const checkMonthlyCap = async (db: Db, providerId: 'local' | 'anthropic'): Promise<void> => {
+const checkMonthlyCap = async (
+  db: Db,
+  providerId: 'local' | 'anthropic' | 'vibe_router',
+): Promise<void> => {
   if (providerId !== 'anthropic') return;
   const capRows = await db
     .select()
@@ -282,7 +285,7 @@ export const enrichStatement = async (
   let llmCalls = 0;
   let costMicros = 0n;
   let model: string | null = null;
-  let providerId: 'local' | 'anthropic' | null = null;
+  let providerId: 'local' | 'anthropic' | 'vibe_router' | null = null;
 
   if (missing.length > 0) {
     const categoryNames = activeCategories.map((c) => c.name);

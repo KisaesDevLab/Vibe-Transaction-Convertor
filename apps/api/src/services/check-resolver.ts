@@ -107,7 +107,7 @@ export const resolveCheckPayees = async (db: Db, stmtId: string): Promise<CheckR
   // Anthropic (text-only — images never reach it). Falls back to the local
   // provider if the configured one can't be built (e.g. Anthropic without a key).
   let textProvider = provider;
-  let textProviderId: 'local' | 'anthropic' = 'local';
+  let textProviderId: 'local' | 'anthropic' | 'vibe_router' = 'local';
   try {
     const built = await buildProviderForProcess(db, 'check');
     textProvider = built.provider;

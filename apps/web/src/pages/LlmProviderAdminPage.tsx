@@ -48,6 +48,8 @@ const PDF_STRATEGY_LABELS: Record<PdfProcessingStrategy, { title: string; descri
 };
 
 interface ProviderStatus {
+  /** MIG-6: 'router' → extraction/enrichment/check text passes go through the Vibe AI Router */
+  aiMode?: 'direct' | 'router';
   // `provider` is the currently-active primary, derived from the
   // policy. `policy` is what's actually persisted; older API clients
   // pre-policy still read `provider` only.
@@ -407,6 +409,16 @@ export function LlmProviderAdminPage() {
       <Link to="/admin" className="text-sm text-ink-muted hover:text-ink">
         ← Admin
       </Link>
+      {provider.data?.aiMode === 'router' && (
+        <div className="rounded-lg border border-sky-300 bg-sky-50 p-4 text-sm text-sky-900">
+          <strong>Managed by Vibe AI Router.</strong> This installation sends the extraction,
+          enrichment, and check-resolution text passes through the appliance&apos;s Vibe AI Router
+          (VIBE_AI_MODE=router) — model choice, data-boundary policy, budgets, and cost tracking
+          live in the router console, and the provider settings below are inactive (kept for
+          standalone direct deployments). Scanned-page OCR still runs on the local GLM-OCR engine:
+          page images never leave the box in either mode.
+        </div>
+      )}
       <header>
         <h1 className="text-2xl font-semibold">LLM provider</h1>
         <p className="mt-1 rounded-md bg-surface-subtle px-3 py-2 text-xs text-ink-muted">

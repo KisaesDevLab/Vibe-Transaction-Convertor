@@ -38,6 +38,22 @@ const enforceLlmConfig = (): void => {
   }
 };
 
+// MIG-6 — Vibe AI Router dual-mode. router without both URL and token is a
+// misconfiguration, not something to limp through: every extraction would
+// fail at request time with a worse message.
+const enforceAiModeConfig = (): void => {
+  const mode = process.env.VIBE_AI_MODE;
+  if (mode && mode !== 'direct' && mode !== 'router') {
+    throw new BootCheckError(`VIBE_AI_MODE must be 'direct' or 'router'; got ${mode}`);
+  }
+  if (mode === 'router' && (!process.env.VIBE_AI_ROUTER_URL || !process.env.VIBE_AI_TOKEN)) {
+    throw new BootCheckError(
+      'VIBE_AI_MODE=router requires both VIBE_AI_ROUTER_URL and VIBE_AI_TOKEN ' +
+        '(the appliance mints the token during "vibe enable"), or set VIBE_AI_MODE=direct.',
+    );
+  }
+};
+
 // BuildPlan §29.12 — appliance handshake. Records both the appliance
 // platform version (APPLIANCE_VERSION env) and the bundled app
 // manifest version so the orchestrator can correlate them. The two
@@ -62,6 +78,7 @@ export const runBootChecks = (): void => {
   enforceSessionSecret();
   enforceDatabaseUrl();
   enforceLlmConfig();
+  enforceAiModeConfig();
   performApplianceHandshake();
   logger.info('boot checks passed');
 };

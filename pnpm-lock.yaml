@@ -256,6 +256,9 @@ importers:
 
   packages/extractor:
     dependencies:
+      '@kisaes/vibe-ai-client':
+        specifier: github:KisaesDevLab/Vibe-AI-Router#sdk-v0.2.0&path:packages/sdk
+        version: https://codeload.github.com/KisaesDevLab/Vibe-AI-Router/tar.gz/68d3e4be867eea5f12856ed2a1132911e5de1ac9#path:packages/sdk
       '@vibe-tx-converter/shared':
         specifier: workspace:*
         version: link:../shared
@@ -1045,6 +1048,11 @@ packages:
 
   '@jridgewell/trace-mapping@0.3.31':
     resolution: {integrity: sha512-zzNR+SdQSDJzc8joaeP8QQoCQr8NuYx2dIIytl1QeBEZHJ9uW6hebsrYgbz8hJwUQao3TWCMtmfV8Nu1twOLAw==}
+
+  '@kisaes/vibe-ai-client@https://codeload.github.com/KisaesDevLab/Vibe-AI-Router/tar.gz/68d3e4be867eea5f12856ed2a1132911e5de1ac9#path:packages/sdk':
+    resolution: {path: packages/sdk, tarball: https://codeload.github.com/KisaesDevLab/Vibe-AI-Router/tar.gz/68d3e4be867eea5f12856ed2a1132911e5de1ac9}
+    version: 0.2.0
+    engines: {node: '>=20'}
 
   '@msgpackr-extract/msgpackr-extract-darwin-arm64@3.0.3':
     resolution: {integrity: sha512-QZHtlVgbAdy2zAqNA9Gu1UpIuI8Xvsd1v8ic6B2pZmeFnFcMWiPLfWXh7TVw4eGEZ/C9TH281KwhVoeQUKbyjw==}
@@ -4703,6 +4711,8 @@ snapshots:
     dependencies:
       '@jridgewell/resolve-uri': 3.1.2
       '@jridgewell/sourcemap-codec': 1.5.5
+
+  '@kisaes/vibe-ai-client@https://codeload.github.com/KisaesDevLab/Vibe-AI-Router/tar.gz/68d3e4be867eea5f12856ed2a1132911e5de1ac9#path:packages/sdk': {}
 
   '@msgpackr-extract/msgpackr-extract-darwin-arm64@3.0.3':
     optional: true

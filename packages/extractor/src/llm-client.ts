@@ -685,7 +685,7 @@ export interface OcrToTextResult {
 }
 
 export interface LlmProvider {
-  readonly id: 'local' | 'anthropic';
+  readonly id: 'local' | 'anthropic' | 'vibe_router';
   extract(markdown: string, opts?: ExtractOptions | object): Promise<ExtractResult>;
   complete(opts: CompleteOptions): Promise<CompleteResult>;
   // Generic vision call: hands page images + a JSON schema to a vision-capable

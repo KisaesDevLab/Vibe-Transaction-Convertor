@@ -22,6 +22,7 @@ import {
   type EngineKey,
 } from '../services/engines.js';
 import {
+  aiMode,
   buildProvider,
   invalidateProviderCache,
   isAnthropicViaGateway,
@@ -187,6 +188,8 @@ export const adminRouter = (): Router => {
         process.env.OLLAMA_VISION_MODEL ??
         DEFAULT_OLLAMA_VISION_MODEL;
       res.json({
+        // MIG-6: router mode makes every provider setting below inert.
+        aiMode: aiMode(),
         // Primary provider — what runs first when extraction starts.
         // Pre-policy clients read this field; new clients read `policy`.
         provider: primary,

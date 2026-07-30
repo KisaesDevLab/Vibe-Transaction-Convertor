@@ -17,7 +17,8 @@
   },
   "dependencies": {
     "@vibe-tx-converter/shared": "workspace:*",
-    "pdfjs-dist": "^4.7.76"
+    "pdfjs-dist": "^4.7.76",
+    "@kisaes/vibe-ai-client": "github:KisaesDevLab/Vibe-AI-Router#sdk-v0.2.0&path:packages/sdk"
   },
   "devDependencies": {
     "pdf-lib": "^1.17.1"
