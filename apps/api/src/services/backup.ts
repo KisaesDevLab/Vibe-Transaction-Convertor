@@ -80,7 +80,7 @@ export const backupFilePath = (filename: string): string => {
 };
 
 const PG_INSTALL_HINT =
-  'install postgresql-client (Linux: apt install postgresql-client; macOS: brew install libpq && brew link --force libpq; Windows: choco install postgresql)';
+  'in Docker, update to an image that bundles postgresql-client-16; on a dev host, install it (Linux: apt install postgresql-client-16; macOS: brew install libpq && brew link --force libpq; Windows: EDB binaries zip — the client major must be >= the Postgres 16 server)';
 
 export const createBackup = async (): Promise<BackupSummary> => {
   const url = process.env.DATABASE_URL;

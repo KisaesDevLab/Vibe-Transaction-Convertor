@@ -27,8 +27,19 @@ FROM node:${NODE_VERSION}-bookworm-slim AS runtime
 WORKDIR /app
 
 # poppler-utils provides pdftoppm for OCR rasterization (Q-006).
+# postgresql-client-16 provides pg_dump for the Phase 26 backup
+# service — from the PGDG repo because bookworm ships client 15,
+# which refuses to dump from the Postgres 16 server. Build-time
+# fetch only; nothing here runs at container runtime.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends poppler-utils ca-certificates curl \
+    && install -d -m 0755 /etc/apt/keyrings \
+    && curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+        -o /etc/apt/keyrings/apt.postgresql.org.asc \
+    && echo "deb [signed-by=/etc/apt/keyrings/apt.postgresql.org.asc] http://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" \
+        > /etc/apt/sources.list.d/pgdg.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends postgresql-client-16 \
     && rm -rf /var/lib/apt/lists/*
 
 ENV NODE_ENV=production
