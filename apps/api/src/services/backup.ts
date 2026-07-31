@@ -11,7 +11,7 @@
 // Postgres instance.
 
 import { execFile, spawn } from 'node:child_process';
-import { mkdir, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, open, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import pg from 'pg';
@@ -132,6 +132,31 @@ const pgToolError = (tool: string, err: unknown): Error => {
   return new Error(`${tool} failed: ${detail || 'unknown error'}`);
 };
 
+// A schema entry in `pg_restore --list` output looks like:
+//   9; 2615 16395 SCHEMA - vibetc vibetc
+// i.e. `id; oid oid SCHEMA - <name> <owner>`. The ACL entry that follows
+// it ("3938; 0 0 ACL - SCHEMA vibetc vibetc") deliberately does NOT
+// match: we want the dump's grants replayed onto the schema we create.
+const SCHEMA_TOC_LINE = /^\d+;\s+\d+\s+\d+\s+SCHEMA\s+-\s+(\S+)\s/;
+
+export const parseDumpSchemas = (tocListing: string): string[] => {
+  const found = new Set<string>();
+  for (const line of tocListing.split(/\r?\n/)) {
+    const m = SCHEMA_TOC_LINE.exec(line);
+    if (m?.[1]) found.add(m[1]);
+  }
+  return [...found].sort();
+};
+
+// Comment out the CREATE SCHEMA entries so the restore doesn't collide
+// with the schemas its preamble just created. pg_restore treats a
+// leading ';' in a --use-list file as "skip this entry".
+export const filterSchemaEntries = (tocListing: string): string =>
+  tocListing
+    .split(/\r?\n/)
+    .map((line) => (SCHEMA_TOC_LINE.test(line) ? `;${line}` : line))
+    .join('\n');
+
 // The schemas a backup captures. `vibetc` is the app's data; `drizzle`
 // holds __drizzle_migrations, so restoring returns the schema version to
 // the point the backup was taken and post-restore migrations can bring
@@ -167,6 +192,113 @@ export const createBackup = async (): Promise<BackupSummary> => {
 export const deleteBackup = async (filename: string): Promise<void> => {
   const path = backupFilePath(filename);
   await rm(path, { force: true });
+};
+
+// ---------------------------------------------------------------------
+// IMPORT (upload a dump taken elsewhere)
+//
+// The other half of download: move a backup between installs, or seed a
+// rebuilt host from a dump kept off-box. The uploaded file lands in
+// $DATA_DIR/tmp and only becomes a restorable backup once we've proven
+// pg_restore can read it — an unreadable dump discovered at restore time
+// is a much worse place to find out.
+// ---------------------------------------------------------------------
+
+// Custom-format archives start with the literal "PGDMP". Plain-SQL
+// (--format=plain) and tar dumps don't, and neither does a PDF someone
+// picked by mistake, so this rejects the common wrong-file cases before
+// we bother spawning pg_restore.
+export const isPgCustomDump = (head: Buffer): boolean =>
+  head.length >= 5 && head.subarray(0, 5).toString('latin1') === 'PGDMP';
+
+export const uploadMaxBytes = (): number => {
+  const mb = Number.parseInt(process.env.BACKUP_UPLOAD_MAX_MB ?? '2048', 10);
+  return Math.max(1, Number.isFinite(mb) ? mb : 2048) * 1024 * 1024;
+};
+
+// Adopt a dump sitting at `tempPath` into the backups directory.
+//
+// `originalName` is untrusted: it is used ONLY to decide whether the
+// file can keep its own name (when it already matches the exact shape
+// createBackup() emits, so the backup keeps its identity across a move
+// between hosts) or gets a fresh one. It is never joined to a path
+// before assertSafeFilename has vetted it.
+export const importBackup = async (
+  tempPath: string,
+  originalName: string,
+): Promise<BackupSummary> => {
+  const head = Buffer.alloc(5);
+  const fh = await open(tempPath, 'r');
+  try {
+    await fh.read(head, 0, 5, 0);
+  } finally {
+    await fh.close();
+  }
+  if (!isPgCustomDump(head)) {
+    throw new Error(
+      'not a PostgreSQL custom-format dump (missing the PGDMP header). Upload the .dump file produced by this app, not a plain-SQL or tar dump.',
+    );
+  }
+
+  // Reading the table of contents proves the archive is intact and is
+  // one of ours: it is the same check the restore does first, and it
+  // catches truncated/corrupt uploads here rather than mid-restore.
+  const { env } = pgConnectionArgs();
+  let tocListing: string;
+  try {
+    const { stdout } = await execFileP('pg_restore', ['--list', tempPath], {
+      maxBuffer: 64 * 1024 * 1024,
+      env,
+    });
+    tocListing = stdout;
+  } catch (err) {
+    throw new Error(
+      `${pgToolError('pg_restore --list', err).message}\n\nThe upload is not a readable dump — it may have been truncated in transit.`,
+    );
+  }
+  const schemas = parseDumpSchemas(tocListing);
+  if (!schemas.includes('vibetc')) {
+    throw new Error(
+      `this dump contains no "vibetc" schema (found: ${
+        schemas.join(', ') || 'nothing'
+      }). It is a backup of some other database.`,
+    );
+  }
+
+  const dir = await ensureDir();
+  // Keep the original name when it is one of ours, so a dump downloaded
+  // from another install keeps the timestamp it was taken at.
+  let filename: string;
+  try {
+    assertSafeFilename(originalName);
+    filename = originalName;
+  } catch {
+    filename = newFilename();
+  }
+  const target = join(dir, filename);
+  const exists = await stat(target).then(
+    () => true,
+    () => false,
+  );
+  if (exists) {
+    throw new Error(
+      `a backup named ${filename} already exists here. Delete it first, or rename the file you are uploading.`,
+    );
+  }
+
+  try {
+    await rename(tempPath, target);
+  } catch (err) {
+    // $DATA_DIR/tmp and $DATA_DIR/backups are normally the same volume,
+    // but a bind-mounted tmp would make rename() EXDEV. Fall back to a
+    // copy so the upload still lands.
+    if ((err as { code?: string }).code !== 'EXDEV') throw err;
+    await copyFile(tempPath, target);
+    await rm(tempPath, { force: true });
+  }
+
+  const s = await stat(target);
+  return { filename, sizeBytes: s.size, createdAt: s.mtime.toISOString() };
 };
 
 // Phase 26 #21: nightly sweep of backups older than retention. Default
@@ -320,31 +452,6 @@ const recyclePool = async (): Promise<string[]> => {
     ];
   }
 };
-
-// A schema entry in `pg_restore --list` output looks like:
-//   9; 2615 16395 SCHEMA - vibetc vibetc
-// i.e. `id; oid oid SCHEMA - <name> <owner>`. The ACL entry that follows
-// it ("3938; 0 0 ACL - SCHEMA vibetc vibetc") deliberately does NOT
-// match: we want the dump's grants replayed onto the schema we create.
-const SCHEMA_TOC_LINE = /^\d+;\s+\d+\s+\d+\s+SCHEMA\s+-\s+(\S+)\s/;
-
-export const parseDumpSchemas = (tocListing: string): string[] => {
-  const found = new Set<string>();
-  for (const line of tocListing.split(/\r?\n/)) {
-    const m = SCHEMA_TOC_LINE.exec(line);
-    if (m?.[1]) found.add(m[1]);
-  }
-  return [...found].sort();
-};
-
-// Comment out the CREATE SCHEMA entries so the restore doesn't collide
-// with the schemas the preamble just created. pg_restore treats a
-// leading ';' in a --use-list file as "skip this entry".
-export const filterSchemaEntries = (tocListing: string): string =>
-  tocListing
-    .split(/\r?\n/)
-    .map((line) => (SCHEMA_TOC_LINE.test(line) ? `;${line}` : line))
-    .join('\n');
 
 const quoteIdent = (name: string): string => `"${name.replace(/"/g, '""')}"`;
 

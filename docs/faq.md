@@ -110,10 +110,17 @@ run `just fidir-refresh` (or admin → Refresh FIDIR).
 ## How do I back up?
 
 Admin → Backup (`/admin/backup`) runs the `pg_dump` for you and keeps
-the dumps under `${DATA_DIR}/backups`, where you can download, restore,
-or delete them. Back up `${DATA_DIR}/uploads` separately for the source
-PDFs (or rely on dedup — re-upload them to a fresh install). FIDIR is in
-source control. See `docs/operator-guide.md` for the full procedure.
+the dumps under `${DATA_DIR}/backups`, where you can download, upload,
+restore, or delete them. Back up `${DATA_DIR}/uploads` separately for
+the source PDFs (or rely on dedup — re-upload them to a fresh install).
+FIDIR is in source control. See `docs/operator-guide.md` for the full
+procedure.
+
+## How do I move my data to another machine?
+
+Download the dump from the old install, then **Upload a backup** on the
+new one and restore from it. The upload is validated before it is
+accepted, so a file that got truncated in transit is rejected up front.
 
 ## How do I restore?
 

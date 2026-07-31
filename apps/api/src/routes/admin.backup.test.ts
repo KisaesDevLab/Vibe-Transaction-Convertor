@@ -9,7 +9,7 @@
 // database exactly as it was rather than half-restored.
 
 import { execFile } from 'node:child_process';
-import { rm } from 'node:fs/promises';
+import { readFile, rm } from 'node:fs/promises';
 import { migrate } from 'drizzle-orm/node-postgres/migrator';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -104,6 +104,90 @@ live('Admin backup + restore (live Postgres)', () => {
     expect(res.body.sizeBytes).toBeGreaterThan(1000);
     filename = res.body.filename;
   }, 120_000);
+
+  // The move-a-backup-between-installs path: download the dump, remove
+  // it from this host entirely, upload it back, and restore from the
+  // uploaded copy. If this works, so does carrying a dump to a rebuilt
+  // machine.
+  it('round-trips a dump through download → delete → upload → restore', async () => {
+    const downloaded = await agent
+      .get(`/api/admin/backups/${filename}/file`)
+      .set('x-csrf-token', csrfToken)
+      .buffer(true)
+      .parse((res, cb) => {
+        const chunks: Buffer[] = [];
+        res.on('data', (c: Buffer) => chunks.push(c));
+        res.on('end', () => cb(null, Buffer.concat(chunks)));
+      })
+      .expect(200);
+    const bytes = downloaded.body as Buffer;
+    expect(bytes.subarray(0, 5).toString('latin1')).toBe('PGDMP');
+
+    await agent.delete(`/api/admin/backups/${filename}`).set('x-csrf-token', csrfToken).expect(204);
+    const afterDelete = await agent.get('/api/admin/backups').expect(200);
+    expect(afterDelete.body.backups.map((b: { filename: string }) => b.filename)).not.toContain(
+      filename,
+    );
+
+    // Uploading it back keeps its original name, so the backup keeps the
+    // timestamp it was actually taken at.
+    const uploaded = await agent
+      .post('/api/admin/backups/upload')
+      .set('x-csrf-token', csrfToken)
+      .attach('file', bytes, filename);
+    expect(uploaded.status).toBe(201);
+    expect(uploaded.body.filename).toBe(filename);
+    expect(uploaded.body.sizeBytes).toBe(bytes.length);
+
+    // And it is a real, restorable backup.
+    await agent
+      .post('/api/companies')
+      .set('x-csrf-token', csrfToken)
+      .send({ name: 'Added After The Upload' })
+      .expect(201);
+    const restored = await agent
+      .post(`/api/admin/backups/${filename}/restore`)
+      .set('x-csrf-token', csrfToken)
+      .send({ confirm: 'RESTORE' })
+      .expect(200);
+    expect(restored.body.schemas).toEqual(['drizzle', 'vibetc']);
+    expect(await companyNames()).toEqual(['Before Backup']);
+  }, 180_000);
+
+  it('rejects an upload that is not a custom-format dump', async () => {
+    const res = await agent
+      .post('/api/admin/backups/upload')
+      .set('x-csrf-token', csrfToken)
+      .attach('file', Buffer.from('%PDF-1.7 not a dump at all'), 'vibetc-fake.dump');
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/PGDMP/);
+  });
+
+  it('rejects an upload whose header is right but whose body is truncated', async () => {
+    const good = await agent.post('/api/admin/backup').set('x-csrf-token', csrfToken).expect(201);
+    const full = await readFile(join(dataDir, 'backups', good.body.filename as string));
+    const res = await agent
+      .post('/api/admin/backups/upload')
+      .set('x-csrf-token', csrfToken)
+      .attach('file', full.subarray(0, Math.floor(full.length / 2)), 'vibetc-truncated.dump');
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/not a readable dump/);
+  }, 120_000);
+
+  it('refuses to overwrite an existing backup of the same name', async () => {
+    const full = await readFile(join(dataDir, 'backups', filename));
+    const res = await agent
+      .post('/api/admin/backups/upload')
+      .set('x-csrf-token', csrfToken)
+      .attach('file', full, filename);
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/already exists/);
+  }, 120_000);
+
+  it('rejects an upload with no file', async () => {
+    const res = await agent.post('/api/admin/backups/upload').set('x-csrf-token', csrfToken);
+    expect(res.status).toBe(400);
+  });
 
   it('refuses to restore without the typed confirmation', async () => {
     const res = await agent
