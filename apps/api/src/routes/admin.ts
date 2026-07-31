@@ -1,7 +1,8 @@
-import { Router } from 'express';
+import { Router, type RequestHandler } from 'express';
 import { eq, lt, sql } from 'drizzle-orm';
+import multer from 'multer';
 import { createReadStream } from 'node:fs';
-import { rm, readdir, stat } from 'node:fs/promises';
+import { mkdir, rm, readdir, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { db } from '../db/client.js';
@@ -15,8 +16,10 @@ import {
   backupFilePath,
   createBackup,
   deleteBackup,
+  importBackup,
   listBackups,
   restoreBackup,
+  uploadMaxBytes,
 } from '../services/backup.js';
 import { getFidirStatus, seedFidir } from '../services/fidir-seeder.js';
 import {
@@ -114,6 +117,48 @@ const CURATED_ANTHROPIC_MODELS = [
   'claude-haiku-4-5-20251001',
 ] as const;
 const CLAUDE_PATTERN = /^claude-[a-z0-9-]+$/i;
+
+// Uploaded dumps go straight to disk under $DATA_DIR/tmp — they are far
+// too big to hold in memory the way the PDF upload route does. The
+// filename is ours, not the client's: importBackup() decides the final
+// name after it has validated the archive. Size cap is generous and
+// tunable because a firm-sized dump can legitimately be large.
+const backupUpload = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => {
+      const dir = join(process.env.DATA_DIR ?? './data', 'tmp');
+      mkdir(dir, { recursive: true }).then(
+        () => cb(null, dir),
+        (err) => cb(err as Error, dir),
+      );
+    },
+    filename: (_req, _file, cb) => cb(null, `backup-upload-${process.pid}-${Date.now()}.tmp`),
+  }),
+  limits: { fileSize: uploadMaxBytes(), files: 1 },
+});
+
+// multer rejects by calling next(err) with a plain Error, which the
+// error handler would turn into an opaque 500. Translate its failures
+// into the 400 they actually are, with the cap spelled out so the
+// operator knows which env var to raise.
+const backupUploadMiddleware: RequestHandler = (req, res, next) => {
+  backupUpload.single('file')(req, res, (err: unknown) => {
+    if (!err) {
+      next();
+      return;
+    }
+    if ((err as { code?: string }).code === 'LIMIT_FILE_SIZE') {
+      const mb = Math.round(uploadMaxBytes() / (1024 * 1024));
+      next(
+        new ValidationError(
+          `backup exceeds the ${mb} MB upload limit — raise BACKUP_UPLOAD_MAX_MB, or copy the file into $DATA_DIR/backups on the host instead.`,
+        ),
+      );
+      return;
+    }
+    next(new ValidationError(`upload failed: ${(err as Error).message}`));
+  });
+};
 
 export const adminRouter = (): Router => {
   const router = Router();
@@ -1007,6 +1052,45 @@ export const adminRouter = (): Router => {
       res.setHeader('content-disposition', `attachment; filename="${filename}"`);
       createReadStream(path).pipe(res);
     } catch (err) {
+      next(err);
+    }
+  });
+
+  // Upload a dump taken on another install (or kept off-box) so it can
+  // be restored here — the inbound half of the download button.
+  //
+  // Streamed straight to $DATA_DIR/tmp rather than buffered in memory
+  // like the PDF upload route: dumps are routinely hundreds of MB. The
+  // file is only adopted into the backups directory once importBackup()
+  // has confirmed pg_restore can read it and that it contains a vibetc
+  // schema; anything else is deleted where it landed.
+  router.post('/backups/upload', backupUploadMiddleware, async (req, res, next) => {
+    const file = req.file;
+    try {
+      if (!file) throw new ValidationError('no file uploaded (expected field "file")');
+      let summary;
+      try {
+        summary = await importBackup(file.path, file.originalname);
+      } catch (err) {
+        throw new ValidationError((err as Error).message);
+      }
+      await writeAudit(db, {
+        actorUserId: req.user!.id,
+        entityType: 'system',
+        entityId: 'backup',
+        action: 'backup.upload',
+        payload: {
+          filename: summary.filename,
+          originalName: file.originalname,
+          sizeBytes: summary.sizeBytes,
+        },
+      });
+      res.status(201).json(summary);
+    } catch (err) {
+      // importBackup renames the temp file on success, so this only
+      // bites on a rejected upload — but an abandoned multi-hundred-MB
+      // temp file is exactly the kind of thing that fills a disk.
+      if (file?.path) await rm(file.path, { force: true }).catch(() => undefined);
       next(err);
     }
   });

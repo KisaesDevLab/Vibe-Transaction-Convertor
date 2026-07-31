@@ -112,6 +112,14 @@ By default extraction runs locally. To opt into the Anthropic provider:
   compressed custom-format dump to `${DATA_DIR}/backups`. Dumps can be
   downloaded, restored, or deleted from the same page, and are swept
   after `BACKUP_RETENTION_DAYS` (default 90).
+- **Upload a backup** on the same page to bring in a dump taken on
+  another install, or one you keep off-box. It is accepted only after
+  `pg_restore` has proved it readable and containing a `vibetc` schema,
+  so a truncated or wrong file is rejected at upload rather than
+  discovered mid-restore. A dump keeps its original filename (and so its
+  original timestamp) when it came from this app. The cap is
+  `BACKUP_UPLOAD_MAX_MB` (default 2048); above that, copy the file into
+  `${DATA_DIR}/backups` on the host instead.
 - Point-in-time recovery via WAL archiving is still recommended for
   production; these dumps are snapshots, not continuous.
 - `${DATA_DIR}/uploads` is content-addressed by sha256 — re-uploading
@@ -144,6 +152,13 @@ What happens, in order:
 4. Migrations are re-applied. Because the dump carries the migration
    bookkeeping, a backup taken before an upgrade restores to its own
    schema version and is then brought forward to the running build.
+
+### Moving a backup to another machine
+
+Download the dump from **Admin → Backup** on the source install, then
+**Upload a backup** on the target and restore from it. Nothing else has
+to be copied for the database; `${DATA_DIR}/uploads` (the source PDFs)
+is separate and not part of the dump.
 
 Notes:
 

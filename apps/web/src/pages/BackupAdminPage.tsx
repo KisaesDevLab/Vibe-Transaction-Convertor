@@ -9,7 +9,7 @@
 // and (b) not silently swallowing the warnings that come back.
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 
 import { DeleteConfirmDialog } from '../components/DeleteConfirmDialog';
@@ -67,6 +67,9 @@ export function BackupAdminPage() {
   const [pendingRestore, setPendingRestore] = useState<BackupSummary | null>(null);
   const [restoreResult, setRestoreResult] = useState<RestoreResult | null>(null);
   const [restoreError, setRestoreError] = useState<string | null>(null);
+  const [uploadFile, setUploadFile] = useState<File | null>(null);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
 
   const list = useQuery({
     queryKey: ['admin', 'backups'],
@@ -82,6 +85,25 @@ export function BackupAdminPage() {
       api.delete<void>(`/api/admin/backups/${encodeURIComponent(filename)}`),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'backups'] }),
   });
+  // Multipart, so it bypasses the JSON api helper the same way the PDF
+  // upload hook does — same CSRF-header + error-shape contract.
+  const upload = useMutation({
+    mutationFn: async (file: File): Promise<BackupSummary> => {
+      const form = new FormData();
+      form.append('file', file);
+      const res = await fetch(withBase('/api/admin/backups/upload'), {
+        method: 'POST',
+        credentials: 'include',
+        headers: csrfHeader(),
+        body: form,
+      });
+      const body = (await res.json().catch(() => ({}))) as BackupSummary & { message?: string };
+      if (!res.ok) throw new ApiError(res.status, body);
+      return body;
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'backups'] }),
+  });
+
   const restore = useMutation({
     mutationFn: (filename: string) =>
       api.post<RestoreResult>(`/api/admin/backups/${encodeURIComponent(filename)}/restore`, {
@@ -106,6 +128,19 @@ export function BackupAdminPage() {
       toast.success(`Deleted ${filename}`);
     } catch (err) {
       toast.error(err instanceof ApiError ? err.message : 'delete failed');
+    }
+  };
+
+  const onUpload = async (): Promise<void> => {
+    if (!uploadFile) return;
+    setUploadError(null);
+    try {
+      const result = await upload.mutateAsync(uploadFile);
+      setUploadFile(null);
+      if (fileRef.current) fileRef.current.value = '';
+      toast.success(`Uploaded ${result.filename} (${formatBytes(result.sizeBytes)})`);
+    } catch (err) {
+      setUploadError(err instanceof ApiError ? err.message : 'upload failed');
     }
   };
 
@@ -189,6 +224,43 @@ export function BackupAdminPage() {
         >
           {create.isPending ? 'Creating…' : 'Create backup now'}
         </button>
+      </section>
+
+      <section className="rounded-lg border border-surface-muted bg-white p-4">
+        <h2 className="text-base font-medium">Upload a backup</h2>
+        <p className="mt-1 text-xs text-ink-subtle">
+          Add a <code>.dump</code> downloaded from another install (or kept off-box) so it can be
+          restored here. The file is checked before it is accepted — it must be a readable
+          custom-format dump containing a <code>vibetc</code> schema.
+        </p>
+        <div className="mt-3 flex flex-wrap items-center gap-3">
+          <input
+            ref={fileRef}
+            type="file"
+            accept=".dump,application/octet-stream"
+            onChange={(e) => {
+              setUploadError(null);
+              setUploadFile(e.target.files?.[0] ?? null);
+            }}
+            className="text-xs file:mr-3 file:rounded-md file:border file:border-surface-muted file:bg-surface-subtle file:px-3 file:py-1.5 file:text-xs"
+          />
+          <button
+            type="button"
+            onClick={() => void onUpload()}
+            disabled={!uploadFile || upload.isPending}
+            className="rounded-md bg-accent px-4 py-2 text-sm font-medium text-accent-fg disabled:opacity-50"
+          >
+            {upload.isPending ? 'Uploading…' : 'Upload'}
+          </button>
+          {uploadFile ? (
+            <span className="text-xs text-ink-muted">{formatBytes(uploadFile.size)}</span>
+          ) : null}
+        </div>
+        {uploadError ? (
+          <p className="mt-3 whitespace-pre-wrap rounded-md border border-danger bg-danger/5 p-2 text-xs text-danger">
+            {uploadError}
+          </p>
+        ) : null}
       </section>
 
       <section className="rounded-lg border border-surface-muted bg-white p-4">
