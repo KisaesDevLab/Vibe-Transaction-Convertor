@@ -107,11 +107,62 @@ By default extraction runs locally. To opt into the Anthropic provider:
 
 ## Backups
 
-- Postgres `vibetc` schema → standard `pg_dump` (point-in-time
-  recovery via WAL archiving recommended for production).
+- **Admin → Backup** (`/admin/backup`) runs `pg_dump` over the `vibetc`
+  schema plus the `drizzle` migration-bookkeeping schema, writing a
+  compressed custom-format dump to `${DATA_DIR}/backups`. Dumps can be
+  downloaded, restored, or deleted from the same page, and are swept
+  after `BACKUP_RETENTION_DAYS` (default 90).
+- Point-in-time recovery via WAL archiving is still recommended for
+  production; these dumps are snapshots, not continuous.
 - `${DATA_DIR}/uploads` is content-addressed by sha256 — re-uploading
-  the same PDF deduplicates without writing twice.
+  the same PDF deduplicates without writing twice. It is **not** part of
+  the dump; back up the directory separately if you need the source PDFs.
 - `data/fidir/fidir-us.txt` is in source control.
+
+## Restore
+
+Restore is available from **Admin → Backup**: click **Restore** next to a
+dump and type `RESTORE` to confirm. The same operation is available on
+the host shell, running the same code:
+
+```
+pnpm --filter @vibe-tx-converter/api db:restore vibetc-2026-07-31T13-58-09-828Z.dump
+```
+
+What happens, in order:
+
+1. A **safety dump of the current database** is taken first, so the
+   restore is itself undoable. If `pg_dump` fails, the restore is
+   refused rather than run without a way back.
+2. The extraction queue is paused (best-effort; an unreachable Redis is
+   a warning, not a failure).
+3. The `vibetc` and `drizzle` schemas are dropped and rebuilt from the
+   dump **in a single transaction**. Any failure — a lock timeout, a
+   missing role, an unreadable dump — rolls the whole thing back and
+   leaves the database exactly as it was. There is no half-restored
+   state to clean up.
+4. Migrations are re-applied. Because the dump carries the migration
+   bookkeeping, a backup taken before an upgrade restores to its own
+   schema version and is then brought forward to the running build.
+
+Notes:
+
+- `pg_dump`, `pg_restore` and `psql` must be on `PATH`. The Docker image
+  bundles `postgresql-client-16`; on a dev host install it yourself (the
+  client major must be ≥ the server major).
+- Extensions (`pg_trgm`, `btree_gist`) live inside the `vibetc` schema on
+  a standard install and are **not** contained in the dump, so the
+  restore re-creates them itself. This is why a hand-rolled
+  `pg_restore --clean` against a live database fails — use the UI or the
+  script rather than calling `pg_restore` directly.
+- The `sessions` table comes from the dump, so **you will probably be
+  signed out** after restoring. Log back in and continue.
+- Jobs already queued in Redis refer to the pre-restore database and
+  will fail; the restore reports how many were pending.
+- Both the intent (`backup.restore.start`) and the outcome
+  (`backup.restore`) are written to `audit_log`. The "start" row lands in
+  the safety dump — i.e. in the copy that survives a rollback of the
+  restore itself.
 
 ## Troubleshooting
 

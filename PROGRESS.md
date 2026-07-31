@@ -33,7 +33,7 @@ just whether the happy path runs. Acceptance gauntlet: `pnpm acceptance`
 | 23    | QFX Exporter                              | ⚠      | `702449e`   | INTU.USERID stable; needs golden-master + qfx-import.md done                                                     |
 | 24    | Export UI & Download Bundling             | ⚠      | `11a57ad`   | <ExportPage> + preview + listing + per-job re-download                                                           |
 | 25    | Audit Log                                 | ⚠      | `f9406b0`   | actor email, filters, JSON tree, downloads, correlation group                                                    |
-| 26    | Admin / Settings                          | ⚠      | `f17aaed`   | LLM provider + Backup w/ pg_dump trigger + retention + restore                                                   |
+| 26    | Admin / Settings                          | ⚠      | `f17aaed`   | LLM provider + Backup w/ pg_dump trigger + retention; restore now in the UI (atomic, deviates from #9 by design) |
 | 27    | Testing — Unit, Integration, Goldens, E2E | ⚠      | —           | 128 unit/supertests; no Playwright; no fixture suite                                                             |
 | 28    | Standalone Docker Compose                 | ⚠      | `f9406b0`   | Caddy + worker container landed; root user still in Dockerfile                                                   |
 | 29    | Vibe Appliance Mode + Manifest            | ⚠      | `51c7f17`   | manifest now YAML-only; cookie subdomain scoping + boot handshake landed; #6/#8/#11/#20 remain external/manual   |
@@ -78,6 +78,14 @@ See `QUESTIONS.md`. Q-001 through Q-006 are all worked-around or
 resolved. Q-006 (rasterizePdf) — resolved via pdftoppm shell-out.
 
 ## Recently closed (high-impact)
+
+- **Phase 26 #9 (amended)**: restore is now exposed in the admin UI
+  (`/admin/backup`) behind a typed `RESTORE` confirmation, not
+  operator-shell-only as the BuildPlan specified. It takes a safety dump
+  first, replaces the `vibetc` + `drizzle` schemas in one transaction
+  (so any failure changes nothing), preserves the in-schema extensions
+  that a naive `pg_restore --clean` cannot, and re-applies migrations.
+  `db:restore` now calls the same code.
 
 - **Phase 12 #8**: 10/10 exemplars (chase, wells, amex, simple, bofa,
   capital-one, discover, citi, us-bank, pnc) with mixed MDY/DMY/YMD
