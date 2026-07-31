@@ -109,10 +109,21 @@ run `just fidir-refresh` (or admin → Refresh FIDIR).
 
 ## How do I back up?
 
-`pg_dump` of the `vibetc` schema, plus the `${DATA_DIR}/uploads`
-directory (or rely on dedup — re-upload the source PDFs to a fresh
-install). FIDIR is in source control. See `docs/operator-guide.md` for
-the full procedure.
+Admin → Backup (`/admin/backup`) runs the `pg_dump` for you and keeps
+the dumps under `${DATA_DIR}/backups`, where you can download, restore,
+or delete them. Back up `${DATA_DIR}/uploads` separately for the source
+PDFs (or rely on dedup — re-upload them to a fresh install). FIDIR is in
+source control. See `docs/operator-guide.md` for the full procedure.
+
+## How do I restore?
+
+Same page: click **Restore** on a dump and type `RESTORE` to confirm. It
+takes a safety dump of the current database first, replaces the schema in
+a single transaction (so a failure changes nothing), and re-applies
+migrations afterwards. You will usually be signed out afterwards, because
+the session table comes from the backup. `pnpm --filter
+@vibe-tx-converter/api db:restore <file>` does the same thing from a
+shell. Do not call `pg_restore` by hand — see the operator guide for why.
 
 ## Is the source code redistributable?
 

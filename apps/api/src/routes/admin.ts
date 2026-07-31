@@ -11,7 +11,13 @@ import { unwrapSecret, wrapSecret } from '../lib/secrets.js';
 import { requireAdmin } from '../middleware/auth.js';
 import { requireFeature } from '../middleware/feature-access.js';
 import { writeAudit } from '../services/audit.js';
-import { backupFilePath, createBackup, deleteBackup, listBackups } from '../services/backup.js';
+import {
+  backupFilePath,
+  createBackup,
+  deleteBackup,
+  listBackups,
+  restoreBackup,
+} from '../services/backup.js';
 import { getFidirStatus, seedFidir } from '../services/fidir-seeder.js';
 import {
   clearEngineConfig,
@@ -1000,6 +1006,70 @@ export const adminRouter = (): Router => {
       res.setHeader('content-type', 'application/octet-stream');
       res.setHeader('content-disposition', `attachment; filename="${filename}"`);
       createReadStream(path).pipe(res);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // Restore the vibetc schema from a dump. The heaviest destructive
+  // action in the product, so it is gated three ways: admin session,
+  // the admin.backup feature, and a typed confirmation phrase in the
+  // body. restoreBackup() takes its own safety dump first and runs the
+  // restore in a single transaction — see services/backup.ts.
+  //
+  // BuildPlan Phase 26 #9 originally kept this to a host-shell script;
+  // exposing it here was an explicit product decision. The script
+  // (db:restore) still exists and now shares this same code path.
+  router.post('/backups/:filename/restore', async (req, res, next) => {
+    try {
+      const filename = String(req.params.filename);
+      const body = (req.body ?? {}) as { confirm?: unknown };
+      if (body.confirm !== 'RESTORE') {
+        throw new ValidationError('restore requires { "confirm": "RESTORE" }');
+      }
+      let path: string;
+      try {
+        path = backupFilePath(filename); // validates the filename shape
+      } catch (err) {
+        throw new ValidationError((err as Error).message);
+      }
+      try {
+        await stat(path);
+      } catch {
+        throw new NotFoundError(`backup ${filename} not found`);
+      }
+
+      // Audit BEFORE the restore. This row is wiped by the restore
+      // itself, but it lands in the safety backup taken moments later —
+      // so the intent is recorded in the only copy that survives a
+      // rollback to the pre-restore state.
+      await writeAudit(db, {
+        actorUserId: req.user!.id,
+        entityType: 'system',
+        entityId: 'backup',
+        action: 'backup.restore.start',
+        payload: { filename },
+      });
+
+      const result = await restoreBackup(filename);
+
+      // And again after, so the trail exists in the restored database
+      // too. actor_user_id has no FK, so this is safe even when the
+      // acting admin does not exist in the restored data.
+      await writeAudit(db, {
+        actorUserId: req.user!.id,
+        entityType: 'system',
+        entityId: 'backup',
+        action: 'backup.restore',
+        payload: {
+          filename,
+          schemas: result.schemas,
+          migrated: result.migrated,
+          safetyBackup: result.safetyBackup?.filename ?? null,
+          durationMs: result.durationMs,
+        },
+      });
+      res.json(result);
     } catch (err) {
       next(err);
     }

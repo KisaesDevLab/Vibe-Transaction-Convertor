@@ -69,7 +69,7 @@ See [Reconciliation](#reconciliation). Most common cause is a transaction with t
 `audit_log` is append-only and stores the full payload of every mutation. Visit `/admin/audit`, filter to the entity, find the delete event, and read the payload. From there you can either:
 
 - Manually reconstruct the row through the UI (admin add transaction, etc.).
-- Restore from the most recent backup on `/admin/backup`. Backup restore is a heavier operation; it rolls the whole DB back, not just one row.
+- Restore from the most recent backup on `/admin/backup` (click **Restore**, type `RESTORE`). This is a heavier operation: it rolls the whole DB back, not just one row, so anything created since that backup is lost. A safety dump of the current database is taken first, so you can undo the undo. Expect to be signed out afterwards — the session table comes from the backup too.
 
 ## Where to look first when something's wrong
 

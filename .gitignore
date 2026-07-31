@@ -10,6 +10,10 @@ data/uploads/
 data/exports/
 tmp/
 
+# DATA_DIR for the live backup/restore suite; removed in afterAll, but a
+# crashed run can leave dumps behind.
+apps/api/.tmp-backup-test/
+
 # Playwright E2E artifacts (apps/web/e2e/)
 test-results/
 playwright-report/
