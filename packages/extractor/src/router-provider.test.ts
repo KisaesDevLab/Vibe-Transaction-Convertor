@@ -97,7 +97,9 @@ describe('RouterProvider.complete', () => {
     const p = new RouterProvider({ ...BASE, taskClass: 'txconv_enrichment', fetcher });
     await expect(
       p.complete({ systemPrompt: 's', userPrompt: 'u', schema: { type: 'object' } }),
-    ).rejects.toThrow(/truncated at max_tokens/);
+    ).rejects.toThrow(
+      /truncated at max_tokens \(served 40 completion tokens, requested cap 32000\)/,
+    );
     await expect(
       p.complete({
         systemPrompt: 's',
@@ -183,6 +185,7 @@ describe('registerTxconvTaskClasses', () => {
     const classes = calls[0]!.body.classes as Array<{
       key: string;
       requires: { json_schema?: boolean };
+      defaultMaxTokens: number;
     }>;
     expect(classes.map((c) => c.key).sort()).toEqual([
       'txconv_check_resolve',
@@ -190,5 +193,11 @@ describe('registerTxconvTaskClasses', () => {
       'txconv_statement_parse',
     ]);
     for (const c of classes) expect(c.requires.json_schema).toBe(true);
+    const caps = Object.fromEntries(classes.map((c) => [c.key, c.defaultMaxTokens]));
+    expect(caps).toEqual({
+      txconv_statement_parse: 32768,
+      txconv_enrichment: 32768,
+      txconv_check_resolve: 4096,
+    });
   });
 });

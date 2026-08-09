@@ -91,6 +91,10 @@ export class RouterProvider implements LlmProvider {
     this.temperature = opts.temperature;
   }
 
+  // Deliberately not SDK client.completeJson: the SDK parses JSON before any
+  // finishReason check (it has none), so a truncated response would surface as
+  // "not valid JSON" instead of a truncation error. Mirrors the SDK's parsing
+  // byte-for-byte otherwise; revisit if the SDK grows a truncation check.
   private async completeJson(
     messages: ChatMessage[],
     schemaName: string,
@@ -110,7 +114,12 @@ export class RouterProvider implements LlmProvider {
         responseFormat: { type: 'json_schema', name: schemaName, schema },
       });
       if (result.finishReason === 'length') {
-        throw new Error(`vibe-router ${schemaName}: output truncated at max_tokens (${maxTokens})`);
+        // Report the served token count, not just the requested cap — a policy
+        // clamp below the cap is only visible in usage.completionTokens.
+        throw new Error(
+          `vibe-router ${schemaName}: output truncated at max_tokens ` +
+            `(served ${result.usage.completionTokens} completion tokens, requested cap ${maxTokens})`,
+        );
       }
       // Some backends answer a forced-JSON request with a tool call instead
       // of content (the router's Anthropic adapter maps json_schema to a
@@ -309,7 +318,7 @@ export function registerTxconvTaskClasses(o: {
             key: TXCONV_TASK_CLASSES.STATEMENT_PARSE,
             description: 'Bank statement structure detection assistance',
             requires: { json_schema: true },
-            defaultMaxTokens: 4096,
+            defaultMaxTokens: 32768,
           },
           // New classes — start local_only until the operator widens them.
           {
