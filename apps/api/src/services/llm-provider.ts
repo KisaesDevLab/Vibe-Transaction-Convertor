@@ -293,8 +293,37 @@ const constructAnthropic = async (
 // the router to enforce there. NO silent cross-mode fallback.
 
 export type AiMode = 'direct' | 'router';
+export type AiModeSource = 'db' | 'env' | 'default';
 
+// Admin-selected mode override, set from /admin/llm-provider. Absent row →
+// the VIBE_AI_MODE env decides (appliance provisioning default).
+export const AI_MODE_KEY = 'ai.mode';
+
+// Env-level default only — runtime callers want resolveAiMode(db), which
+// honors the admin override.
 export const aiMode = (): AiMode => (process.env.VIBE_AI_MODE === 'router' ? 'router' : 'direct');
+
+// True when the env carries enough config to construct a RouterProvider.
+export const routerConfigured = (): boolean =>
+  Boolean(process.env.VIBE_AI_ROUTER_URL && process.env.VIBE_AI_TOKEN);
+
+// Effective mode + where it came from: admin-selected (system_settings) →
+// VIBE_AI_MODE env → 'direct'. A stored 'router' is honored only while the
+// env still carries the router URL + token — if the creds are gone the app
+// falls back to direct instead of failing every text pass.
+export const resolveAiModeInfo = async (
+  db: Db,
+): Promise<{ mode: AiMode; source: AiModeSource }> => {
+  const raw = (await readSetting(db, AI_MODE_KEY))?.valuePlaintext;
+  if (raw === 'router' || raw === 'direct') {
+    return { mode: raw === 'router' && !routerConfigured() ? 'direct' : raw, source: 'db' };
+  }
+  const env = process.env.VIBE_AI_MODE;
+  if (env === 'router' || env === 'direct') return { mode: env, source: 'env' };
+  return { mode: 'direct', source: 'default' };
+};
+
+export const resolveAiMode = async (db: Db): Promise<AiMode> => (await resolveAiModeInfo(db)).mode;
 
 const PROCESS_TASK_CLASS: Record<ProcessId, string> = {
   extraction: TXCONV_TASK_CLASSES.STATEMENT_PARSE,
@@ -324,7 +353,8 @@ export const buildProviderForId = async (db: Db, id: ProviderId): Promise<LlmPro
 // Resolves the policy's primary and returns that provider. Used by
 // callers that don't participate in fallback (legacy code paths).
 export const buildProvider = async (db: Db): Promise<LlmProvider> => {
-  if (aiMode() === 'router') return constructRouter(TXCONV_TASK_CLASSES.STATEMENT_PARSE);
+  if ((await resolveAiMode(db)) === 'router')
+    return constructRouter(TXCONV_TASK_CLASSES.STATEMENT_PARSE);
   const id = await resolveProviderId(db);
   return buildProviderForId(db, id);
 };
@@ -359,7 +389,8 @@ export const buildProviderForProcessId = async (
   // Router mode: whichever id the worker's fallback order asks for, the
   // router serves this process's task class — failover WITHIN router mode is
   // the router's own fallback-chain job.
-  if (aiMode() === 'router') return constructRouter(PROCESS_TASK_CLASS[proc], overrides);
+  if ((await resolveAiMode(db)) === 'router')
+    return constructRouter(PROCESS_TASK_CLASS[proc], overrides);
   return id === 'local' ? constructLocal(db, overrides) : constructAnthropic(db, overrides);
 };
 
@@ -384,7 +415,7 @@ export const buildProviderForProcess = async (
   proc: ProcessId,
 ): Promise<{ provider: LlmProvider; providerId: ProviderId | 'vibe_router' }> => {
   const cfg = await resolveProcessConfig(db, proc);
-  if (aiMode() === 'router') {
+  if ((await resolveAiMode(db)) === 'router') {
     return {
       provider: constructRouter(PROCESS_TASK_CLASS[proc], overridesFor(cfg, proc)),
       providerId: 'vibe_router',

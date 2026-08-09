@@ -50,6 +50,11 @@ const PDF_STRATEGY_LABELS: Record<PdfProcessingStrategy, { title: string; descri
 interface ProviderStatus {
   /** MIG-6: 'router' → extraction/enrichment/check text passes go through the Vibe AI Router */
   aiMode?: 'direct' | 'router';
+  /** Where the effective mode came from: admin-selected (db) → VIBE_AI_MODE env → default. */
+  aiModeSource?: 'db' | 'env' | 'default';
+  /** True when the env carries VIBE_AI_ROUTER_URL + VIBE_AI_TOKEN (router mode selectable). */
+  routerConfigured?: boolean;
+  routerUrl?: string | null;
   // `provider` is the currently-active primary, derived from the
   // policy. `policy` is what's actually persisted; older API clients
   // pre-policy still read `provider` only.
@@ -191,6 +196,11 @@ export function LlmProviderAdminPage() {
 
   const switchPolicy = useMutation({
     mutationFn: (p: LlmProviderPolicy) => api.post('/api/admin/llm-provider', { policy: p }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'llm-provider'] }),
+  });
+  const setAiMode = useMutation({
+    mutationFn: (mode: 'router' | 'direct') =>
+      api.post('/api/admin/llm-provider/ai-mode', { mode }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'llm-provider'] }),
   });
   const pdfStrategy = useQuery({
@@ -395,6 +405,19 @@ export function LlmProviderAdminPage() {
       }
     };
 
+  const onSetAiMode = async (mode: 'router' | 'direct'): Promise<void> => {
+    try {
+      await setAiMode.mutateAsync(mode);
+      toast.success(
+        mode === 'router'
+          ? 'Text passes now route through the Vibe AI Router.'
+          : 'Direct API mode — the provider settings on this page are active.',
+      );
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : 'failed');
+    }
+  };
+
   const onSaveAiSetting = async (id: string, value: string): Promise<void> => {
     try {
       await setAiSettingMut.mutateAsync({ id, value });
@@ -412,11 +435,12 @@ export function LlmProviderAdminPage() {
       {provider.data?.aiMode === 'router' && (
         <div className="rounded-lg border border-sky-300 bg-sky-50 p-4 text-sm text-sky-900">
           <strong>Managed by Vibe AI Router.</strong> This installation sends the extraction,
-          enrichment, and check-resolution text passes through the appliance&apos;s Vibe AI Router
-          (VIBE_AI_MODE=router) — model choice, data-boundary policy, budgets, and cost tracking
-          live in the router console, and the provider settings below are inactive (kept for
-          standalone direct deployments). Scanned-page OCR still runs on the local GLM-OCR engine:
-          page images never leave the box in either mode.
+          enrichment, and check-resolution text passes through the appliance&apos;s Vibe AI Router —
+          model choice, data-boundary policy, budgets, and cost tracking live in the router console,
+          and the provider settings below are inactive (kept for standalone direct deployments).
+          Scanned-page OCR still runs on the local GLM-OCR engine: page images never leave the box
+          in either mode. Switch to Direct API in the AI routing mode section below to manage
+          providers here instead.
         </div>
       )}
       <header>
@@ -438,6 +462,72 @@ export function LlmProviderAdminPage() {
           locally first.
         </p>
       </header>
+
+      {provider.data ? (
+        <section className="rounded-lg border border-surface-muted bg-white p-4">
+          <h2 className="text-base font-medium">AI routing mode</h2>
+          <p className="mt-1 text-xs text-ink-subtle">
+            Where the extraction, enrichment, and check-resolution <em>text</em> passes run.
+            Scanned-page OCR is local in both modes — page images never leave the box.
+          </p>
+          <fieldset className="mt-3 space-y-2 text-sm">
+            <label className="flex items-start gap-2">
+              <input
+                type="radio"
+                name="ai-mode"
+                checked={provider.data.aiMode === 'router'}
+                disabled={setAiMode.isPending || !provider.data.routerConfigured}
+                onChange={() => void onSetAiMode('router')}
+                className="mt-1"
+              />
+              <div className="flex flex-col">
+                <span className="font-medium">Vibe AI Router</span>
+                <span className="text-xs text-ink-muted">
+                  Route text passes through the appliance&apos;s router
+                  {provider.data.routerUrl ? (
+                    <>
+                      {' '}
+                      (<span className="font-mono">{provider.data.routerUrl}</span>)
+                    </>
+                  ) : null}
+                  . Model choice, data-boundary policy, budgets, and cost tracking live in the
+                  router console; the provider settings below become inactive.
+                </span>
+                {!provider.data.routerConfigured ? (
+                  <span className="mt-0.5 text-xs text-amber-700">
+                    Unavailable: set VIBE_AI_ROUTER_URL and VIBE_AI_TOKEN in the environment (the
+                    appliance mints the token during &quot;vibe enable&quot;).
+                  </span>
+                ) : null}
+              </div>
+            </label>
+            <label className="flex items-start gap-2">
+              <input
+                type="radio"
+                name="ai-mode"
+                checked={provider.data.aiMode !== 'router'}
+                disabled={setAiMode.isPending}
+                onChange={() => void onSetAiMode('direct')}
+                className="mt-1"
+              />
+              <div className="flex flex-col">
+                <span className="font-medium">Direct API</span>
+                <span className="text-xs text-ink-muted">
+                  This app talks to local Ollama (and optionally Anthropic) itself, using the
+                  routing policy and provider settings on this page.
+                </span>
+              </div>
+            </label>
+          </fieldset>
+          <p className="mt-2 text-xs text-ink-subtle">
+            {provider.data.aiModeSource === 'db'
+              ? 'Set by an admin here (overrides the VIBE_AI_MODE environment default).'
+              : provider.data.aiModeSource === 'env'
+                ? 'Currently following the VIBE_AI_MODE environment variable.'
+                : 'Default (no VIBE_AI_MODE set): Direct API.'}
+          </p>
+        </section>
+      ) : null}
 
       {provider.data ? (
         <section className="rounded-lg border border-surface-muted bg-white p-4">

@@ -4,7 +4,7 @@ import { runMigrations } from './db/migrate.js';
 import { startWorkers } from './jobs/index.js';
 import { runBootChecks } from './lib/boot-checks.js';
 import { logger } from './lib/logger.js';
-import { aiMode } from './services/llm-provider.js';
+import { resolveAiMode } from './services/llm-provider.js';
 import { seedFidirIfEmpty } from './services/fidir-seeder.js';
 import { createApp } from './server.js';
 
@@ -35,11 +35,15 @@ const main = async (): Promise<void> => {
   }
   startWorkers();
   const app = createApp();
+  // Effective mode honors the admin-selected override (system_settings) over
+  // the VIBE_AI_MODE env. A runtime switch to router re-registers from the
+  // admin endpoint, so boot only needs the mode as of now.
+  const bootAiMode = await resolveAiMode(db);
   app.listen(port, () => {
     logger.info({ port }, 'api listening');
     // MIG-6: router mode only; non-blocking with retry — AI paths fail
     // closed at the router until registration lands, which is correct.
-    if (aiMode() === 'router') {
+    if (bootAiMode === 'router') {
       registerTxconvTaskClasses({
         baseUrl: process.env.VIBE_AI_ROUTER_URL ?? '',
         token: process.env.VIBE_AI_TOKEN ?? '',

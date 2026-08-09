@@ -31,19 +31,26 @@ import {
   type EngineKey,
 } from '../services/engines.js';
 import {
-  aiMode,
+  AI_MODE_KEY,
   buildProvider,
   invalidateProviderCache,
   isAnthropicViaGateway,
   providerOrderFor,
+  resolveAiModeInfo,
   resolveAnthropicBaseUrl,
   resolveLlmTimeoutMs,
   resolveLlmMaxTokens,
   resolveProviderPolicy,
+  routerConfigured,
   type LlmProviderPolicy,
 } from '../services/llm-provider.js';
+import { upsertSetting } from '../services/system-settings.js';
 import { listAiSettings, resolveAiSettings, setAiSetting } from '../services/ai-settings.js';
-import { probeGlmOcrHealth, probeVibeOcrHealth } from '@vibe-tx-converter/extractor';
+import {
+  probeGlmOcrHealth,
+  probeVibeOcrHealth,
+  registerTxconvTaskClasses,
+} from '@vibe-tx-converter/extractor';
 import {
   enrichmentPromptStatus,
   enrichmentToggleStatus,
@@ -238,9 +245,14 @@ export const adminRouter = (): Router => {
         (await readSingleSetting(db, OLLAMA_VISION_MODEL_KEY)) ??
         process.env.OLLAMA_VISION_MODEL ??
         DEFAULT_OLLAMA_VISION_MODEL;
+      const aiModeInfo = await resolveAiModeInfo(db);
       res.json({
         // MIG-6: router mode makes every provider setting below inert.
-        aiMode: aiMode(),
+        // Admin-selectable (DB) with the VIBE_AI_MODE env as the default.
+        aiMode: aiModeInfo.mode,
+        aiModeSource: aiModeInfo.source,
+        routerConfigured: routerConfigured(),
+        routerUrl: process.env.VIBE_AI_ROUTER_URL ?? null,
         // Primary provider — what runs first when extraction starts.
         // Pre-policy clients read this field; new clients read `policy`.
         provider: primary,
@@ -339,6 +351,47 @@ export const adminRouter = (): Router => {
       });
       const { primary } = providerOrderFor(policy);
       res.json({ ok: true, policy, provider: primary });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // Admin-selectable AI mode: router (appliance Vibe AI Router serves the
+  // text passes) vs direct (the provider settings on this page). '' resets
+  // to the VIBE_AI_MODE env default. Router mode is only offered when the
+  // env carries the router URL + token — without them every text pass would
+  // fail at request time.
+  router.post('/llm-provider/ai-mode', async (req, res, next) => {
+    try {
+      const raw = String(req.body?.mode ?? '').trim();
+      if (raw !== 'router' && raw !== 'direct' && raw !== '')
+        throw new ValidationError(`mode must be 'router', 'direct', or '' (reset to env default)`);
+      if (raw === 'router' && !routerConfigured())
+        throw new ValidationError(
+          'Router mode requires VIBE_AI_ROUTER_URL and VIBE_AI_TOKEN in the environment ' +
+            '(the appliance mints the token during "vibe enable").',
+        );
+      await upsertSetting(db, AI_MODE_KEY, raw === '' ? null : raw, req.user!.id);
+      invalidateProviderCache();
+      await writeAudit(db, {
+        actorUserId: req.user!.id,
+        entityType: 'system_settings',
+        entityId: AI_MODE_KEY,
+        action: 'llm-provider.ai-mode.change',
+        payload: { mode: raw === '' ? null : raw },
+      });
+      const info = await resolveAiModeInfo(db);
+      // Boot only registers task classes when it STARTS in router mode, so a
+      // runtime switch must register them here (idempotent, retries inside).
+      if (info.mode === 'router') {
+        registerTxconvTaskClasses({
+          baseUrl: process.env.VIBE_AI_ROUTER_URL ?? '',
+          token: process.env.VIBE_AI_TOKEN ?? '',
+          version: process.env.npm_package_version,
+          log: (level, msg) => logger[level]({}, `vibe-router: ${msg}`),
+        });
+      }
+      res.json({ ok: true, aiMode: info.mode, aiModeSource: info.source });
     } catch (err) {
       next(err);
     }
