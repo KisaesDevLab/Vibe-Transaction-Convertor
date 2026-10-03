@@ -2,7 +2,7 @@ import type { NextFunction, Request, RequestHandler, Response } from 'express';
 
 import { db } from '../db/client.js';
 import type { Session, User } from '../db/types.js';
-import { cookieSecure } from '../lib/cookie-flags.js';
+import { cookieDomain, cookiePath, cookieSecure } from '../lib/cookie-flags.js';
 import { AuthError, ForbiddenError } from '../lib/errors.js';
 import { getSession, maybeRollSession } from '../services/auth.js';
 import { loadFeatureAccess } from '../services/feature-access.js';
@@ -22,7 +22,27 @@ declare global {
 
 export const SESSION_COOKIE = 'vibetc_session';
 
-const readSessionId = (req: Request): string | undefined => {
+// One definition of the session cookie for password login, SSO sign-in
+// (lib/vibe-auth.ts) and the rolling re-issue below. clearCookie must echo
+// the same domain/path used at set-time, or the browser keeps the original
+// cookie around (cookies are identified by the (name, domain, path) triple).
+export const setSessionCookie = (res: Response, sessionId: string, expiresAt: Date): void => {
+  res.cookie(SESSION_COOKIE, sessionId, {
+    httpOnly: true,
+    sameSite: 'lax',
+    secure: cookieSecure(),
+    signed: true,
+    expires: expiresAt,
+    domain: cookieDomain(),
+    path: cookiePath(),
+  });
+};
+
+export const clearSessionCookie = (res: Response): void => {
+  res.clearCookie(SESSION_COOKIE, { domain: cookieDomain(), path: cookiePath() });
+};
+
+export const readSessionCookie = (req: Request): string | undefined => {
   const signed = req.signedCookies?.[SESSION_COOKIE];
   if (typeof signed === 'string' && signed.length > 0) return signed;
   return undefined;
@@ -30,7 +50,7 @@ const readSessionId = (req: Request): string | undefined => {
 
 export const loadSession: RequestHandler = async (req, res, next) => {
   try {
-    const sid = readSessionId(req);
+    const sid = readSessionCookie(req);
     if (!sid) return next();
     const ctx = await getSession(db, sid);
     if (!ctx) return next();
@@ -41,13 +61,7 @@ export const loadSession: RequestHandler = async (req, res, next) => {
     // keeps rolling but the browser drops the cookie at the original
     // deadline.
     if (session.expiresAt.getTime() !== before) {
-      res.cookie(SESSION_COOKIE, sid, {
-        httpOnly: true,
-        sameSite: 'lax',
-        secure: cookieSecure(),
-        signed: true,
-        expires: session.expiresAt,
-      });
+      setSessionCookie(res, sid, session.expiresAt);
     }
     req.user = ctx.user;
     req.session = session;

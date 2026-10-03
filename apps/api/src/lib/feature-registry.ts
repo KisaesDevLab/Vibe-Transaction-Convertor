@@ -102,6 +102,13 @@ export const FEATURE_DEFS: readonly FeatureDef[] = [
       'Manage per-user feature access (this page). At least one admin must always keep it.',
   },
   {
+    key: 'admin.authentication',
+    label: 'Authentication (SSO)',
+    area: 'admin',
+    description:
+      'Configure Vibe Auth single sign-on: sign-in mode, identity provider, and role mapping.',
+  },
+  {
     key: 'admin.llmProvider',
     label: 'LLM Provider',
     area: 'admin',

@@ -143,6 +143,11 @@ export function AdminHomePage() {
               Access →
             </Link>
           ) : null}
+          {hasFeature(features, FEATURE.adminAuthentication) ? (
+            <Link to="/admin/authentication" className="text-accent hover:underline">
+              Authentication →
+            </Link>
+          ) : null}
           {canAudit ? (
             <Link to="/admin/audit" className="text-accent hover:underline">
               Audit log →

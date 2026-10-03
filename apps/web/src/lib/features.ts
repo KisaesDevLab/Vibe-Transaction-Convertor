@@ -19,6 +19,7 @@ export const FEATURE = {
   adminHome: 'admin.home',
   adminUsers: 'admin.users',
   adminAccessControl: 'admin.accessControl',
+  adminAuthentication: 'admin.authentication',
   adminLlmProvider: 'admin.llmProvider',
   adminAudit: 'admin.audit',
   adminDiagnostics: 'admin.diagnostics',

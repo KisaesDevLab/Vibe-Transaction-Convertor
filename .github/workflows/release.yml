@@ -80,6 +80,10 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: BUILD_SHA=${{ github.sha }}
+          # Read access to @kisaesdevlab/vibe-auth on GitHub Packages
+          # (ADR-027); mounted only for the install step, never in a layer.
+          secrets: |
+            NODE_AUTH_TOKEN=${{ secrets.GITHUB_TOKEN }}
           provenance: true
           sbom: true
 

@@ -4,6 +4,7 @@ import { runMigrations } from './db/migrate.js';
 import { startWorkers } from './jobs/index.js';
 import { runBootChecks } from './lib/boot-checks.js';
 import { logger } from './lib/logger.js';
+import { createTxVibeAuth } from './lib/vibe-auth.js';
 import { resolveAiMode } from './services/llm-provider.js';
 import { seedFidirIfEmpty } from './services/fidir-seeder.js';
 import { createApp } from './server.js';
@@ -34,7 +35,23 @@ const main = async (): Promise<void> => {
     logger.warn({ err }, 'fidir bootstrap seed failed; continuing');
   }
   startWorkers();
-  const app = createApp();
+  // Vibe Auth SSO (ADR-027). start() never throws for IdP trouble — its one
+  // refusal is oidc_only without an active break-glass user, and that must
+  // abort the boot. In local mode (the default) it makes no network calls.
+  const vibeAuth = createTxVibeAuth();
+  await vibeAuth.auth.start();
+  {
+    const s = vibeAuth.auth.status();
+    logger.info(
+      {
+        mode: s.mode,
+        sso: s.oidc.enabled ? s.oidc.issuer : 'off',
+        prefix: vibeAuth.spaPrefix || '/',
+      },
+      'vibe-auth ready',
+    );
+  }
+  const app = createApp({ vibeAuth });
   // Effective mode honors the admin-selected override (system_settings) over
   // the VIBE_AI_MODE env. A runtime switch to router re-registers from the
   // admin endpoint, so boot only needs the mode as of now.

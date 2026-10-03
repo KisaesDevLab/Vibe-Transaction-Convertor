@@ -80,11 +80,17 @@ export function AppShell({ children }: { children: ReactNode }) {
             <button
               type="button"
               className="rounded-md border border-surface-muted px-3 py-1 text-sm hover:bg-surface-subtle"
-              onClick={() =>
+              onClick={() => {
+                // SSO sessions sign out at the IdP too (RP-initiated logout);
+                // the engine ends the local session and redirects back.
+                if (me.data?.sso) {
+                  window.location.assign(withBase('/auth/oidc/logout'));
+                  return;
+                }
                 logout.mutate(undefined, {
                   onSuccess: () => window.location.assign(withBase('/login')),
-                })
-              }
+                });
+              }}
             >
               Sign out
             </button>

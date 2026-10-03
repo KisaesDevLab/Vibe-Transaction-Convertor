@@ -19,6 +19,42 @@ const SESSION_LIFETIME_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 
 export const newSessionId = (): string => randomBytes(32).toString('hex');
 
+export const hashPassword = (password: string): Promise<string> =>
+  argon2.hash(password, ARGON2_OPTS);
+
+export const verifyPassword = (hash: string, password: string): Promise<boolean> =>
+  argon2.verify(hash, password).catch(() => false);
+
+// OIDC identity carried by sessions born from a Vibe Auth sign-in
+// (ADR-027). idTokenWrapped is already AES-GCM-wrapped by the caller.
+export interface SessionOidc {
+  issuer: string;
+  subject: string;
+  sid?: string;
+  idTokenWrapped?: string;
+}
+
+// Inserts a session row. Shared by password login and the Vibe Auth
+// SessionAdapter so both produce the same row shape and lifetime.
+export const createSession = async (
+  db: Db,
+  userId: string,
+  oidc?: SessionOidc,
+): Promise<{ sessionId: string; expiresAt: Date }> => {
+  const sessionId = newSessionId();
+  const expiresAt = new Date(Date.now() + SESSION_LIFETIME_MS);
+  await db.insert(sessions).values({
+    id: sessionId,
+    userId,
+    expiresAt,
+    oidcIssuer: oidc?.issuer ?? null,
+    oidcSubject: oidc?.subject ?? null,
+    oidcSid: oidc?.sid ?? null,
+    oidcIdToken: oidc?.idTokenWrapped ?? null,
+  });
+  return { sessionId, expiresAt };
+};
+
 const normalizeEmail = (email: string): string => email.trim().toLowerCase();
 
 export interface RegisterInput {
@@ -61,7 +97,7 @@ export const register = async (
     throw new ConflictError('email already registered');
   }
 
-  const passwordHash = await argon2.hash(input.password, ARGON2_OPTS);
+  const passwordHash = await hashPassword(input.password);
 
   const [created] = await db
     .insert(users)
@@ -106,13 +142,13 @@ export const login = async (db: Db, input: LoginInput): Promise<LoginResult> => 
   if (!user) {
     throw new AuthError('invalid email or password');
   }
-  const ok = await argon2.verify(user.passwordHash, input.password);
-  if (!ok) {
+  const ok = await verifyPassword(user.passwordHash, input.password);
+  // A disabled account (ADR-027) gets the same answer as a wrong password
+  // so the response does not reveal which accounts exist.
+  if (!ok || user.disabledAt) {
     throw new AuthError('invalid email or password');
   }
-  const sessionId = newSessionId();
-  const expiresAt = new Date(Date.now() + SESSION_LIFETIME_MS);
-  await db.insert(sessions).values({ id: sessionId, userId: user.id, expiresAt });
+  const { sessionId, expiresAt } = await createSession(db, user.id);
   await writeAudit(db, {
     actorUserId: user.id,
     entityType: 'user',
@@ -155,7 +191,7 @@ export const getSession = async (
   if (!session) return null;
   const userRows = await db.select().from(users).where(eq(users.id, session.userId));
   const user = userRows[0];
-  if (!user) return null;
+  if (!user || user.disabledAt) return null;
   return { user, session };
 };
 
@@ -176,9 +212,9 @@ export const changePassword = async (
   next: string,
 ): Promise<void> => {
   validatePassword(next);
-  const ok = await argon2.verify(user.passwordHash, current);
+  const ok = await verifyPassword(user.passwordHash, current);
   if (!ok) throw new AuthError('current password is incorrect');
-  const passwordHash = await argon2.hash(next, ARGON2_OPTS);
+  const passwordHash = await hashPassword(next);
   await db
     .update(users)
     .set({ passwordHash, updatedAt: sql`now()` })
@@ -207,7 +243,7 @@ export const adminResetPassword = async (
 ): Promise<{ temporaryPassword: string }> => {
   if (actor.role !== 'admin') throw new ForbiddenError();
   const temp = randomBytes(12).toString('base64url');
-  const passwordHash = await argon2.hash(temp, ARGON2_OPTS);
+  const passwordHash = await hashPassword(temp);
   await db
     .update(users)
     .set({ passwordHash, updatedAt: sql`now()` })

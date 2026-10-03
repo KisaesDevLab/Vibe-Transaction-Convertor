@@ -14,6 +14,7 @@ import { LoginPage } from './pages/LoginPage';
 import { RegisterFirstAdminPage } from './pages/RegisterFirstAdminPage';
 import { AdminHomePage } from './pages/AdminHomePage';
 import { AuditLogPage } from './pages/AuditLogPage';
+import { AuthenticationAdminPage } from './pages/AuthenticationAdminPage';
 import { BackupAdminPage } from './pages/BackupAdminPage';
 import { CategoryAdminPage } from './pages/CategoryAdminPage';
 import { DiagnosticsPage } from './pages/DiagnosticsPage';
@@ -33,6 +34,7 @@ export function App() {
   return (
     <Routes>
       <Route path="/login" element={<LoginPage />} />
+      <Route path="/login/local" element={<LoginPage breakglass />} />
       <Route path="/register" element={<RegisterFirstAdminPage />} />
       <Route
         path="/*"
@@ -146,6 +148,16 @@ export function App() {
                     <AdminGate>
                       <FeatureGate feature={FEATURE.adminAccessControl}>
                         <AccessAdminPage />
+                      </FeatureGate>
+                    </AdminGate>
+                  }
+                />
+                <Route
+                  path="/admin/authentication"
+                  element={
+                    <AdminGate>
+                      <FeatureGate feature={FEATURE.adminAuthentication}>
+                        <AuthenticationAdminPage />
                       </FeatureGate>
                     </AdminGate>
                   }

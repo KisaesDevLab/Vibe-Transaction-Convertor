@@ -24,6 +24,10 @@ const setCookie = (res: Response, token: string): void => {
 
 const exemptPaths = new Set<string>([
   '/api/auth/login', // login uses rate limiting, not CSRF (Phase 6)
+  // Vibe Auth back-channel logout (ADR-027): a server-to-server form POST
+  // from the IdP, which holds no CSRF cookie. It is authenticated by the
+  // signed logout token the engine validates instead.
+  '/auth/oidc/backchannel',
 ]);
 
 export const csrf = (): RequestHandler => (req: Request, res: Response, next: NextFunction) => {

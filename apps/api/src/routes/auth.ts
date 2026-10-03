@@ -1,14 +1,20 @@
-import { Router } from 'express';
+import { Router, type RequestHandler } from 'express';
 import { eq, sql } from 'drizzle-orm';
+import type { VibeAuth } from '@kisaesdevlab/vibe-auth';
 
 import { db } from '../db/client.js';
 import { sessions, users } from '../db/schema.js';
-import { cookieDomain, cookiePath, cookieSecure } from '../lib/cookie-flags.js';
-import { AuthError, ValidationError } from '../lib/errors.js';
+import { AuthError, ForbiddenError, ValidationError } from '../lib/errors.js';
 import { defaultFeatureAccess } from '../lib/feature-registry.js';
 import { csrfTokenHandler } from '../middleware/csrf.js';
 import { loginRateLimit } from '../middleware/login-rate-limit.js';
-import { SESSION_COOKIE, requireAdmin, requireAuth } from '../middleware/auth.js';
+import {
+  clearSessionCookie,
+  readSessionCookie,
+  requireAdmin,
+  requireAuth,
+  setSessionCookie,
+} from '../middleware/auth.js';
 import {
   adminCreateStaff,
   adminResetPassword,
@@ -32,7 +38,20 @@ const safeUser = (u: {
   createdAt: u.createdAt,
 });
 
-export const authRouter = (): Router => {
+// Vibe Auth (ADR-027): in oidc_only mode password login is refused for
+// everyone but the break-glass account. Same error shape as every other
+// 403 so the SPA shows the message as-is.
+const localLoginGuard =
+  (vibeAuth: VibeAuth | undefined): RequestHandler =>
+  (req, _res, next) => {
+    if (!vibeAuth) return next();
+    const email = typeof req.body?.email === 'string' ? req.body.email : '';
+    const verdict = vibeAuth.localLoginAllowed(email);
+    if (verdict.allowed) return next();
+    next(new ForbiddenError('Local sign-in is disabled; use single sign-on.'));
+  };
+
+export const authRouter = (vibeAuth?: VibeAuth): Router => {
   const router = Router();
 
   router.get('/csrf', csrfTokenHandler);
@@ -48,6 +67,11 @@ export const authRouter = (): Router => {
 
   router.post('/register', async (req, res, next) => {
     try {
+      // First-admin bootstrap creates a local password account, which
+      // oidc_only exists to forbid. Admins provision via the IdP instead.
+      if (vibeAuth?.mode === 'oidc_only') {
+        throw new ForbiddenError('Registration is disabled; sign in with single sign-on.');
+      }
       const { email, password, displayName } = req.body ?? {};
       if (
         typeof email !== 'string' ||
@@ -67,21 +91,19 @@ export const authRouter = (): Router => {
     }
   });
 
-  router.post('/login', loginRateLimit, async (req, res, next) => {
+  router.post('/login', loginRateLimit, localLoginGuard(vibeAuth), async (req, res, next) => {
     try {
       const { email, password } = req.body ?? {};
       if (typeof email !== 'string' || typeof password !== 'string') {
         throw new ValidationError('email and password are required');
       }
       const result = await login(db, { email, password });
-      res.cookie(SESSION_COOKIE, result.sessionId, {
-        httpOnly: true,
-        sameSite: 'lax',
-        secure: cookieSecure(),
-        signed: true,
-        expires: result.expiresAt,
-        domain: cookieDomain(),
-        path: cookiePath(),
+      setSessionCookie(res, result.sessionId, result.expiresAt);
+      // Audits break-glass use (vibe.auth.breakglass.used); no-op otherwise.
+      await vibeAuth?.afterLocalLogin({
+        userId: result.user.id,
+        email,
+        ...(req.ip ? { ip: req.ip } : {}),
       });
       res.json({ user: safeUser(result.user) });
     } catch (err) {
@@ -91,14 +113,11 @@ export const authRouter = (): Router => {
 
   router.post('/logout', async (req, res, next) => {
     try {
-      const sid = req.signedCookies?.[SESSION_COOKIE] as string | undefined;
+      const sid = readSessionCookie(req);
       if (sid) {
         await logout(db, sid);
       }
-      // clearCookie must echo the same domain/path used at set-time, or
-      // the browser keeps the original cookie around (cookies are
-      // identified by the (name, domain, path) triple).
-      res.clearCookie(SESSION_COOKIE, { domain: cookieDomain(), path: cookiePath() });
+      clearSessionCookie(res);
       res.json({ ok: true });
     } catch (err) {
       next(err);
@@ -110,7 +129,13 @@ export const authRouter = (): Router => {
       if (!req.user) throw new AuthError();
       // featureAccess is set by loadSession; fall back to fully-enabled
       // so the SPA never hides everything if it's somehow absent.
-      res.json({ user: safeUser(req.user), features: req.featureAccess ?? defaultFeatureAccess() });
+      res.json({
+        user: safeUser(req.user),
+        features: req.featureAccess ?? defaultFeatureAccess(),
+        // SSO-born sessions sign out through /auth/oidc/logout so the IdP
+        // session ends too (RP-initiated logout).
+        sso: Boolean(req.session?.oidcSubject),
+      });
     } catch (err) {
       next(err);
     }

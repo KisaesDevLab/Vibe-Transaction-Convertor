@@ -134,6 +134,7 @@ services:
       context: .
       args:
         BUILD_SHA: ${BUILD_SHA:-unknown}
+      secrets: [NODE_AUTH_TOKEN]
     profiles: ['standalone']
     environment:
       <<: *api-env
@@ -173,6 +174,7 @@ services:
       context: .
       args:
         BUILD_SHA: ${BUILD_SHA:-unknown}
+      secrets: [NODE_AUTH_TOKEN]
     profiles: ['standalone']
     command: ['node', 'apps/api/dist/jobs/run-worker.js']
     environment:
@@ -210,6 +212,12 @@ services:
     depends_on:
       api:
         condition: service_healthy
+
+# Build-time only: read token for @kisaesdevlab/vibe-auth on GitHub
+# Packages (ADR-027). Export NODE_AUTH_TOKEN before `docker compose build`.
+secrets:
+  NODE_AUTH_TOKEN:
+    environment: NODE_AUTH_TOKEN
 
 volumes:
   vibetc-pgdata:

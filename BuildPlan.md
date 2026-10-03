@@ -436,6 +436,8 @@ Goal: A working Bank Picker requires the FIDIR data parsed and queryable.
 
 Goal: Cookie-session auth, single-firm-per-host, no SSO.
 
+> **Amended 2026-10-02 (ADR-027):** opt-in single sign-on via Vibe Auth (`@kisaesdevlab/vibe-auth`) layers on top of this session model. `VIBE_AUTH_MODE=local` (default) keeps the behaviour below unchanged. See `docs/sso.md`.
+
 1. Install `argon2`, `iron-session` (or roll a Postgres-backed session table; choose `iron-session` for the cookie wrapper but persist server-side in `sessions` table).
 2. Implement `apps/api/src/services/auth.ts` with `register`, `login`, `logout`, `getSession`, `requireUser`.
 3. `register` is gated: only callable when zero users exist OR by an existing admin. Returns 409 otherwise.
@@ -1802,6 +1804,18 @@ packages/fidir/src/
 | `VIBETC_DESKEW`                | no          | `false`                        | reserved for v2                                                                        |
 | `VIBETC_EXTRACTION_TIMEOUT_MS` | no          | `600000`                       | per-job timeout                                                                        |
 | `AUDIT_RETENTION_DAYS`         | no          | unset (keep forever)           | audit pruning                                                                          |
+| `VIBE_AUTH_MODE`               | no          | `local`                        | `local` \| `both` \| `oidc_only` (ADR-027); admin UI overrides                         |
+| `VIBE_OIDC_ISSUER`             | conditional | —                              | Vibe Auth issuer URL; required for `both`/`oidc_only` unless set in the admin UI       |
+| `VIBE_OIDC_INTERNAL_BASE`      | no          | —                              | container-internal base for server-to-server OIDC calls (Appliance)                    |
+| `VIBE_OIDC_CLIENT_ID`          | conditional | —                              | OIDC client id (written by the Appliance on registration)                              |
+| `VIBE_OIDC_CLIENT_SECRET`      | conditional | —                              | OIDC client secret (written by the Appliance on registration)                          |
+| `VIBE_OIDC_PUBLIC_URL`         | conditional | —                              | public base URL incl. path prefix; redirect/logout URIs are built from it              |
+| `VIBE_OIDC_IDP_NAME`           | no          | `Vibe Auth`                    | button label on the login page                                                         |
+| `VIBE_OIDC_REQUIRE_MFA_AMR`    | no          | `false`                        | require an MFA `amr` claim from the IdP                                                |
+| `VIBE_OIDC_ROLE_MAP`           | no          | built-in map                   | JSON `{group: role}`; overrides the default group → role map                           |
+| `VIBE_OIDC_DEFAULT_ROLE`       | no          | —                              | role for users with no mapped group (unset = refuse)                                   |
+| `VIBE_OIDC_ALLOW_JIT`          | no          | `true`                         | create users on first SSO sign-in                                                      |
+| `VIBE_BREAKGLASS_USERNAME`     | no          | `vibe-breakglass`              | break-glass local admin username                                                       |
 
 ---
 
@@ -1836,7 +1850,7 @@ These are explicitly deferred. Do not creep into them.
 - Mobile app
 - Public REST API for external callers (the API is internal to the web app)
 - Multi-tenant (more than one firm per host)
-- SSO / SAML / OIDC
+- SAML, and SSO through any provider other than Vibe Auth (Vibe Auth OIDC SSO was brought into scope by ADR-027, 2026-10-02)
 - License/subscription enforcement (PolyForm Internal Use only at source level)
 
 When tempted to implement any of these, stop and surface to the user instead.

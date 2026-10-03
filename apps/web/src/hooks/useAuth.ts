@@ -15,6 +15,9 @@ export interface AuthUser {
 // working while gating code reads `me.data?.features`.
 export interface AuthMe extends AuthUser {
   features: Record<string, boolean>;
+  // True when this session came from Vibe Auth SSO (ADR-027); sign-out
+  // then goes through /auth/oidc/logout so the IdP session ends too.
+  sso: boolean;
 }
 
 export const meKey = ['auth', 'me'] as const;
@@ -24,10 +27,12 @@ export const useMe = () =>
     queryKey: meKey,
     queryFn: async (): Promise<AuthMe | null> => {
       try {
-        const res = await api.get<{ user: AuthUser; features: Record<string, boolean> }>(
-          '/api/auth/me',
-        );
-        return { ...res.user, features: res.features ?? {} };
+        const res = await api.get<{
+          user: AuthUser;
+          features: Record<string, boolean>;
+          sso?: boolean;
+        }>('/api/auth/me');
+        return { ...res.user, features: res.features ?? {}, sso: res.sso === true };
       } catch (err) {
         if (err instanceof ApiError && err.status === 401) return null;
         throw err;
@@ -58,7 +63,7 @@ export const useLogin = () => {
     // refetches. The login response has no feature map (default-on until
     // /me resolves), so seed an empty map and invalidate to fetch it.
     onSuccess: (data) => {
-      qc.setQueryData(meKey, { ...data.user, features: {} });
+      qc.setQueryData(meKey, { ...data.user, features: {}, sso: false });
       void qc.invalidateQueries({ queryKey: meKey });
     },
   });

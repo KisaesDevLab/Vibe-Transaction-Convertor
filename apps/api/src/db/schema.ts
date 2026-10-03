@@ -166,6 +166,9 @@ export const users = vibetc.table('users', {
   passwordHash: text('password_hash').notNull(),
   displayName: text('display_name').notNull(),
   role: userRole('role').notNull(),
+  // ADR-027: set when the account is deactivated (Vibe Auth setActive).
+  // NULL = active. loadSession and password login refuse a disabled user.
+  disabledAt: timestamp('disabled_at', { withTimezone: true }),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
 });
@@ -199,7 +202,53 @@ export const sessions = vibetc.table('sessions', {
     .references(() => users.id, { onDelete: 'cascade' }),
   expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  // ADR-027: set only on sessions born from a Vibe Auth SSO sign-in.
+  // Back-channel logout matches on sid, then issuer+subject. The ID token
+  // is AES-GCM-wrapped (lib/secrets.ts) and kept for id_token_hint.
+  oidcIssuer: text('oidc_issuer'),
+  oidcSubject: text('oidc_subject'),
+  oidcSid: text('oidc_sid'),
+  oidcIdToken: text('oidc_id_token'),
 });
+
+// Vibe Auth client tables (ADR-027), shapes fixed by @kisaesdevlab/vibe-auth
+// (sql/auth_identities.sql). The package reads and writes them through
+// createPgStores; they are declared here so drizzle-kit sees the schema.
+export const authIdentities = vibetc.table(
+  'auth_identities',
+  {
+    id: bigserial('id', { mode: 'number' }).primaryKey(),
+    userId: text('user_id').notNull(),
+    issuer: text('issuer').notNull(),
+    subject: text('subject').notNull(),
+    email: text('email'),
+    emailVerified: boolean('email_verified').notNull().default(false),
+    lastLoginAt: timestamp('last_login_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => ({
+    issuerSubject: uniqueIndex('auth_identities_issuer_subject_uq').on(t.issuer, t.subject),
+    userIdIndex: index('auth_identities_user_id_idx').on(t.userId),
+  }),
+);
+
+export const authSettings = vibetc.table('auth_settings', {
+  key: text('key').primaryKey(),
+  value: jsonb('value').notNull(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+});
+
+export const authRevocations = vibetc.table(
+  'auth_revocations',
+  {
+    subjectKey: text('subject_key').primaryKey(),
+    revokedAt: timestamp('revoked_at', { withTimezone: true }).defaultNow().notNull(),
+    revokedUntil: timestamp('revoked_until', { withTimezone: true }).notNull(),
+  },
+  (t) => ({
+    untilIndex: index('auth_revocations_until_idx').on(t.revokedUntil),
+  }),
+);
 
 export const companies = vibetc.table('companies', {
   id: uuid('id').defaultRandom().primaryKey(),

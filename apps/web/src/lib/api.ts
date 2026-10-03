@@ -36,6 +36,17 @@ const ensureCsrf = async (): Promise<string> => {
   return token;
 };
 
+// fetch() with the CSRF header added to mutating requests. Handed to the
+// @kisaesdevlab/vibe-auth React components (AuthSettingsPage), whose
+// `/auth/settings` writes go through the same CSRF guard as `/api/*`.
+export const csrfFetch: typeof fetch = async (input, init = {}) => {
+  const method = (init.method ?? 'GET').toUpperCase();
+  // The vibe-auth client always passes a plain header object.
+  const headers = { ...(init.headers as Record<string, string> | undefined) };
+  if (method !== 'GET' && method !== 'HEAD') headers['x-csrf-token'] = await ensureCsrf();
+  return fetch(input, { ...init, headers, credentials: 'include' });
+};
+
 export class ApiError extends Error {
   readonly status: number;
   readonly code?: string;

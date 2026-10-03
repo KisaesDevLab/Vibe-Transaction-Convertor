@@ -9,6 +9,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { logger } from './lib/logger.js';
+import type { TxVibeAuth } from './lib/vibe-auth.js';
 import { errorHandler, notFoundHandler } from './middleware/error-handler.js';
 import { loadSession, requireAuth } from './middleware/auth.js';
 import { requireFeature } from './middleware/feature-access.js';
@@ -31,7 +32,14 @@ import { statementsRouter } from './routes/statements.js';
 import { uploadsByAccountRouter, uploadsRawRouter } from './routes/uploads.js';
 import { versionRouter } from './routes/version.js';
 
-export const createApp = (): Express => {
+export interface CreateAppOptions {
+  // Vibe Auth SSO (ADR-027). index.ts builds and starts it; tests that
+  // don't exercise SSO omit it, which leaves `/auth/*` unmounted and the
+  // local-login guard a no-op — the same behaviour as VIBE_AUTH_MODE=local.
+  vibeAuth?: TxVibeAuth;
+}
+
+export const createApp = (opts: CreateAppOptions = {}): Express => {
   const app = express();
   app.disable('x-powered-by');
   app.set('trust proxy', 1);
@@ -103,11 +111,17 @@ export const createApp = (): Express => {
   app.use(apiRateLimiter());
   app.use(csrf());
 
+  // Vibe Auth `/auth/*` routes (ADR-027). After csrf() so the admin
+  // settings mutations keep CSRF protection; the IdP's back-channel logout
+  // is the one exempt path (csrf.ts). Must stay ahead of the SPA catch-all
+  // below, or the OIDC callback gets index.html.
+  if (opts.vibeAuth) app.use(opts.vibeAuth.middleware);
+
   // Public routes — no requireAuth.
   app.get('/api/auth/csrf', csrfTokenHandler);
   app.use('/api/health', healthRouter());
   app.use('/api', versionRouter());
-  app.use('/api/auth', authRouter());
+  app.use('/api/auth', authRouter(opts.vibeAuth?.auth));
 
   // Authenticated routes. Per-feature gates (requireFeature) sit after
   // requireAuth and 403 when a user has the feature disabled; access is

@@ -59,6 +59,9 @@ importers:
 
   apps/api:
     dependencies:
+      '@kisaesdevlab/vibe-auth':
+        specifier: ^1.0.14
+        version: 1.0.14(drizzle-orm@0.33.0(@types/pg@8.20.0)(@types/react@18.3.28)(pg@8.20.0)(react@18.3.1))(express@4.22.1)(react@18.3.1)
       '@vibe-tx-converter/exporters':
         specifier: workspace:*
         version: link:../../packages/exporters
@@ -162,6 +165,9 @@ importers:
       drizzle-kit:
         specifier: ^0.24.2
         version: 0.24.2
+      jose:
+        specifier: ^5.9.6
+        version: 5.10.0
       pdf-lib:
         specifier: ^1.17.1
         version: 1.17.1
@@ -180,6 +186,9 @@ importers:
       '@hookform/resolvers':
         specifier: ^3.9.0
         version: 3.10.0(react-hook-form@7.75.0(react@18.3.1))
+      '@kisaesdevlab/vibe-auth':
+        specifier: ^1.0.14
+        version: 1.0.14(drizzle-orm@0.33.0(@types/pg@8.20.0)(@types/react@18.3.28)(pg@8.20.0)(react@18.3.1))(express@4.22.1)(react@18.3.1)
       '@tanstack/react-query':
         specifier: ^5.51.0
         version: 5.100.9(react@18.3.1)
@@ -389,11 +398,11 @@ packages:
 
   '@esbuild-kit/core-utils@3.3.2':
     resolution: {integrity: sha512-sPRAnw9CdSsRmEtnsl2WXWdyquogVpB3yZ3dgwJfe8zrOzTsV7cJvmwrKVa+0ma5BoiGJ+BoqkMvawbayKUsqQ==}
-    deprecated: 'Merged into tsx: https://tsx.is'
+    deprecated: 'Merged into tsx: https://tsx.hirok.io'
 
   '@esbuild-kit/esm-loader@2.6.5':
     resolution: {integrity: sha512-FxEMIkJKnodyA1OaCUoEvbYRkoZlLZ4d/eXFu9Fh8CbBBgP5EmZxrfTRyN0qpXZ4vOvqnE5YdRdcrmUUXuU+dA==}
-    deprecated: 'Merged into tsx: https://tsx.is'
+    deprecated: 'Merged into tsx: https://tsx.hirok.io'
 
   '@esbuild/aix-ppc64@0.19.12':
     resolution: {integrity: sha512-bmoCYyWdEL3wDQIVbcyzRyeKLgk2WtWLTWz1ZIAZF/EGbNOwSA6ew3PftJ1PqMiOOGu0OyFMzG53L0zqIpPeNA==}
@@ -1053,6 +1062,15 @@ packages:
     resolution: {path: packages/sdk, tarball: https://codeload.github.com/KisaesDevLab/Vibe-AI-Router/tar.gz/68d3e4be867eea5f12856ed2a1132911e5de1ac9}
     version: 0.2.0
     engines: {node: '>=20'}
+
+  '@kisaesdevlab/vibe-auth@1.0.14':
+    resolution: {integrity: sha512-EYVLWsK0Z7jHZvxfaj4NBgoOoMwIhbcuC/Ns2Nk5wgy9Srcr9NUBBFtz0N/7yeFoRqK7+aBcQwVGD+FY7Ozj6g==, tarball: https://npm.pkg.github.com/download/@kisaesdevlab/vibe-auth/1.0.14/946821e2cde8c44902523b6d35a1c35f6d725305}
+    engines: {node: '>=20'}
+    hasBin: true
+    peerDependencies:
+      drizzle-orm: '>=0.34'
+      express: '>=4.18'
+      react: '>=18'
 
   '@msgpackr-extract/msgpackr-extract-darwin-arm64@3.0.3':
     resolution: {integrity: sha512-QZHtlVgbAdy2zAqNA9Gu1UpIuI8Xvsd1v8ic6B2pZmeFnFcMWiPLfWXh7TVw4eGEZ/C9TH281KwhVoeQUKbyjw==}
@@ -1910,6 +1928,7 @@ packages:
   cron-parser@4.9.0:
     resolution: {integrity: sha512-p0SaNjrHOnQeR8/VnfGbmg9te2kfyYSQ7Sc/j/6DtPL3JQvKxmjO9TSjNFpujqV3vEYYBvNNvXSxzyksBWAx1Q==}
     engines: {node: '>=12.0.0'}
+    deprecated: v4 is no longer maintained, upgrade to v5
 
   cross-spawn@7.0.6:
     resolution: {integrity: sha512-uV2QOWP2nWzsy2aMp8aRibhi9dlzF5Hgh5SHaB9OiTGEyDTiJJyx0uy51QXdyWbtAHNua4XJzUKca3OzKUd3vA==}
@@ -2303,6 +2322,7 @@ packages:
   eslint@9.39.4:
     resolution: {integrity: sha512-XoMjdBOwe/esVgEvLmNsD3IRHkm7fbKIUGvrleloJXUZgDHig2IPWNniv+GwjyJXzuNqVjlr5+4yVUZjycJwfQ==}
     engines: {node: ^18.18.0 || ^20.9.0 || >=21.1.0}
+    deprecated: This version is no longer supported. Please see https://eslint.org/version-support for other options.
     hasBin: true
     peerDependencies:
       jiti: '*'
@@ -2808,6 +2828,9 @@ packages:
   jiti@1.21.7:
     resolution: {integrity: sha512-/imKNG4EbWNrVjoNC/1H5/9GFy+tqjGBHCaSsN+P2RnPqjsLmv6UD3Ej+Kj8nBWaRAwyk7kK5ZUc+OEatnTR3A==}
     hasBin: true
+
+  jose@5.10.0:
+    resolution: {integrity: sha512-s+3Al/p9g32Iq+oqXxkW//7jk2Vig6FF1CFqzVXoTUXt2qz89YWbL+OwS17NFYEvxC35n0FKeGO2LGYSxeM2Gg==}
 
   joycon@3.1.1:
     resolution: {integrity: sha512-34wB/Y7MW7bzjKRjUKTa46I2Z7eV62Rkhva+KkopW7Qvv/OSWBqvkSY7vusOPrNuZcUG3tApvdVgNB8POj3SPw==}
@@ -4713,6 +4736,14 @@ snapshots:
       '@jridgewell/sourcemap-codec': 1.5.5
 
   '@kisaes/vibe-ai-client@https://codeload.github.com/KisaesDevLab/Vibe-AI-Router/tar.gz/68d3e4be867eea5f12856ed2a1132911e5de1ac9#path:packages/sdk': {}
+
+  '@kisaesdevlab/vibe-auth@1.0.14(drizzle-orm@0.33.0(@types/pg@8.20.0)(@types/react@18.3.28)(pg@8.20.0)(react@18.3.1))(express@4.22.1)(react@18.3.1)':
+    dependencies:
+      drizzle-orm: 0.33.0(@types/pg@8.20.0)(@types/react@18.3.28)(pg@8.20.0)(react@18.3.1)
+      express: 4.22.1
+      jose: 5.10.0
+      react: 18.3.1
+      zod: 3.25.76
 
   '@msgpackr-extract/msgpackr-extract-darwin-arm64@3.0.3':
     optional: true
@@ -6649,6 +6680,8 @@ snapshots:
       '@pkgjs/parseargs': 0.11.0
 
   jiti@1.21.7: {}
+
+  jose@5.10.0: {}
 
   joycon@3.1.1: {}
 

@@ -20,7 +20,8 @@ explicitly out of scope.
 
 Multi-tenant deployment is **out of scope for v1**: one firm per host,
 no tenant id on any DB row. Public REST API for external callers is out
-of scope. SSO, SAML, OIDC are out of scope.
+of scope. Single sign-on via Vibe Auth (OIDC) is supported and off by default
+(ADR-027, `docs/sso.md`); SAML and other SSO providers are out of scope.
 
 ## Authentication
 

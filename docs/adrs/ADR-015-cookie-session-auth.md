@@ -2,7 +2,8 @@
 
 ## Status
 
-Accepted.
+Accepted. Amended by ADR-027 (2026-10-02): single sign-on via Vibe Auth is
+now supported as an opt-in mode on top of this session model.
 
 ## Context
 
@@ -33,6 +34,8 @@ parallelism: 1`).
   multiple deployments with separate Postgres databases.
 - No SSO, no SAML, no OIDC in v1. First-time setup creates an admin via
   a self-bootstrap page that's only available when zero users exist.
+  _(Superseded by ADR-027: OIDC SSO via Vibe Auth is available, off by
+  default. SAML and other SSO providers remain out of scope.)_
 
 ## Consequences
 

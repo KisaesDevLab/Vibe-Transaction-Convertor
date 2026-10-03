@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@hookform/resolvers": "^3.9.0",
+    "@kisaesdevlab/vibe-auth": "^1.0.14",
     "@tanstack/react-query": "^5.51.0",
     "@vibe-tx-converter/shared": "workspace:*",
     "clsx": "^2.1.1",

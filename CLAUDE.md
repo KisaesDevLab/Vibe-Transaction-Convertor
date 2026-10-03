@@ -18,10 +18,11 @@ When `BuildPlan.md` and this file disagree, `BuildPlan.md` wins. When `BuildPlan
 
 These are repeated throughout `BuildPlan.md` and are the rules most likely to bite if forgotten:
 
-- **Zero outbound network calls at runtime by default.** FIDIR is mirrored at build/admin time, never fetched live. The only carve-out is the optional **Anthropic API** extraction provider (Tier 2), which is opt-in, off by default, and audit-logged on every call.
+- **Zero outbound network calls at runtime by default.** FIDIR is mirrored at build/admin time, never fetched live. The carve-outs are the optional **Anthropic API** extraction provider (Tier 2), which is opt-in, off by default, and audit-logged on every call, and opt-in **Vibe Auth SSO** (ADR-027), which talks only to the configured OIDC issuer.
 - **No telemetry, no phone-home, no analytics SDKs** — regardless of LLM provider.
 - **OCR runs locally on VibeOCR (GLM-OCR fallback); extraction on local Ollama (ADR-026/025, amends ADR-023).** Scanned/image statements are transcribed to markdown by **VibeOCR** — the on-appliance, PDF-native OCR service (the whole PDF is uploaded once and OCR'd server-side; it fronts the GLM-OCR VLM). When VibeOCR is unset/unreachable the worker falls back to the per-page **GLM-OCR** llama-server (OpenAI-compatible `/v1/chat/completions` vision). The engine is chosen by `VIBETC_OCR_ENGINE` (`vibe`|`glm`, default `vibe`). Then the local **Ollama** text model (`qwen2.5:32b-instruct`) extracts the schema JSON from that markdown (two-stage). Text-layer statements skip OCR and go straight to the text model. Check payees are read via GLM-OCR transcribe→text-parse, falling back to the local Ollama vision model **`qwen3-vl:30b`**. OCR output is **cleartext** markdown (no `<ENTITY_N>` tokens, no materialize step).
 - **Page images never leave the firm.** They are processed on-appliance by **GLM-OCR and Ollama** (the only loopback OCR/vision targets) and are never sent anywhere. The optional **Anthropic** provider is **text-only** — it receives cleartext OCR/text-layer markdown (never images) and is the single opt-in egress carve-out (Tier 2), off by default and audit-logged.
+- **SSO is Vibe Auth only, opt-in (ADR-027).** `VIBE_AUTH_MODE=local` is the default and must stay behaviour-identical to pre-SSO. OIDC calls go only to the configured issuer and carry no statement data — the second opt-in egress carve-out after Anthropic.
 - **Golden Rule reconciliation gates exports by default.** User can override but must type-confirm; the override is audit-logged.
 - **v1 is USD-only and en-US (MDY) on every output.** Source PDFs may be in any unambiguous date format; the LLM detects and normalizes to ISO 8601. Truly ambiguous statements halt in `awaiting-locale-confirmation` until the user picks.
 
@@ -48,9 +49,10 @@ Full set is ADR-001 through ADR-020 in §3 of `BuildPlan.md` (and lands in `docs
 - **ADR-016 — Determinism.** Same PDF in → same FITIDs out → same export bytes (modulo `<DTSERVER>`). Re-imports must be idempotent.
 - **ADR-017 — Money is integer cents.** All money in DB and internal APIs is `BIGINT` cents. Decimal-as-string only at the API boundary and in exports. Helpers live in `packages/shared/src/money.ts`.
 - **ADR-019 / ADR-020 — LLM provider abstraction.** All LLM calls go through `LlmProvider.extract(prompt, schema) → ExtractResult`. Two implementations: `LocalGatewayProvider` (default) and `AnthropicProvider`. **Downstream code never branches on provider.** Anthropic API key is AES-256-GCM-encrypted at rest in `system_settings`, key derived from `SESSION_SECRET` via HKDF-SHA256.
+- **ADR-027 — Vibe Auth SSO.** `@kisaesdevlab/vibe-auth` owns `/auth/*` (mounted after `loadSession` and `csrf()`; only `/auth/oidc/backchannel` is CSRF-exempt). SSO sessions are ordinary `sessions` rows plus `oidc_*` columns. Adapters live in `apps/api/src/lib/vibe-auth*.ts`; break-glass CLI adapter in `apps/api/src/vibeAuthAdapter.ts`. Package is on GitHub Packages (`.npmrc` scope line; token in `~/.npmrc` / BuildKit secret `NODE_AUTH_TOKEN`).
 - **ADR-002 — BullMQ extraction jobs are idempotent on `(source_pdf_hash, account_id)`.**
 - **ADR-007 — FIDIR is mirrored at `data/fidir/fidir-us.txt`. No runtime fetches.** Refresh is an explicit admin action.
-- **ADR-015 — Auth is cookie-session, server-side store in Postgres `sessions` table, CSRF token on every mutating endpoint. Single firm per host.** No multi-tenant, no SSO in v1.
+- **ADR-015 — Auth is cookie-session, server-side store in Postgres `sessions` table, CSRF token on every mutating endpoint. Single firm per host.** No multi-tenant. SSO only via Vibe Auth (ADR-027, amends ADR-015).
 
 ## Commands (will exist once Phase 0 lands)
 
@@ -85,7 +87,7 @@ From Appendix D. Refuse and surface if asked:
 - Mobile app
 - Public REST API for external callers
 - Multi-tenant (more than one firm per host)
-- SSO / SAML / OIDC
+- SAML, or SSO through anything other than Vibe Auth
 - License / subscription enforcement (PolyForm Internal Use is source-level only)
 
 ## Working style notes

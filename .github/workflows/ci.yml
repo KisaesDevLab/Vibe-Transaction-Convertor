@@ -24,8 +24,14 @@ jobs:
         with:
           node-version: 24
           cache: pnpm
+          # @kisaesdevlab/vibe-auth lives on GitHub Packages (scope mapped in
+          # .npmrc); setup-node writes the token line for NODE_AUTH_TOKEN.
+          registry-url: https://npm.pkg.github.com
+          scope: '@kisaesdevlab'
 
       - run: pnpm install --frozen-lockfile=false
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - run: pnpm typecheck
       - run: pnpm lint
       # Root pnpm test is already `vitest run --passWithNoTests` so we

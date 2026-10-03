@@ -12,14 +12,21 @@ ENV PNPM_HOME=/pnpm
 ENV PATH=$PNPM_HOME:$PATH
 RUN corepack enable && corepack prepare pnpm@9.15.9 --activate
 
-COPY pnpm-workspace.yaml package.json pnpm-lock.yaml* ./
+COPY pnpm-workspace.yaml package.json pnpm-lock.yaml* .npmrc ./
 COPY tsconfig.base.json tsconfig.json eslint.config.mjs ./
 COPY vibe-app.yaml ./vibe-app.yaml
 COPY apps ./apps
 COPY packages ./packages
 COPY data ./data
 
-RUN pnpm install --frozen-lockfile=false
+# @kisaesdevlab/vibe-auth (ADR-027) comes from GitHub Packages, which
+# wants a token even for reads. It is a BuildKit secret, written to a
+# throwaway user npmrc that never lands in a layer:
+#   docker build --secret id=NODE_AUTH_TOKEN,env=NODE_AUTH_TOKEN .
+RUN --mount=type=secret,id=NODE_AUTH_TOKEN,required=true \
+    printf '//npm.pkg.github.com/:_authToken=%s\n' "$(cat /run/secrets/NODE_AUTH_TOKEN)" > /root/.npmrc \
+    && pnpm install --frozen-lockfile=false \
+    && rm -f /root/.npmrc
 RUN pnpm build
 
 # ----- runtime ----------------------------------------------------------------
@@ -43,6 +50,10 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 ENV NODE_ENV=production
+# Break-glass CLI (ADR-027): the Appliance runs
+#   node /app/apps/api/node_modules/@kisaesdevlab/vibe-auth/dist/cli.js breakglass ensure --json
+# from WORKDIR /app, where there is no package.json naming the adapter.
+ENV VIBE_AUTH_ADAPTER=/app/apps/api/dist/vibeAuthAdapter.js
 ARG BUILD_SHA=unknown
 ENV BUILD_SHA=${BUILD_SHA}
 
