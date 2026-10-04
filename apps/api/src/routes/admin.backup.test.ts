@@ -9,7 +9,7 @@
 // database exactly as it was rather than half-restored.
 
 import { execFile } from 'node:child_process';
-import { readFile, rm } from 'node:fs/promises';
+import { copyFile, mkdir, readFile, rm } from 'node:fs/promises';
 import { migrate } from 'drizzle-orm/node-postgres/migrator';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -19,6 +19,8 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { closeDb, getDb, getPool } from '../db/client.js';
 import { createApp } from '../server.js';
+import { pgConnectionArgs } from '../services/backup.js';
+import { buildProviderForId } from '../services/llm-provider.js';
 
 const execFileP = promisify(execFile);
 
@@ -189,6 +191,73 @@ live('Admin backup + restore (live Postgres)', () => {
     expect(res.status).toBe(400);
   });
 
+  // Restore drops and recreates every schema a dump lists, so a
+  // whole-database dump would wipe another app's schema on a shared
+  // Postgres — unrecoverably, since the safety dump covers vibetc only.
+  it('refuses a whole-database dump on upload and on restore, leaving other schemas alone', async () => {
+    const pool = getPool();
+    await pool.query('DROP SCHEMA IF EXISTS otherapp CASCADE');
+    await pool.query('CREATE SCHEMA otherapp');
+    await pool.query('CREATE TABLE otherapp.keepme (x int)');
+    await pool.query('INSERT INTO otherapp.keepme VALUES (42)');
+    const wholeDb = join(dataDir, 'whole-db.dump');
+    // A host copy that bypasses the upload check, under a name the
+    // restore route accepts.
+    const copied = join(dataDir, 'backups', 'vibetc-2020-03-03T00-00-00-000Z.dump');
+    try {
+      const { args, env } = pgConnectionArgs();
+      await execFileP('pg_dump', ['--format=custom', '--file', wholeDb, ...args], { env });
+      const bytes = await readFile(wholeDb);
+
+      const uploaded = await agent
+        .post('/api/admin/backups/upload')
+        .set('x-csrf-token', csrfToken)
+        .attach('file', bytes, 'whole-db.dump');
+      expect(uploaded.status).toBe(400);
+      expect(uploaded.body.message).toMatch(/schema\(s\) otherapp.*whole-database dump/);
+
+      await copyFile(wholeDb, copied);
+      const before = await companyNames();
+      const backupsBefore = (await agent.get('/api/admin/backups').expect(200)).body.backups;
+      const restored = await agent
+        .post('/api/admin/backups/vibetc-2020-03-03T00-00-00-000Z.dump/restore')
+        .set('x-csrf-token', csrfToken)
+        .send({ confirm: 'RESTORE' });
+      expect(restored.status).toBe(500);
+      expect(restored.body.message).toMatch(/whole-database dump/);
+      const kept = await getPool().query('SELECT x FROM otherapp.keepme');
+      expect(kept.rows).toEqual([{ x: 42 }]);
+      expect(await companyNames()).toEqual(before);
+      // Refused before anything ran — not even the safety dump.
+      expect((await agent.get('/api/admin/backups').expect(200)).body.backups).toEqual(
+        backupsBefore,
+      );
+    } finally {
+      await getPool().query('DROP SCHEMA IF EXISTS otherapp CASCADE');
+      await rm(wholeDb, { force: true });
+      await rm(copied, { force: true });
+    }
+  }, 120_000);
+
+  // A read-stream error with no listener used to be an uncaught
+  // exception that took the whole API down.
+  it('answers a download it cannot read with an error instead of crashing', async () => {
+    const unreadable = join(dataDir, 'backups', 'vibetc-2020-04-04T00-00-00-000Z.dump');
+    await mkdir(unreadable, { recursive: true }); // EISDIR on read
+    try {
+      const res = await agent
+        .get('/api/admin/backups/vibetc-2020-04-04T00-00-00-000Z.dump/file')
+        .set('x-csrf-token', csrfToken);
+      expect(res.status).toBe(500);
+      expect(res.headers['content-type']).toMatch(/application\/json/);
+      expect(res.headers['content-disposition']).toBeUndefined();
+      // ...and the process is still serving.
+      await agent.get('/api/admin/backups').expect(200);
+    } finally {
+      await rm(unreadable, { recursive: true, force: true });
+    }
+  });
+
   it('refuses to restore without the typed confirmation', async () => {
     const res = await agent
       .post(`/api/admin/backups/${filename}/restore`)
@@ -262,6 +331,17 @@ live('Admin backup + restore (live Postgres)', () => {
   it('keeps audit_log append-only after a restore (ADR-013)', async () => {
     await expect(getPool().query('DELETE FROM vibetc.audit_log')).rejects.toThrow(/append-only/);
   });
+
+  it('drops the in-process settings caches, which describe the pre-restore database', async () => {
+    const before = await buildProviderForId(getDb(), 'local');
+    expect(await buildProviderForId(getDb(), 'local')).toBe(before); // served from cache
+    await agent
+      .post(`/api/admin/backups/${filename}/restore`)
+      .set('x-csrf-token', csrfToken)
+      .send({ confirm: 'RESTORE' })
+      .expect(200);
+    expect(await buildProviderForId(getDb(), 'local')).not.toBe(before);
+  }, 120_000);
 
   it('rolls back completely when the restore fails part way through', async () => {
     // The dump grants to vibetc_app; dropping the role makes psql fail

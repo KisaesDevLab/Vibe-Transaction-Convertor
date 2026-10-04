@@ -21,42 +21,66 @@ const live = describe.skipIf(!databaseUrl);
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const migrationsFolder = join(__dirname, '..', 'db', 'migrations');
 
-// Per-test: the checks[] the mocked vision model "reads", and the provider id
-// the resolver asked for (so we can assert it never reaches for Anthropic).
-let mockChecks: Array<{
+type MockCheck = {
   check_number: string;
   payee: string | null;
   amount_cents?: number | null;
-}> = [];
+};
+
+// Per-test: the checks[] the mocked models "read", and the provider id
+// the resolver asked for (so we can assert it never reaches for Anthropic).
+let mockChecks: MockCheck[] = [];
+// What the vision fallback reads; null → same as mockChecks.
+let mockVisionChecks: MockCheck[] | null = null;
 let requestedProviderId = '';
 let fakePngPath = '';
-// GLM-OCR transcription the mock "reads" off the check images. '' triggers the
-// vision fallback (ADR-025). Default non-empty so the primary path runs.
-let mockGlmText = 'Pay to the order of ...';
-// Flipped true when the vision fallback (completeWithImages) is used.
-let usedFallback = false;
+// GLM-OCR transcription the mock "reads" off the check images, per call
+// (0-based). '' triggers the vision fallback for that batch and the rest
+// (ADR-025); throwing simulates GLM-OCR being down.
+let mockGlm: (call: number) => string = () => 'Pay to the order of ...';
+let glmCalls = 0;
+// Vision fallback (completeWithImages) calls; flip visionThrows to simulate
+// qwen3-vl not being pulled.
+let visionCalls = 0;
+let visionThrows = false;
+let textCostMicros = 0n;
+// Rasterizer mock: pages returned, options it was called with, and the page
+// lists handed to removeRasterDir.
+let mockPageCount = 1;
+let rasterizeOpts: unknown;
+let removedRasters: unknown[] = [];
 
 vi.mock('./llm-provider.js', () => ({
   buildProviderForId: vi.fn(async (_db: unknown, id: string) => {
     requestedProviderId = id;
-    const result = {
-      data: { checks: mockChecks },
-      rawJson: JSON.stringify({ checks: mockChecks }),
-      telemetry: { inputTokens: 1, outputTokens: 1, ms: 1, model: 'm', costMicros: 0n },
-    };
+    const telemetry = { inputTokens: 1, outputTokens: 1, ms: 1, model: 'm', costMicros: 0n };
+    const resultFor = (checks: MockCheck[]) => ({
+      data: { checks },
+      rawJson: JSON.stringify({ checks }),
+      telemetry,
+    });
     return {
       id,
       health: async () => ({ ok: true }),
       // PRIMARY: GLM-OCR transcribe → text-parse.
-      ocrImagesToText: async () => ({ text: mockGlmText, ms: 1, model: 'GLM-OCR' }),
-      complete: async () => ({
-        ...result,
-        telemetry: { ...result.telemetry, model: 'qwen2.5:32b-instruct' },
-      }),
+      ocrImagesToText: async () => {
+        const text = mockGlm(glmCalls);
+        glmCalls += 1;
+        return { text, ms: 1, model: 'GLM-OCR' };
+      },
+      complete: async () => {
+        const r = resultFor(mockChecks);
+        return {
+          ...r,
+          telemetry: { ...telemetry, model: 'qwen2.5:32b-instruct', costMicros: textCostMicros },
+        };
+      },
       // FALLBACK: vision model reads the images directly.
       completeWithImages: async () => {
-        usedFallback = true;
-        return { ...result, telemetry: { ...result.telemetry, model: 'qwen3-vl:30b' } };
+        visionCalls += 1;
+        if (visionThrows) throw new Error('model "qwen3-vl:30b" not found');
+        const r = resultFor(mockVisionChecks ?? mockChecks);
+        return { ...r, telemetry: { ...telemetry, model: 'qwen3-vl:30b' } };
       },
     };
   }),
@@ -66,18 +90,22 @@ vi.mock('@vibe-tx-converter/extractor', async (orig) => {
   const actual = await orig<typeof import('@vibe-tx-converter/extractor')>();
   return {
     ...actual,
-    // One fake page (the resolver readFile()s pngPath); batchPageImages + the
-    // prompts/schema stay real.
-    rasterizePdf: vi.fn(async () => [
-      {
-        index: 0,
+    // Fake pages (the resolver readFile()s pngPath); batchPageImages + the
+    // prompts/schema stay real (≤3 pages per batch).
+    rasterizePdf: vi.fn(async (_path: string, opts: unknown) => {
+      rasterizeOpts = opts;
+      return Array.from({ length: mockPageCount }, (_, i) => ({
+        index: i,
         path: fakePngPath,
         pngPath: fakePngPath,
         mediaType: 'image/png' as const,
         width: 0,
         height: 0,
-      },
-    ]),
+      }));
+    }),
+    removeRasterDir: vi.fn(async (pages: unknown) => {
+      removedRasters.push(pages);
+    }),
   };
 });
 
@@ -109,6 +137,9 @@ live('resolveCheckPayees (live Postgres, mocked local vision)', () => {
       });
   };
 
+  const txRows = () =>
+    getDb().select().from(transactions).where(eq(transactions.statementId, stmtId));
+
   beforeAll(async () => {
     dataDir = await mkdtemp(join(tmpdir(), 'vibetc-checkres-'));
     process.env.DATA_DIR = dataDir;
@@ -127,9 +158,16 @@ live('resolveCheckPayees (live Postgres, mocked local vision)', () => {
 
   beforeEach(async () => {
     mockChecks = [];
+    mockVisionChecks = null;
     requestedProviderId = '';
-    mockGlmText = 'Pay to the order of ...';
-    usedFallback = false;
+    mockGlm = () => 'Pay to the order of ...';
+    glmCalls = 0;
+    visionCalls = 0;
+    visionThrows = false;
+    textCostMicros = 0n;
+    mockPageCount = 1;
+    rasterizeOpts = undefined;
+    removedRasters = [];
     await getPool().query(
       'TRUNCATE TABLE vibetc.transactions, vibetc.statements, vibetc.accounts, vibetc.companies, vibetc.users RESTART IDENTITY CASCADE',
     );
@@ -173,32 +211,83 @@ live('resolveCheckPayees (live Postgres, mocked local vision)', () => {
 
     expect(requestedProviderId).toBe('local');
     expect(res.matchedCount).toBe(1);
-    const rows = await getDb()
-      .select()
-      .from(transactions)
-      .where(eq(transactions.statementId, stmtId));
+    const rows = await txRows();
     expect(rows[0]?.payee).toBe('ACME Plumbing LLC');
+    expect(res.updatedTxIds).toEqual([rows[0]!.id]);
     // cleansedDescription is left to enrichment (not clobbered).
     expect(rows[0]?.cleansedDescription).toBeNull();
     // Primary GLM-OCR transcribe→text-parse path succeeded — no vision fallback.
-    expect(usedFallback).toBe(false);
+    expect(visionCalls).toBe(0);
+    // Text-parse leg reported for the audit trail.
+    expect(res.textProviderId).toBe('local');
+    expect(res.textParseCalls).toBe(1);
+    expect(res.textParseCostMicros).toBe(0n);
+    expect(res.skippedUserEditedCount).toBe(0);
+    // Whole PDF (no page_range) → no page restriction.
+    expect(rasterizeOpts).toEqual({ dpi: 300 });
   });
 
   it('falls back to the vision model when GLM-OCR returns no text (ADR-025)', async () => {
     await seedTx({ checkNumber: '1234', description: 'CHECK 1234', amountCents: -250_00n }, 0);
-    mockGlmText = ''; // GLM-OCR transcribed nothing → vision fallback
+    mockGlm = () => ''; // GLM-OCR transcribed nothing → vision fallback
     mockChecks = [{ check_number: '1234', payee: 'Fallback Vendor', amount_cents: 25000 }];
 
     const res = await resolveCheckPayees(getDb(), stmtId);
 
-    expect(usedFallback).toBe(true);
+    expect(visionCalls).toBe(1);
     expect(res.model).toBe('qwen3-vl:30b');
     expect(res.matchedCount).toBe(1);
-    const rows = await getDb()
-      .select()
-      .from(transactions)
-      .where(eq(transactions.statementId, stmtId));
+    // No text-parse call was made.
+    expect(res.textProviderId).toBeNull();
+    expect(res.textParseCalls).toBe(0);
+    const rows = await txRows();
     expect(rows[0]?.payee).toBe('Fallback Vendor');
+  });
+
+  it('re-reads only the batches GLM-OCR could not handle and keeps earlier payees', async () => {
+    // 4 pages → 2 batches (3 + 1). Batch 1 parses on the primary path; GLM-OCR
+    // dies on batch 2, so only batch 2 goes to the vision model.
+    mockPageCount = 4;
+    await seedTx({ checkNumber: '1234', description: 'CHECK 1234', amountCents: -250_00n }, 0);
+    await seedTx({ checkNumber: '5678', description: 'CHECK 5678', amountCents: -75_00n }, 1);
+    mockGlm = (call) => {
+      if (call > 0) throw new Error('GLM-OCR unreachable');
+      return 'Pay to the order of ACME';
+    };
+    mockChecks = [{ check_number: '1234', payee: 'ACME Plumbing LLC', amount_cents: 25000 }];
+    mockVisionChecks = [{ check_number: '5678', payee: 'Late Page Vendor', amount_cents: 7500 }];
+    textCostMicros = 1_234n;
+
+    const res = await resolveCheckPayees(getDb(), stmtId);
+
+    expect(visionCalls).toBe(1);
+    expect(res.matchedCount).toBe(2);
+    expect(res.llmExtractedCount).toBe(2);
+    expect(res.model).toBe('GLM-OCR+qwen2.5:32b-instruct + qwen3-vl:30b');
+    // Accumulated text-parse spend is kept (and lands on the statement ledger).
+    expect(res.costMicros).toBe(1_234n);
+    expect(res.textParseCostMicros).toBe(1_234n);
+    const rows = await txRows();
+    expect(rows.find((r) => r.checkNumber === '1234')?.payee).toBe('ACME Plumbing LLC');
+    expect(rows.find((r) => r.checkNumber === '5678')?.payee).toBe('Late Page Vendor');
+    const [stmt] = await getDb().select().from(statements).where(eq(statements.id, stmtId));
+    expect(stmt?.llmCostMicros).toBe(1_234n);
+  });
+
+  it('keeps primary payees when the vision fallback is unavailable', async () => {
+    mockPageCount = 4;
+    await seedTx({ checkNumber: '1234', description: 'CHECK 1234', amountCents: -250_00n }, 0);
+    mockGlm = (call) => (call > 0 ? '' : 'Pay to the order of ACME');
+    mockChecks = [{ check_number: '1234', payee: 'ACME Plumbing LLC', amount_cents: 25000 }];
+    visionThrows = true; // qwen3-vl not pulled
+
+    const res = await resolveCheckPayees(getDb(), stmtId);
+
+    expect(visionCalls).toBe(1); // tried batch 2 only
+    expect(res.matchedCount).toBe(1);
+    expect(res.model).toBe('GLM-OCR+qwen2.5:32b-instruct');
+    const rows = await txRows();
+    expect(rows[0]?.payee).toBe('ACME Plumbing LLC');
   });
 
   it('disambiguates a reused check number by amount (tiebreak)', async () => {
@@ -208,14 +297,89 @@ live('resolveCheckPayees (live Postgres, mocked local vision)', () => {
 
     const res = await resolveCheckPayees(getDb(), stmtId);
     expect(res.matchedCount).toBe(1);
-    const rows = await getDb()
-      .select()
-      .from(transactions)
-      .where(eq(transactions.statementId, stmtId));
+    const rows = await txRows();
     const big = rows.find((r) => r.amountCents === -300_00n);
     const small = rows.find((r) => r.amountCents === -100_00n);
     expect(big?.payee).toBe('Big Vendor'); // amount matched the $300 check
     expect(small?.payee).toBeNull();
+  });
+
+  it('does not let a sole candidate be claimed by a check with a different amount', async () => {
+    await seedTx({ checkNumber: '1234', description: 'CHECK 1234', amountCents: -250_00n }, 0);
+    await seedTx({ checkNumber: '2000', description: 'CHECK 2000', amountCents: -40_00n }, 1);
+    mockChecks = [
+      // Another account's check 1234 (shared PDF) — amount disagrees.
+      { check_number: '1234', payee: 'Other Account Payee', amount_cents: 99_900 },
+      // No amount on the check → a sole candidate is still accepted.
+      { check_number: '2000', payee: 'No Amount Co', amount_cents: null },
+    ];
+
+    const res = await resolveCheckPayees(getDb(), stmtId);
+
+    expect(res.matchedCount).toBe(1);
+    expect(res.unmatchedCheckNumbers).toEqual(['1234']);
+    const rows = await txRows();
+    expect(rows.find((r) => r.checkNumber === '1234')?.payee).toBeNull();
+    expect(rows.find((r) => r.checkNumber === '2000')?.payee).toBe('No Amount Co');
+  });
+
+  it('never overwrites a payee the operator edited', async () => {
+    await seedTx(
+      {
+        checkNumber: '1234',
+        description: 'CHECK 1234',
+        amountCents: -250_00n,
+        payee: 'Operator Fixed Co',
+        userEdited: true,
+      },
+      0,
+    );
+    // User-edited (e.g. amount fix) but no payee yet → still filled.
+    await seedTx(
+      { checkNumber: '2000', description: 'CHECK 2000', amountCents: -40_00n, userEdited: true },
+      1,
+    );
+    mockChecks = [
+      { check_number: '1234', payee: 'OCR Misread Co', amount_cents: 25000 },
+      { check_number: '2000', payee: 'Filled Co', amount_cents: 4000 },
+    ];
+
+    const res = await resolveCheckPayees(getDb(), stmtId);
+
+    expect(res.matchedCount).toBe(1);
+    expect(res.skippedUserEditedCount).toBe(1);
+    const rows = await txRows();
+    const edited = rows.find((r) => r.checkNumber === '1234');
+    const filled = rows.find((r) => r.checkNumber === '2000');
+    expect(edited?.payee).toBe('Operator Fixed Co');
+    expect(filled?.payee).toBe('Filled Co');
+    expect(res.updatedTxIds).toEqual([filled!.id]);
+  });
+
+  it("renders only a split statement's own page range and removes the page images", async () => {
+    await getDb()
+      .update(statements)
+      .set({ pageRange: { start: 3, end: 4 } })
+      .where(eq(statements.id, stmtId));
+    await seedTx({ checkNumber: '1234', description: 'CHECK 1234', amountCents: -250_00n }, 0);
+    mockPageCount = 2;
+    mockChecks = [{ check_number: '1234', payee: 'ACME Plumbing LLC', amount_cents: 25000 }];
+
+    const res = await resolveCheckPayees(getDb(), stmtId);
+
+    expect(rasterizeOpts).toEqual({ dpi: 300, firstPage: 3, lastPage: 4 });
+    expect(res.pageCount).toBe(2);
+    // Cancelled-check page images are removed once read into memory.
+    expect(removedRasters).toHaveLength(1);
+    expect(removedRasters[0]).toHaveLength(2);
+  });
+
+  it('removes the page images even when the page cap rejects the statement', async () => {
+    await seedTx({ checkNumber: '1234', description: 'CHECK 1234', amountCents: -250_00n }, 0);
+    mockPageCount = 61;
+
+    await expect(resolveCheckPayees(getDb(), stmtId)).rejects.toThrow(/exceeding the cap/);
+    expect(removedRasters).toHaveLength(1);
   });
 
   it('reports check numbers the model saw but no transaction has', async () => {

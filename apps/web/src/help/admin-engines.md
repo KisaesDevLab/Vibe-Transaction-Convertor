@@ -19,7 +19,7 @@ Local model server for both OCR and text extraction. Used when the LLM provider 
 - **URL:** your Ollama base URL, typically `http://localhost:11434` (standalone) or the shared appliance Ollama. A trailing `/v1` is tolerated and stripped.
 - **Timeout:** 60s by default for text; the vision/OCR call gets a longer budget (`OLLAMA_VISION_TIMEOUT_MS`, default 120s).
 
-The text and vision **model tags** are set on `/admin/llm-provider` (defaults `qwen3.5:35b-a3b` for text; a Qwen `-VL` tag for vision). Pull them on the Ollama host first, e.g. `ollama pull qwen3.5:35b-a3b`.
+The text and vision **model tags** are set on `/admin/llm-provider` (defaults `qwen2.5:32b-instruct` for text; a Qwen `-VL` tag for vision). Pull them on the Ollama host first, e.g. `ollama pull qwen2.5:32b-instruct`.
 
 The "Test connection" button hits Ollama's native `/api/tags` endpoint (it has no `/health`).
 

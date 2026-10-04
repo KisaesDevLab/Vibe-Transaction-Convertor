@@ -1,4 +1,4 @@
-import { Router, type Request } from 'express';
+import { Router } from 'express';
 import { eq, desc } from 'drizzle-orm';
 import JSZip from 'jszip';
 import { createReadStream } from 'node:fs';
@@ -12,6 +12,7 @@ import {
   renderExport,
   renderExportSlices,
   type ExportFormat,
+  type RenderedExport,
 } from '../services/exports.js';
 import { writeAudit } from '../services/audit.js';
 
@@ -25,14 +26,22 @@ const VALID: ExportFormat[] = [
   'qfx',
 ];
 
-// Exporting with ?override=true bypasses a reconciliation discrepancy —
-// that IS overriding the variance, so it requires the per-user
-// 'overrideVariance' right. Without it, the flag is ignored (allowOverride
-// stays false) and a discrepant statement fails to export, exactly as if
-// the flag were absent. A verified statement exports normally either way.
-const allowOverrideFor = (req: Request): boolean =>
-  req.query.override === 'true' && req.featureAccess?.overrideVariance !== false;
+// Zip entries are keyed by filename and JSZip silently overwrites a
+// duplicate — refuse instead, so a filename collision can never drop a
+// rendered file while its export job and audit row claim it was delivered.
+const zipExports = async (rendered: RenderedExport[]): Promise<Buffer> => {
+  const zip = new JSZip();
+  for (const r of rendered) {
+    if (zip.file(r.filename)) throw new Error(`duplicate export filename in zip: ${r.filename}`);
+    zip.file(r.filename, r.bytes);
+  }
+  return zip.generateAsync({ type: 'nodebuffer' });
+};
 
+// Export routes never take a per-request override (no `?override=true`): the
+// service gate passes only `verified` statements or ones already
+// `overridden` through the typed-confirmation, audit-logged
+// POST /api/statements/:id/override-reconciliation flow.
 export const exportsRouter = (): Router => {
   const router = Router();
 
@@ -41,11 +50,10 @@ export const exportsRouter = (): Router => {
       const statementId = String(req.params.statementId);
       const format = String(req.params.format) as ExportFormat;
       if (!VALID.includes(format)) throw new ValidationError(`unknown format ${format}`);
-      const allowOverride = allowOverrideFor(req);
       // QBO/QFX get auto-split into 200-tx chunks (Phase 22 item 9). When
       // there's only one slice we send it inline; >1 we wrap in a zip so the
       // client gets a single download.
-      const slices = await renderExportSlices(db, statementId, format, { allowOverride });
+      const slices = await renderExportSlices(db, statementId, format);
       if (slices.length === 1) {
         const result = slices[0]!;
         await recordExportJob(db, req.user!, statementId, result);
@@ -54,13 +62,11 @@ export const exportsRouter = (): Router => {
         res.send(result.bytes);
         return;
       }
-      const zip = new JSZip();
-      for (const r of slices) {
-        zip.file(r.filename, r.bytes);
-        await recordExportJob(db, req.user!, statementId, r);
-      }
-      const bytes = await zip.generateAsync({ type: 'nodebuffer' });
-      const zipName = slices[0]!.filename.replace(/_part\d+\.[^.]+$/, '') + `-split.zip`;
+      // Build the zip before recording anything, so a zip failure can't
+      // leave export jobs claiming a delivery that never happened.
+      const bytes = await zipExports(slices);
+      for (const r of slices) await recordExportJob(db, req.user!, statementId, r);
+      const zipName = `${slices[0]!.baseName}-split.zip`;
       res.setHeader('content-type', 'application/zip');
       res.setHeader('content-disposition', `attachment; filename="${zipName}"`);
       res.send(bytes);
@@ -71,15 +77,13 @@ export const exportsRouter = (): Router => {
 
   // Phase 24 #4: render a format up to the first 30 lines for the
   // ExportPage preview pane. Doesn't persist or audit-log — it's a
-  // read-only render-on-demand. Honors override flag like the real
-  // export endpoint.
+  // read-only render-on-demand behind the same gate as the real export.
   router.get('/:statementId/exports/:format/preview', async (req, res, next) => {
     try {
       const statementId = String(req.params.statementId);
       const format = String(req.params.format) as ExportFormat;
       if (!VALID.includes(format)) throw new ValidationError(`unknown format ${format}`);
-      const allowOverride = allowOverrideFor(req);
-      const result = await renderExport(db, statementId, format, { allowOverride });
+      const result = await renderExport(db, statementId, format);
       // Decode as utf-8 — every format we emit is text. (Some sub-formats
       // might be binary one day; if so, fall back to base64 here.)
       const text = result.bytes.toString('utf8');
@@ -131,19 +135,17 @@ export const exportsRouter = (): Router => {
   router.post('/:statementId/exports-bundle', async (req, res, next) => {
     try {
       const statementId = String(req.params.statementId);
-      const allowOverride = allowOverrideFor(req);
-      const zip = new JSZip();
-      let lastBaseName: string | null = null;
+      // Render EVERY format first, then build the zip, then record the jobs.
+      // A later format failing (e.g. OFX 409s on a statement with no
+      // balances) must not leave earlier formats recorded — export_jobs rows,
+      // files and 'statement.export' audit entries — for a zip never sent.
+      const rendered: RenderedExport[] = [];
       for (const fmt of VALID) {
-        const slices = await renderExportSlices(db, statementId, fmt, { allowOverride });
-        for (const r of slices) {
-          zip.file(r.filename, r.bytes);
-          await recordExportJob(db, req.user!, statementId, r);
-          lastBaseName = r.filename.replace(/(_part\d+)?\.[^.]+$/, '');
-        }
+        rendered.push(...(await renderExportSlices(db, statementId, fmt)));
       }
-      const bytes = await zip.generateAsync({ type: 'nodebuffer' });
-      const zipName = `${lastBaseName ?? `statement-${statementId}`}-bundle.zip`;
+      const bytes = await zipExports(rendered);
+      for (const r of rendered) await recordExportJob(db, req.user!, statementId, r);
+      const zipName = `${rendered[0]?.baseName ?? `statement-${statementId}`}-bundle.zip`;
       res.setHeader('content-type', 'application/zip');
       res.setHeader('content-disposition', `attachment; filename="${zipName}"`);
       res.send(bytes);
@@ -204,7 +206,30 @@ export const exportJobsRouter = (): Router => {
       res.setHeader('content-type', contentType);
       res.setHeader('content-disposition', `attachment; filename="${filename}"`);
       res.setHeader('content-length', job.fileBytes.toString());
-      createReadStream(job.filePath).pipe(res);
+      // The file can vanish or turn unreadable between the stat above and the
+      // open (admin DELETE, the nightly expire-exports sweep, EACCES/EISDIR).
+      // A read-stream 'error' with no listener is an uncaught exception that
+      // takes down the whole API, so handle it: before any byte is sent, drop
+      // the attachment headers and hand a normal JSON error to the error
+      // handler; mid-body, all we can do is abort the response. Destroying the
+      // stream when the response closes releases the fd on aborted downloads.
+      const rs = createReadStream(job.filePath);
+      rs.on('error', (err: Error & { code?: string }) => {
+        if (res.headersSent) {
+          res.destroy(err);
+          return;
+        }
+        res.removeHeader('content-type');
+        res.removeHeader('content-disposition');
+        res.removeHeader('content-length');
+        next(
+          err.code === 'ENOENT'
+            ? new NotFoundError(`export job ${jobId} file is missing on disk`)
+            : err,
+        );
+      });
+      res.on('close', () => rs.destroy());
+      rs.pipe(res);
     } catch (err) {
       next(err);
     }

@@ -57,11 +57,35 @@ export const AccountUpdate = z
     accountNumber: z
       .string()
       .trim()
-      .min(4)
+      .min(4, 'account_number must be at least 4 digits')
       .max(40)
-      .regex(/^[\d-]+$/),
-    routingNumber: z.string().trim().min(1).max(20).optional(),
+      .regex(/^[\d-]+$/, 'account_number must be digits (dashes allowed)'),
+    // null clears the routing number (the account edit form sends null for
+    // an emptied field, and for every credit card); a blank string means
+    // the same.
+    routingNumber: z.preprocess(
+      (v) => (typeof v === 'string' && v.trim() === '' ? null : v),
+      z.string().trim().min(1).max(20).nullable(),
+    ),
     defaultCsvTemplate: CsvTemplate,
   })
-  .partial();
+  .partial()
+  .superRefine((val, ctx) => {
+    // The patch alone; the service re-checks against the stored account
+    // type / routing number, since either may come from the existing row.
+    if (val.accountType === 'CREDITCARD' && typeof val.routingNumber === 'string') {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['routingNumber'],
+        message: 'credit-card accounts must not carry a routing number',
+      });
+    }
+    if (val.accountNumber !== undefined && val.accountNumber.replace(/\D/g, '').length < 4) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['accountNumber'],
+        message: 'account_number must contain at least 4 digits',
+      });
+    }
+  });
 export type AccountUpdate = z.infer<typeof AccountUpdate>;

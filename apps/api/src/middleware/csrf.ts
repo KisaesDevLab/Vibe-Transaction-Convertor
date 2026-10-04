@@ -28,6 +28,10 @@ const exemptPaths = new Set<string>([
   // from the IdP, which holds no CSRF cookie. It is authenticated by the
   // signed logout token the engine validates instead.
   '/auth/oidc/backchannel',
+  // Appliance orchestrator handshake (BuildPlan §29.13 specifies POST): a
+  // server-to-server call with no cookies. Unauthenticated, gated to
+  // internal source IPs (requireInternalNetwork) and free of side effects.
+  '/api/internal/appliance/health',
 ]);
 
 export const csrf = (): RequestHandler => (req: Request, res: Response, next: NextFunction) => {

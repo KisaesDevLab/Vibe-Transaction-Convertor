@@ -1,12 +1,21 @@
 // Detect when a single PDF carries more than one account (household
 // statements). Phase 14 — the splitter UI confirms before extraction.
 //
-// Heuristic: scan each page for any of:
-//   * "Account number: 1234567890"
-//   * "Account ending in 1234" / "Account ending ••••1234"
-//   * "Acct # 1234" / "Account # XXXX1234"
-// Take the LAST 4 visible digits as the account-key per occurrence.
-// If two or more distinct keys appear we flag a multi-account PDF.
+// Biased toward detection: a miss removes the split option entirely (the split
+// UI opens only from detectedSplits), while a false positive is only a
+// dismissible banner. Heuristic:
+//   * Find account-number labels — "Account number: 0012-3456-7890",
+//     "Account Number - 1111222233", "Account ending in 1234" /
+//     "Account ending ••••1234", "Acct # XXXX1234".
+//   * The account key is the LAST 4 digits of the WHOLE grouped/masked number
+//     after the label (never its first digit group).
+//   * Every label hit counts — a lone mid-page section header, a footer-only
+//     number, a header line that also prints a balance or the period — EXCEPT
+//     a hit that names a counterparty account: one on a transaction row (the
+//     line starts with a posting date AND carries a money amount) or in a
+//     transfer description ("ONLINE TRANSFER TO SAV ACCT ENDING IN 5678",
+//     "PAYMENT TO ACCT 9876", "TFR FROM SAV ACCT 5678").
+// Two or more distinct keys → a multi-account PDF.
 
 import type { PageText } from './preprocess.js';
 
@@ -15,10 +24,30 @@ import type { PageText } from './preprocess.js';
 // (transcribed {index, text}) call it.
 export type DetectablePage = Pick<PageText, 'index' | 'text'>;
 
-const ACCOUNT_REGEXES: RegExp[] = [
-  /account\s*(?:number|no\.?|#|ending(?:\s*in)?)\s*[:#-]?\s*(?:•|x|X|\*|-)*(\d{4,})/g,
-  /acct\s*(?:no\.?|#|ending(?:\s*in)?)?\s*[:#-]?\s*(?:•|x|X|\*|-)*(\d{4,})/g,
-];
+// An account-number label (matched on lower-cased text). Word-bounded so
+// "subaccount" / "xacct" don't match.
+const LABEL_RE =
+  /\b(?:account\s*(?:number|num\.?|no\.?|#|ending(?:\s*in)?)|acct\.?\s*(?:number|num\.?|no\.?|#|ending(?:\s*in)?)?)/g;
+// The number right after a label (optional ":" / "#" / "." / dash separator;
+// may sit on the next line). Captures the whole token: digit/mask groups joined
+// by dashes ("0012-3456-7890", "xxxx-xxxx-1234") or by single spaces between
+// 4-character groups ("4147 2000 1234 5678", "xxxx xxxx xxxx 1234").
+const NUMBER_RE = /^\s*[:#.–—-]?\s*([x*•.-]*[\dx*•]+(?:-[\dx*•]+)*(?: [\dx*•]{4}(?![\dx*•]))*)/;
+// A transaction row starts with a (posting) date — also inside a markdown table
+// cell — AND carries a money amount (1,234.56 / 1234.56 / $12.50). A leading
+// date RANGE is the statement period ("03/01/2024 - 03/31/2024 Account …"),
+// i.e. a header line, not a row.
+const LEADING_DATE_RE = /^\s*\|?\s*\d{1,2}[/-]\d{1,2}\b/;
+const LEADING_DATE_RANGE_RE =
+  /^\s*\|?\s*\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?\s*(?:-|–|—|to|thru|through)\s*\d{1,2}[/-]\d{1,2}\b/;
+const MONEY_RE = /(?:^|[\s$(+|-])\$?(?:\d{1,3}(?:,\d{3})+|\d+)\.\d{2}(?!\d|\.\d)/;
+const isTransactionRow = (line: string): boolean =>
+  LEADING_DATE_RE.test(line) && !LEADING_DATE_RANGE_RE.test(line) && MONEY_RE.test(line);
+// A transfer description names the OTHER account of the transfer: transfer
+// wording anywhere before the label, or "to"/"from" right before it (at most
+// one word between: "to acct", "from sav acct").
+const TRANSFER_RE = /\b(?:transfers?|transferred|xfer|trnsfr|tfr|trf)\b/;
+const TO_FROM_ACCT_RE = /\b(?:to|from)\s+(?:[a-z]+\s+)?$/;
 
 export interface AccountOccurrence {
   page: number;
@@ -33,22 +62,29 @@ export interface MultiAccountAnalysis {
   splits: Array<{ last4: string; pageStart: number; pageEnd: number }>;
 }
 
-export const detectMultiAccount = (pages: DetectablePage[]): MultiAccountAnalysis => {
-  const occurrences: AccountOccurrence[] = [];
-  for (const page of pages) {
-    const haystack = page.text.toLowerCase();
-    for (const re of ACCOUNT_REGEXES) {
-      re.lastIndex = 0;
-      let m: RegExpExecArray | null;
-      while ((m = re.exec(haystack)) !== null) {
-        const digits = m[1] ?? '';
-        const last4 = digits.slice(-4);
-        if (last4.length === 4) {
-          occurrences.push({ page: page.index, last4 });
-        }
-      }
-    }
+const findAccountHits = (page: DetectablePage): AccountOccurrence[] => {
+  const text = page.text.toLowerCase();
+  const hits: AccountOccurrence[] = [];
+  LABEL_RE.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = LABEL_RE.exec(text)) !== null) {
+    const labelEnd = m.index + m[0].length;
+    const num = NUMBER_RE.exec(text.slice(labelEnd, labelEnd + 80));
+    const digits = (num?.[1] ?? '').replace(/\D/g, '');
+    if (digits.length < 4) continue;
+    const lineStart = text.lastIndexOf('\n', m.index - 1) + 1;
+    const nl = text.indexOf('\n', m.index);
+    if (isTransactionRow(text.slice(lineStart, nl < 0 ? text.length : nl))) continue;
+    const beforeLabel = text.slice(lineStart, m.index);
+    if (TRANSFER_RE.test(beforeLabel) || TO_FROM_ACCT_RE.test(beforeLabel)) continue;
+    hits.push({ page: page.index, last4: digits.slice(-4) });
   }
+  return hits;
+};
+
+export const detectMultiAccount = (pages: DetectablePage[]): MultiAccountAnalysis => {
+  // Every non-counterparty label hit counts — even a single one (see header).
+  const occurrences = pages.flatMap(findAccountHits);
 
   // Collapse consecutive same-account pages into a single split. If a
   // page has no detection, attribute it to the most recent split.

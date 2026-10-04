@@ -183,12 +183,15 @@ export function BackupAdminPage() {
         throw new ApiError(res.status, body);
       }
       const blob = await res.blob();
+      const objectUrl = URL.createObjectURL(blob);
       const a = document.createElement('a');
-      a.href = URL.createObjectURL(blob);
+      a.href = objectUrl;
       a.download = filename;
       document.body.appendChild(a);
       a.click();
       a.remove();
+      // Dumps can be large: release the blob once the download has started.
+      setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000);
       toast.success(`Downloaded ${filename}`);
     } catch (err) {
       toast.error(err instanceof ApiError ? err.message : 'download failed');

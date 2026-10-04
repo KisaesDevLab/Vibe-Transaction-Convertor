@@ -6,6 +6,7 @@ import { ACCOUNT_TYPE_LABELS } from '@vibe-tx-converter/shared';
 import { AccountFormDialog } from '../components/AccountFormDialog';
 import { DeleteConfirmDialog } from '../components/DeleteConfirmDialog';
 import { useAccounts, useDeleteAccount, type Account } from '../hooks/useAccounts';
+import { useMe } from '../hooks/useAuth';
 import { useCompany, useDeleteCompany, useUpdateCompany } from '../hooks/useCompanies';
 import { ApiError } from '../lib/api';
 
@@ -16,6 +17,11 @@ export function CompanyDetailPage() {
   const company = companyQ.data;
   const accounts = useAccounts(companyId);
   const del = useDeleteAccount(companyId);
+  // ?force=true (cascade the account's statements / transactions / exports)
+  // is admin-only server-side; staff can only delete accounts with no
+  // statements on file.
+  const me = useMe();
+  const isAdmin = me.data?.role === 'admin';
   const updateCompany = useUpdateCompany();
   const deleteCompany = useDeleteCompany();
   const [open, setOpen] = useState(false);
@@ -54,6 +60,9 @@ export function CompanyDetailPage() {
       await deleteCompany.mutateAsync({ id: companyId });
       navigate('/companies');
     } catch (err) {
+      // Close the modal first: showModal() puts it in the top layer, so the
+      // page-level alert would otherwise sit hidden behind its backdrop.
+      (document.getElementById('delete-company-dialog') as HTMLDialogElement | null)?.close();
       setError(err instanceof ApiError ? err.message : 'delete failed');
     }
   };
@@ -245,16 +254,23 @@ export function CompanyDetailPage() {
       <DeleteConfirmDialog
         open={pendingDelete !== null}
         title={`Delete account "${pendingDelete?.nickname ?? ''}"?`}
-        description="All statements, transactions, and exports linked to this account will be removed. The audit log row stays — audit_log is append-only."
+        description={
+          isAdmin
+            ? 'All statements, transactions, and exports linked to this account will be removed. The audit log row stays — audit_log is append-only.'
+            : 'Accounts with statements on file cannot be deleted — delete the statements first. The audit log row stays — audit_log is append-only.'
+        }
         confirmText={pendingDelete?.nickname ?? 'DELETE'}
         busy={del.isPending}
         onClose={() => setPendingDelete(null)}
         onConfirm={async () => {
           if (!pendingDelete) return;
           try {
-            await del.mutateAsync({ id: pendingDelete.id });
+            await del.mutateAsync({ id: pendingDelete.id, force: isAdmin });
             setPendingDelete(null);
           } catch (err) {
+            // Close the dialog first — its z-30 overlay would otherwise hide
+            // the page-level alert.
+            setPendingDelete(null);
             setError(err instanceof ApiError ? err.message : 'delete failed');
           }
         }}

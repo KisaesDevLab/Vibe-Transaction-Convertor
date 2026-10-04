@@ -1,10 +1,11 @@
 import { Router } from 'express';
-import { and, eq, inArray, ne, sql } from 'drizzle-orm';
+import { and, eq, getTableColumns, inArray, sql } from 'drizzle-orm';
 import { unlink } from 'node:fs/promises';
 
 import { db } from '../db/client.js';
 import { accounts, exportJobs, statements, transactions } from '../db/schema.js';
-import { ForbiddenError, NotFoundError, ValidationError } from '../lib/errors.js';
+import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from '../lib/errors.js';
+import { resolveAiSettings } from '../services/ai-settings.js';
 import { deletePdfForStatement } from '../services/pdf-retention.js';
 import { isPdfProcessingStrategy } from '../services/pdf-strategy.js';
 import { logger } from '../lib/logger.js';
@@ -25,7 +26,7 @@ import {
 import { overrideReconciliation } from '../services/exports.js';
 import { recomputeReconciliation } from '../services/reconciliation.js';
 import { computeFitid, inferTrntype, normalizeDescription } from '@vibe-tx-converter/exporters';
-import { findSuspectRows } from '@vibe-tx-converter/reconciler';
+import { findSuspectRows, reconcileGoldenRule } from '@vibe-tx-converter/reconciler';
 import { businessCategories } from '../db/schema.js';
 import { schemas } from '@vibe-tx-converter/shared';
 const { ENRICHMENT_CLEANSED_MAX_LENGTH } = schemas.enrichment;
@@ -37,6 +38,36 @@ const serializeBigint = <T extends Record<string, unknown>>(row: T): T => {
     out[k] = typeof v === 'bigint' ? v.toString() : v;
   }
   return out as T;
+};
+
+// Statement columns returned by the list / detail / progress endpoints.
+// Excludes the stored extracted text (OCR / text-layer markdown, often tens
+// of KB — it has its own /:id/extracted-text endpoint) and the on-disk PDF
+// path (an internal detail; clients address the PDF by its hash). These
+// responses are polled every few seconds, so they stay lean.
+const {
+  extractedText: _extractedText,
+  sourcePdfPath: _sourcePdfPath,
+  ...stmtPublicCols
+} = getTableColumns(statements);
+
+// seq_in_day for a transaction moved onto `date`, given the statement's
+// current rows. It keeps its own seq unless ANOTHER row on that day already
+// holds it — FITID (ADR-005) and the near-duplicate unique index both key on
+// (date, …, seq), so that collision would 23505 — and only then takes the
+// day's next free seq. Keeping it is what makes a date edit reversible:
+// moving a row away and back restores the FITID it was exported under
+// (ADR-016), instead of minting a new one QuickBooks would import as a
+// duplicate.
+const seqForMovedRow = (
+  rows: ReadonlyArray<{ id: string; postedDate: string; seqInDay: number }>,
+  date: string,
+  movedId: string,
+  currentSeq: number,
+): number => {
+  const others = rows.filter((r) => r.postedDate === date && r.id !== movedId);
+  if (!others.some((r) => r.seqInDay === currentSeq)) return currentSeq;
+  return others.reduce((m, r) => Math.max(m, r.seqInDay), -1) + 1;
 };
 
 // Re-extract accepts an optional `strategy` body field. 'default' (or
@@ -73,7 +104,7 @@ export const statementsRouter = (): Router => {
       // statements has no direct company FK.
       if (accountId) {
         const rows = await db
-          .select()
+          .select(stmtPublicCols)
           .from(statements)
           .where(eq(statements.accountId, accountId))
           .orderBy(statements.createdAt);
@@ -82,15 +113,15 @@ export const statementsRouter = (): Router => {
       }
       if (companyId) {
         const joined = await db
-          .select({ stmt: statements })
+          .select(stmtPublicCols)
           .from(statements)
           .innerJoin(accounts, eq(accounts.id, statements.accountId))
           .where(eq(accounts.companyId, companyId))
           .orderBy(statements.createdAt);
-        res.json(joined.map((r) => serializeBigint(r.stmt)));
+        res.json(joined.map((r) => serializeBigint(r)));
         return;
       }
-      const rows = await db.select().from(statements).orderBy(statements.createdAt);
+      const rows = await db.select(stmtPublicCols).from(statements).orderBy(statements.createdAt);
       res.json(rows.map((r) => serializeBigint(r)));
     } catch (err) {
       next(err);
@@ -129,7 +160,10 @@ export const statementsRouter = (): Router => {
   router.get('/:id', async (req, res, next) => {
     try {
       const id = String(req.params.id);
-      const stmtRows = await db.select().from(statements).where(eq(statements.id, id));
+      const stmtRows = await db
+        .select(stmtPublicCols)
+        .from(statements)
+        .where(eq(statements.id, id));
       const stmt = stmtRows[0];
       if (!stmt) throw new NotFoundError(`statement ${id}`);
       const txs = await db
@@ -174,7 +208,13 @@ export const statementsRouter = (): Router => {
           : [];
       const categoryNameById = new Map(categoryRows.map((r) => [r.id, r.name]));
 
+      // The admin-tunable confidence floor the worker's review hold uses
+      // (DB → env → default), so the grid flags the same rows instead of
+      // hard-coding its own threshold.
+      const { reviewConfidence } = await resolveAiSettings(db);
+
       res.json({
+        reviewConfidenceThreshold: reviewConfidence,
         statement: serializeBigint(stmt),
         transactions: txs.map((t) => ({
           ...serializeBigint(t),
@@ -309,6 +349,26 @@ export const statementsRouter = (): Router => {
         updatedAt: sql`now()`,
         ...next,
       };
+      // A row moved to another day keeps its seq_in_day unless a row there
+      // already holds it (then it takes the day's next free seq).
+      let seqInDay = tx.seqInDay;
+      if (next.postedDate !== undefined) {
+        const sameDay = await db
+          .select({
+            id: transactions.id,
+            postedDate: transactions.postedDate,
+            seqInDay: transactions.seqInDay,
+          })
+          .from(transactions)
+          .where(
+            and(
+              eq(transactions.statementId, tx.statementId),
+              eq(transactions.postedDate, next.postedDate),
+            ),
+          );
+        seqInDay = seqForMovedRow(sameDay, next.postedDate, txId, tx.seqInDay);
+        if (seqInDay !== tx.seqInDay) patch.seqInDay = seqInDay;
+      }
       const recomputeFitid =
         next.description !== undefined ||
         next.amountCents !== undefined ||
@@ -318,7 +378,7 @@ export const statementsRouter = (): Router => {
           postedDate: next.postedDate ?? tx.postedDate,
           amountCents: next.amountCents ?? tx.amountCents,
           description: next.description ?? tx.description,
-          seqInDay: tx.seqInDay,
+          seqInDay,
         });
       }
       const [updated] = await db
@@ -331,7 +391,11 @@ export const statementsRouter = (): Router => {
         entityType: 'transaction',
         entityId: txId,
         action: 'transaction.update',
-        payload: { ...next, amountCents: next.amountCents?.toString() } as Record<string, unknown>,
+        payload: {
+          ...next,
+          amountCents: next.amountCents?.toString(),
+          ...(seqInDay !== tx.seqInDay ? { seqInDay } : {}),
+        } as Record<string, unknown>,
       });
       // Phase 16 #16: a manual edit may flip a discrepancy → verified.
       await recomputeReconciliation(db, tx.statementId);
@@ -344,7 +408,9 @@ export const statementsRouter = (): Router => {
   // Phase 18 #15: bulk PATCH. Reviewers commonly fix 5–20 rows at once
   // (TRNTYPE re-mapping, date corrections after locale confirm). Looping
   // per-row through PATCH /transactions/:id costs N round trips; this
-  // does it in one. Recomputes reconciliation once at the end.
+  // does it in one. Recomputes reconciliation once at the end. Atomic:
+  // one invalid edit (or a write error) rolls back the whole batch, its
+  // audit rows included, instead of leaving it half-applied.
   // Body shape: { edits: [{ id, patch: { description?, amount_cents?, trntype?, posted_date? } }] }
   router.patch('/:id/transactions', async (req, res, next) => {
     try {
@@ -363,94 +429,112 @@ export const statementsRouter = (): Router => {
       if (ids.some((id: string) => id.length === 0)) {
         throw new ValidationError('every edit needs an id');
       }
-      const existing = await db
-        .select()
-        .from(transactions)
-        .where(eq(transactions.statementId, statementId));
-      const byId = new Map(existing.map((t) => [t.id, t]));
 
-      const results: Array<{ id: string; status: 'updated' | 'noop' | 'not-found' }> = [];
-      let anyChanged = false;
+      const results = await db.transaction(async (tx) => {
+        const existing = await tx
+          .select()
+          .from(transactions)
+          .where(eq(transactions.statementId, statementId));
+        // Kept current as edits apply, so a later edit (or a later row moved
+        // onto the same day) sees the rows' new dates and seqs.
+        const byId = new Map(existing.map((t) => [t.id, t]));
 
-      for (const edit of edits) {
-        const id = String((edit as { id?: string }).id ?? '');
-        const patchInput = (edit as { patch?: Record<string, unknown> }).patch ?? {};
-        const tx = byId.get(id);
-        if (!tx) {
-          results.push({ id, status: 'not-found' });
-          continue;
-        }
-        const next: {
-          description?: string;
-          normalizedDescription?: string;
-          amountCents?: bigint;
-          trntype?: string;
-          postedDate?: string;
-        } = {};
-        if (typeof patchInput.description === 'string') {
-          const d = patchInput.description.trim();
-          if (d !== tx.description) {
-            next.description = d;
-            next.normalizedDescription = normalizeDescription(d);
+        const out: Array<{ id: string; status: 'updated' | 'noop' | 'not-found' }> = [];
+        let anyChanged = false;
+
+        for (const edit of edits) {
+          const id = String((edit as { id?: string }).id ?? '');
+          const patchInput = (edit as { patch?: Record<string, unknown> }).patch ?? {};
+          const row = byId.get(id);
+          if (!row) {
+            out.push({ id, status: 'not-found' });
+            continue;
           }
-        }
-        if (
-          typeof patchInput.amount_cents === 'number' ||
-          typeof patchInput.amount_cents === 'string'
-        ) {
-          const amt = BigInt(patchInput.amount_cents as string | number);
-          if (amt === 0n) {
-            throw new ValidationError(`amount must be non-zero (row ${id})`);
+          const next: {
+            description?: string;
+            normalizedDescription?: string;
+            amountCents?: bigint;
+            trntype?: string;
+            postedDate?: string;
+          } = {};
+          if (typeof patchInput.description === 'string') {
+            const d = patchInput.description.trim();
+            if (d !== row.description) {
+              next.description = d;
+              next.normalizedDescription = normalizeDescription(d);
+            }
           }
-          if (amt !== tx.amountCents) next.amountCents = amt;
-        }
-        if (typeof patchInput.trntype === 'string' && patchInput.trntype !== tx.trntype) {
-          next.trntype = patchInput.trntype;
-        }
-        if (typeof patchInput.posted_date === 'string') {
-          if (!/^\d{4}-\d{2}-\d{2}$/.test(patchInput.posted_date)) {
-            throw new ValidationError(`posted_date must be YYYY-MM-DD (row ${id})`);
+          if (
+            typeof patchInput.amount_cents === 'number' ||
+            typeof patchInput.amount_cents === 'string'
+          ) {
+            const amt = BigInt(patchInput.amount_cents as string | number);
+            if (amt === 0n) {
+              throw new ValidationError(`amount must be non-zero (row ${id})`);
+            }
+            if (amt !== row.amountCents) next.amountCents = amt;
           }
-          if (patchInput.posted_date !== tx.postedDate) next.postedDate = patchInput.posted_date;
-        }
-        if (Object.keys(next).length === 0) {
-          results.push({ id, status: 'noop' });
-          continue;
-        }
-        const updateSet: Record<string, unknown> = {
-          userEdited: true,
-          updatedAt: sql`now()`,
-          ...next,
-        };
-        const recomputeFitid =
-          next.description !== undefined ||
-          next.amountCents !== undefined ||
-          next.postedDate !== undefined;
-        if (recomputeFitid) {
-          updateSet.fitid = computeFitid({
-            postedDate: next.postedDate ?? tx.postedDate,
-            amountCents: next.amountCents ?? tx.amountCents,
-            description: next.description ?? tx.description,
-            seqInDay: tx.seqInDay,
-          });
-        }
-        await db.update(transactions).set(updateSet).where(eq(transactions.id, id));
-        await writeAudit(db, {
-          actorUserId: req.user!.id,
-          entityType: 'transaction',
-          entityId: id,
-          action: 'transaction.update',
-          payload: {
+          if (typeof patchInput.trntype === 'string' && patchInput.trntype !== row.trntype) {
+            next.trntype = patchInput.trntype;
+          }
+          if (typeof patchInput.posted_date === 'string') {
+            if (!/^\d{4}-\d{2}-\d{2}$/.test(patchInput.posted_date)) {
+              throw new ValidationError(`posted_date must be YYYY-MM-DD (row ${id})`);
+            }
+            if (patchInput.posted_date !== row.postedDate) {
+              next.postedDate = patchInput.posted_date;
+            }
+          }
+          if (Object.keys(next).length === 0) {
+            out.push({ id, status: 'noop' });
+            continue;
+          }
+          const updateSet: Record<string, unknown> = {
+            userEdited: true,
+            updatedAt: sql`now()`,
             ...next,
-            amountCents: next.amountCents?.toString(),
-            bulk: true,
-          } as Record<string, unknown>,
-        });
-        results.push({ id, status: 'updated' });
-        anyChanged = true;
-      }
+          };
+          // A row moved to another day keeps its seq_in_day unless a row there
+          // already holds it (then it takes the day's next free seq).
+          const seqInDay =
+            next.postedDate !== undefined
+              ? seqForMovedRow([...byId.values()], next.postedDate, id, row.seqInDay)
+              : row.seqInDay;
+          if (seqInDay !== row.seqInDay) updateSet.seqInDay = seqInDay;
+          const recomputeFitid =
+            next.description !== undefined ||
+            next.amountCents !== undefined ||
+            next.postedDate !== undefined;
+          const fitid = recomputeFitid
+            ? computeFitid({
+                postedDate: next.postedDate ?? row.postedDate,
+                amountCents: next.amountCents ?? row.amountCents,
+                description: next.description ?? row.description,
+                seqInDay,
+              })
+            : row.fitid;
+          if (recomputeFitid) updateSet.fitid = fitid;
+          await tx.update(transactions).set(updateSet).where(eq(transactions.id, id));
+          byId.set(id, { ...row, ...next, seqInDay, fitid } as typeof row);
+          await writeAudit(tx, {
+            actorUserId: req.user!.id,
+            entityType: 'transaction',
+            entityId: id,
+            action: 'transaction.update',
+            payload: {
+              ...next,
+              amountCents: next.amountCents?.toString(),
+              ...(seqInDay !== row.seqInDay ? { seqInDay } : {}),
+              bulk: true,
+            } as Record<string, unknown>,
+          });
+          out.push({ id, status: 'updated' });
+          anyChanged = true;
+        }
 
-      if (anyChanged) await recomputeReconciliation(db, statementId);
+        if (anyChanged) await recomputeReconciliation(tx, statementId);
+        return out;
+      });
       res.json({ results });
     } catch (err) {
       next(err);
@@ -469,6 +553,21 @@ export const statementsRouter = (): Router => {
         if (reason.length < 30) {
           throw new ValidationError(
             'reason must be at least 30 characters — describe what you reconciled and why',
+          );
+        }
+        // Only an extracted, reviewable statement has a reconciliation to
+        // override. A pending / failed / in-flight one would otherwise be
+        // marked 'overridden' and that sticky flag would wave its eventual
+        // (re-)extraction straight through the export gate.
+        const rows = await db
+          .select({ status: statements.status })
+          .from(statements)
+          .where(eq(statements.id, id));
+        const stmt = rows[0];
+        if (!stmt) throw new NotFoundError(`statement ${id}`);
+        if (stmt.status !== 'review' && stmt.status !== 'exported') {
+          throw new ConflictError(
+            `cannot override reconciliation on a ${stmt.status} statement — only a statement in review (or already exported) can be overridden`,
           );
         }
         await overrideReconciliation(db, req.user!, id, reason);
@@ -512,10 +611,25 @@ export const statementsRouter = (): Router => {
           .reduce((m, t) => Math.max(m, t.seqInDay), -1) + 1;
 
       const fitid = computeFitid({ postedDate, amountCents, description, seqInDay });
+      // TRNTYPE inference needs the account type: credit-card amounts are
+      // charge-positive, so the bank sign rule would mislabel them (the
+      // extraction worker passes isCreditCard for the same reason).
+      const [owner] = await db
+        .select({ accountType: accounts.accountType })
+        .from(statements)
+        .innerJoin(accounts, eq(accounts.id, statements.accountId))
+        .where(eq(statements.id, statementId));
+      if (!owner) throw new NotFoundError(`statement ${statementId}`);
+      const checkNumber = typeof body.check_number === 'string' ? body.check_number : null;
       const trntype =
         typeof body.trntype === 'string'
           ? body.trntype
-          : inferTrntype({ description, amountCents });
+          : inferTrntype({
+              description,
+              amountCents,
+              isCreditCard: owner.accountType === 'CREDITCARD',
+              ...(checkNumber ? { checkNumber } : {}),
+            });
 
       const [created] = await db
         .insert(transactions)
@@ -527,7 +641,7 @@ export const statementsRouter = (): Router => {
           normalizedDescription: normalizeDescription(description),
           amountCents,
           runningBalanceCents: null,
-          checkNumber: typeof body.check_number === 'string' ? body.check_number : null,
+          checkNumber,
           trntype: trntype as never,
           fitid,
           sourcePage,
@@ -586,8 +700,41 @@ export const statementsRouter = (): Router => {
     try {
       const id = String(req.params.id);
       const result = await recomputeReconciliation(db, id);
-      if (!result) throw new NotFoundError(`statement ${id}`);
-      res.json({ status: result.status, deltaCents: result.deltaCents.toString() });
+      if (result) {
+        res.json({ status: result.status, deltaCents: result.deltaCents.toString() });
+        return;
+      }
+      // null = nothing was recomputed: the statement is missing, OR its
+      // reconciliation is a sticky operator override, OR no balances have
+      // been extracted yet. Only the first is a 404 — otherwise report the
+      // unchanged status (with the live delta when balances exist).
+      const rows = await db
+        .select({
+          reconciliationStatus: statements.reconciliationStatus,
+          openingBalanceCents: statements.openingBalanceCents,
+          closingBalanceCents: statements.closingBalanceCents,
+        })
+        .from(statements)
+        .where(eq(statements.id, id));
+      const stmt = rows[0];
+      if (!stmt) throw new NotFoundError(`statement ${id}`);
+      let deltaCents = 0n;
+      if (stmt.openingBalanceCents !== null && stmt.closingBalanceCents !== null) {
+        const txs = await db
+          .select({ amountCents: transactions.amountCents })
+          .from(transactions)
+          .where(eq(transactions.statementId, id));
+        deltaCents = reconcileGoldenRule({
+          openingBalanceCents: stmt.openingBalanceCents,
+          closingBalanceCents: stmt.closingBalanceCents,
+          transactions: txs,
+        }).deltaCents;
+      }
+      res.json({
+        status: stmt.reconciliationStatus,
+        deltaCents: deltaCents.toString(),
+        recomputed: false,
+      });
     } catch (err) {
       next(err);
     }
@@ -658,6 +805,9 @@ export const statementsRouter = (): Router => {
           status: 'failed',
           errorMessage: `superseded by ${parsed.length}-way split`,
           multiAccountAcknowledged: true,
+          // Its transactions are gone, so its old verdict no longer applies.
+          reconciliationStatus: 'pending',
+          periodBoundsViolations: 0,
           updatedAt: sql`now()`,
         })
         .where(eq(statements.id, id));
@@ -778,6 +928,28 @@ export const statementsRouter = (): Router => {
       const rows = await db.select().from(statements).where(eq(statements.id, id));
       const stmt = rows[0];
       if (!stmt) throw new NotFoundError(`statement ${id}`);
+      // Phase 15 #4b step 1: only an ambiguity halt can be confirmed. A
+      // stale tab posting this against a statement already in review would
+      // otherwise wipe its (possibly hand-edited) transactions.
+      if (stmt.status !== 'awaiting-locale-confirmation') {
+        throw new ConflictError(
+          `statement is ${stmt.status} — the date format can only be confirmed while it is awaiting-locale-confirmation`,
+        );
+      }
+      // The halted run completed its BullMQ job normally, and that retained
+      // job holds this statement's deterministic jobId — enqueueExtraction
+      // would silently no-op and strand the statement in 'uploaded'. Clear it
+      // first, before any destructive write.
+      if (process.env.REDIS_URL) {
+        try {
+          await removeExtractionJob(id);
+        } catch (err) {
+          logger.warn({ err, stmtId: id }, 'confirm-date-format: could not remove extraction job');
+          throw new ConflictError(
+            'extraction is still running for this statement — wait for it to finish, then confirm the date format',
+          );
+        }
+      }
       await db
         .update(statements)
         .set({
@@ -785,6 +957,9 @@ export const statementsRouter = (): Router => {
           sourceDateFormatUserConfirmed: true,
           status: 'uploaded',
           errorMessage: null,
+          // Transactions are wiped below; the re-run reconciles afresh.
+          reconciliationStatus: 'pending',
+          periodBoundsViolations: 0,
           updatedAt: sql`now()`,
         })
         .where(eq(statements.id, id));
@@ -871,6 +1046,9 @@ export const statementsRouter = (): Router => {
         const id = String(req.params.id);
         try {
           const result = await resolveCheckPayees(db, id);
+          // The resolver books its own spend onto the statement's cost
+          // ledger; this route only records + reports the run. Money fields
+          // go out as decimal strings (JSON can't carry a BigInt).
           await writeAudit(db, {
             actorUserId: req.user!.id,
             entityType: 'statement',
@@ -881,13 +1059,35 @@ export const statementsRouter = (): Router => {
               candidateCount: result.candidateCount,
               llmExtractedCount: result.llmExtractedCount,
               matchedCount: result.matchedCount,
+              // The transactions whose payee this run wrote.
+              updatedTxIds: result.updatedTxIds,
+              skippedUserEditedCount: result.skippedUserEditedCount ?? 0,
               unmatchedCheckNumbers: result.unmatchedCheckNumbers,
               pageCount: result.pageCount,
               costMicros: result.costMicros.toString(),
               model: result.model,
+              // Which provider parsed the transcribed check text (an
+              // Anthropic call is the audit-logged egress carve-out).
+              textProvider: result.textProviderId ?? null,
+              textParseCalls: result.textParseCalls ?? 0,
+              textParseCostMicros: String(result.textParseCostMicros ?? 0n),
             },
           });
-          res.json({ ...result, costMicros: result.costMicros.toString() });
+          res.json({
+            txCount: result.txCount,
+            candidateCount: result.candidateCount,
+            llmExtractedCount: result.llmExtractedCount,
+            matchedCount: result.matchedCount,
+            updatedTxIds: result.updatedTxIds,
+            skippedUserEditedCount: result.skippedUserEditedCount,
+            unmatchedCheckNumbers: result.unmatchedCheckNumbers,
+            pageCount: result.pageCount,
+            costMicros: result.costMicros.toString(),
+            model: result.model,
+            textProviderId: result.textProviderId,
+            textParseCalls: result.textParseCalls,
+            textParseCostMicros: result.textParseCostMicros.toString(),
+          });
         } catch (err) {
           if (err instanceof CheckResolveUnavailableError) {
             throw new ForbiddenError(err.message);
@@ -955,6 +1155,19 @@ export const statementsRouter = (): Router => {
           }
           providerOverride = requestedProvider;
         }
+        // BullMQ's add() is idempotent on jobId; the prior completed job
+        // would silently swallow this enqueue, so remove it first — and
+        // before any destructive write: BullMQ refuses to remove an ACTIVE
+        // (locked) job, and wiping a statement whose extraction is still
+        // running would leave it emptied with no new job queued.
+        try {
+          await removeExtractionJob(id);
+        } catch (err) {
+          logger.warn({ err, stmtId: id }, 're-extract: could not remove extraction job');
+          throw new ConflictError(
+            'extraction is still running for this statement — wait for it to finish (or cancel it), then re-extract',
+          );
+        }
         // Wipe prior transactions so the new run isn't deduped against the
         // old FITIDs. Keep the source PDF.
         await db.delete(transactions).where(eq(transactions.statementId, id));
@@ -963,13 +1176,14 @@ export const statementsRouter = (): Router => {
           .set({
             status: 'uploaded',
             errorMessage: null,
+            // The old verdict described the wiped transactions; the new run
+            // reconciles afresh (and an override never carries over).
+            reconciliationStatus: 'pending',
+            periodBoundsViolations: 0,
             updatedAt: sql`now()`,
             ...(strategyUpdate ?? {}),
           })
           .where(eq(statements.id, id));
-        // BullMQ's add() is idempotent on jobId; the prior completed job
-        // would silently swallow this enqueue. Remove first.
-        await removeExtractionJob(id);
         await enqueueExtraction({
           statementId: id,
           accountId: stmt.accountId,
@@ -1029,7 +1243,7 @@ export const statementsRouter = (): Router => {
       res.write(`: heartbeat\n\n`);
 
       while (!cancelled && Date.now() - startedAt < MAX_DURATION_MS) {
-        const rows = await db.select().from(statements).where(eq(statements.id, id));
+        const rows = await db.select(stmtPublicCols).from(statements).where(eq(statements.id, id));
         const row = rows[0];
         if (!row) {
           res.write(`event: error\ndata: ${JSON.stringify({ message: 'not found' })}\n\n`);
@@ -1091,6 +1305,8 @@ export const statementsRouter = (): Router => {
         .set({
           status: 'failed',
           errorMessage: 'cancelled by operator',
+          reconciliationStatus: 'pending',
+          periodBoundsViolations: 0,
           updatedAt: sql`now()`,
         })
         .where(eq(statements.id, id));
@@ -1107,28 +1323,14 @@ export const statementsRouter = (): Router => {
     }
   });
 
-  // Admin: delete a stuck statement so the operator can re-upload the
-  // same PDF cleanly. Allowed at any point in the statement lifecycle:
-  // in-flight worker activity bails cooperatively at the next phase
-  // boundary (the worker's checkCancelled treats a missing statement
-  // row as a cancellation signal), the queued BullMQ job is removed
-  // up front, and any partial transactions/export rows cascade off
-  // the statement row delete.
-  //
-  // Cascade: transactions and export_jobs FK with ON DELETE CASCADE
-  // (schema.ts), so the statements row delete drops both. audit_log
-  // has no FK (entity_id is plain text per ADR-013) so the trail
-  // survives — including the delete row this route writes.
-  //
-  // Disk: rendered export files are unlinked best-effort before the row
-  // delete (the FK cascade only drops DB rows, not files). The source
   // Admin: delete just the source PDF and keep the statement +
   // transactions. Used when the firm wants to free disk / satisfy a
-  // retention policy without losing the extracted data. Cascades the
-  // sourcePdfDeleted flag to every sibling statement sharing the same
-  // hash so the UI on those rows shows "PDF gone" instead of pointing
-  // at a missing file. Idempotent: a second call on an already-
-  // deleted PDF is a no-op (returns fileRemoved=false).
+  // retention policy without losing the extracted data. Flags every
+  // statement sharing the same stored file as sourcePdfDeleted so the UI
+  // on those rows shows "PDF gone" instead of pointing at a missing file;
+  // a statement holding its own copy of the same content keeps it.
+  // Idempotent: a second call on an already-deleted PDF is a no-op
+  // (returns fileRemoved=false).
   router.post('/:id/delete-pdf', requireAdmin, async (req, res, next) => {
     try {
       const id = String(req.params.id);
@@ -1154,9 +1356,25 @@ export const statementsRouter = (): Router => {
     }
   });
 
-  // PDF is unlinked only if no other statement still references the
-  // same content hash (hash is shared across re-uploads to multiple
-  // accounts and across split children).
+  // Admin: delete a stuck statement so the operator can re-upload the
+  // same PDF cleanly. Allowed at any point in the statement lifecycle:
+  // in-flight worker activity bails cooperatively at the next phase
+  // boundary (the worker's checkCancelled treats a missing statement
+  // row as a cancellation signal), the queued BullMQ job is removed
+  // up front, and any partial transactions/export rows cascade off
+  // the statement row delete.
+  //
+  // Cascade: transactions and export_jobs FK with ON DELETE CASCADE
+  // (schema.ts), so the statements row delete drops both. audit_log
+  // has no FK (entity_id is plain text per ADR-013) so the trail
+  // survives — including the delete row this route writes.
+  //
+  // Disk: rendered export files are unlinked best-effort before the row
+  // delete (the FK cascade only drops DB rows, not files). The source
+  // PDF is unlinked only if no other statement still uses the same stored
+  // file (split children share the parent's file; the same PDF uploaded
+  // to another account in the same month lands on the same path). Other
+  // statements are never flagged — they keep their PDF.
   router.delete('/:id', requireAdmin, async (req, res, next) => {
     try {
       const id = String(req.params.id);
@@ -1197,33 +1415,36 @@ export const statementsRouter = (): Router => {
 
       await db.delete(statements).where(eq(statements.id, id));
 
-      // Source PDF: always unlink the file (unless it's already gone, or
-      // already marked deleted on this row). Different statements can
-      // share the same source_pdf_hash via dedupe / split children — we
-      // cascade the source_pdf_deleted flag onto those siblings so they
-      // surface as "PDF gone" in the UI rather than carrying a stale
-      // path to a missing file.
+      // Source PDF: unlink only when no remaining statement still uses this
+      // stored file (a split parent's children read the parent's file, and
+      // a same-month upload of the identical PDF to another account shares
+      // the path). Rows already flagged sourcePdfDeleted don't count — their
+      // file is gone. Nothing is unlinked for a row whose PDF was already
+      // deleted: its path may by now belong to a fresh upload.
       let sourcePdfRemoved = false;
       if (!stmt.sourcePdfDeleted) {
-        try {
-          await unlink(stmt.sourcePdfPath);
-          sourcePdfRemoved = true;
-        } catch {
-          // Already gone or missing — non-fatal.
+        const stillReferenced = await db
+          .select({ id: statements.id })
+          .from(statements)
+          .where(
+            and(
+              eq(statements.sourcePdfPath, stmt.sourcePdfPath),
+              eq(statements.sourcePdfDeleted, false),
+            ),
+          )
+          .limit(1);
+        if (stillReferenced.length === 0) {
+          try {
+            await unlink(stmt.sourcePdfPath);
+            sourcePdfRemoved = true;
+          } catch {
+            // Already gone or missing — non-fatal.
+          }
         }
       }
-      const cascadedRows = await db
-        .update(statements)
-        .set({ sourcePdfDeleted: true, updatedAt: sql`now()` })
-        .where(
-          and(
-            eq(statements.sourcePdfHash, stmt.sourcePdfHash),
-            ne(statements.id, id),
-            eq(statements.sourcePdfDeleted, false),
-          ),
-        )
-        .returning({ id: statements.id });
-      const cascadedSiblings = cascadedRows.length;
+      // Statement delete no longer cascades the deleted flag onto siblings
+      // (they keep their PDF). Always 0; kept for API / audit compatibility.
+      const cascadedSiblings = 0;
 
       await writeAudit(db, {
         actorUserId: req.user!.id,

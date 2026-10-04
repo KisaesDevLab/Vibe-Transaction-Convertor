@@ -37,6 +37,9 @@ export const extractionQueue = (): Queue<ExtractionJobData> => {
     defaultJobOptions: {
       removeOnComplete: 100,
       removeOnFail: 200,
+      // Retries cover transient failures (transport / timeout / 5xx) only — the
+      // worker rethrows deterministic ones as UnrecoverableError
+      // (extraction.worker.ts errorForBullmq), which BullMQ never retries.
       attempts: 3,
       backoff: { type: 'exponential', delay: 5_000 },
     },

@@ -21,14 +21,7 @@ import {
 import { eq, inArray, sql } from 'drizzle-orm';
 
 import type { Db } from '../db/client.js';
-import {
-  accounts,
-  auditLog,
-  businessCategories,
-  statements,
-  systemSettings,
-  transactions,
-} from '../db/schema.js';
+import { accounts, auditLog, businessCategories, statements, transactions } from '../db/schema.js';
 import { logger } from '../lib/logger.js';
 import { createHash } from 'node:crypto';
 
@@ -38,7 +31,8 @@ import {
   enrichmentCache,
   type EnrichmentCacheKey,
 } from './enrichment-cache.js';
-import { buildProviderForProcess, resolveProcessLabel } from './llm-provider.js';
+import { buildProviderForProcess, resolveAiMode, resolveProcessLabel } from './llm-provider.js';
+import { addStatementLlmCost, anthropicCapStatus } from './llm-spend.js';
 import { readSettingPlain, upsertSetting } from './system-settings.js';
 
 export interface EnrichOptions {
@@ -51,16 +45,38 @@ export interface EnrichOptions {
   skipUserEdited?: boolean;
 }
 
+type EnrichProviderId = 'local' | 'anthropic' | 'vibe_router';
+type EnrichProc = 'cleanse' | 'category';
+
 export interface EnrichResult {
   txCount: number;
+  // Rows actually written this run (cache hits + fresh LLM answers).
   enrichedCount: number;
   skippedUserEditedCount: number;
+  // Rows the model left out of a requested pass's response — left untouched
+  // (and uncached) rather than overwritten with nulls.
+  omittedCount: number;
   cacheHits: number;
   llmCalls: number;
   costMicros: bigint;
   model: string | null;
-  provider: 'local' | 'anthropic' | null;
+  // 'anthropic' when any pass egressed to Anthropic, else the provider the
+  // passes ran on; null when every row was a cache hit (no LLM call).
+  provider: EnrichProviderId | null;
 }
+
+// Per-pass record for the audit trail: which provider each pass resolved to and
+// whether it completed (call returned + response parsed).
+interface EnrichPassRecord {
+  proc: EnrichProc;
+  provider: EnrichProviderId;
+  ok: boolean;
+}
+
+const summarizeProvider = (passes: EnrichPassRecord[]): EnrichProviderId | null => {
+  if (passes.some((p) => p.provider === 'anthropic')) return 'anthropic';
+  return passes[0]?.provider ?? null;
+};
 
 export class EnrichmentDisabledError extends Error {
   constructor(which: 'cleanse' | 'category' | 'both') {
@@ -144,28 +160,45 @@ const promptVersionFor = (o: EnrichmentPromptOverrides): string => {
   return `${ENRICHMENT_PROMPT_VERSION}-${h.digest('hex').slice(0, 12)}`;
 };
 
-// Mirrors extraction.worker.ts cap-check (lines 166-193). When the
+// Same cap the extraction worker enforces (shared in llm-spend.ts). When the
 // caller is the local provider, this is a no-op — only Anthropic charges
 // per call, so only Anthropic gets capped.
-const checkMonthlyCap = async (
-  db: Db,
-  providerId: 'local' | 'anthropic' | 'vibe_router',
-): Promise<void> => {
+const checkMonthlyCap = async (db: Db, providerId: EnrichProviderId): Promise<void> => {
   if (providerId !== 'anthropic') return;
-  const capRows = await db
-    .select()
-    .from(systemSettings)
-    .where(eq(systemSettings.key, 'llm.anthropic.monthly_cap_usd'));
-  const capUsd = capRows[0]?.valuePlaintext ? Number.parseFloat(capRows[0].valuePlaintext) : null;
-  if (capUsd === null || !Number.isFinite(capUsd)) return;
-  const spentRows = await db
-    .select({
-      total: sql<string>`coalesce(sum(${statements.llmCostMicros}), 0)`,
-    })
-    .from(statements)
-    .where(sql`date_trunc('month', ${statements.createdAt}) = date_trunc('month', now())`);
-  const spentUsd = Number(BigInt(spentRows[0]?.total ?? '0')) / 1_000_000;
-  if (spentUsd >= capUsd) throw new MonthlyCapReachedError(spentUsd, capUsd);
+  const cap = await anthropicCapStatus(db);
+  if (cap.blocked) throw new MonthlyCapReachedError(cap.spentUsd ?? 0, cap.capUsd ?? 0);
+};
+
+// Everything besides the description that shapes an answer is folded into the
+// cache version: the prompt variant, each enabled pass's provider:model (a
+// model switch must not replay the previous model's answers) and, when
+// categorizing, the active category list (a rename/archive must not replay
+// names that no longer resolve).
+const cacheVersionFor = async (
+  db: Db,
+  promptVersion: string,
+  opts: Pick<EnrichOptions, 'cleanse' | 'categorize'>,
+  activeCategories: ReadonlyArray<{ id: string; name: string; description: string | null }>,
+): Promise<string> => {
+  const router = (await resolveAiMode(db)) === 'router';
+  const procs: EnrichProc[] = [];
+  if (opts.cleanse) procs.push('cleanse');
+  if (opts.categorize) procs.push('category');
+  const h = createHash('sha256');
+  for (const proc of procs) {
+    // Router mode: the router picks the model — key on the mode so router
+    // answers never mix with direct-mode ones.
+    let label = 'vibe_router';
+    if (!router) {
+      const l = await resolveProcessLabel(db, proc);
+      label = `${l.provider}:${l.model}`;
+    }
+    h.update(`${proc}=${label}|`);
+  }
+  if (opts.categorize) {
+    h.update(JSON.stringify(activeCategories.map((c) => [c.id, c.name, c.description ?? null])));
+  }
+  return `${promptVersion}+${h.digest('hex').slice(0, 12)}`;
 };
 
 const accountTypeForStatement = async (db: Db, stmtId: string): Promise<string | null> => {
@@ -223,6 +256,7 @@ export const enrichStatement = async (
       txCount: allTxs.length,
       enrichedCount: 0,
       skippedUserEditedCount,
+      omittedCount: 0,
       cacheHits: 0,
       llmCalls: 0,
       costMicros: 0n,
@@ -236,14 +270,26 @@ export const enrichStatement = async (
   // a manual flush. Same overrides are passed to the LLM call later.
   const promptOverrides = await readPromptOverrides(db);
   const promptVersion = promptVersionFor(promptOverrides);
+  const cacheVersion = await cacheVersionFor(db, promptVersion, opts, activeCategories);
+
+  // Map category names to ids in one pass — the schema enforced the LLM
+  // to pick from the active set, but case differences or a removed
+  // category between "list-fetch" and "row-update" would break the
+  // FK if we trusted the name blindly.
+  const categoryNameToId = new Map<string, string>(
+    activeCategories.map((c) => [c.name.toLowerCase(), c.id]),
+  );
+  const isActiveCategory = (name: string | null | undefined): boolean =>
+    typeof name === 'string' && categoryNameToId.has(name.toLowerCase());
 
   // Cache pass — pull whatever's already cached and only send the misses
-  // to the LLM. The cache key bakes in the prompt version so prompt
-  // changes invalidate every entry without a manual flush.
+  // to the LLM. The cache key bakes in the cache version (prompt variant,
+  // category list, per-pass provider:model) so changing any of them
+  // invalidates every entry without a manual flush.
   const cacheKeyFor = (rawDescription: string): EnrichmentCacheKey => ({
     rawDescription,
     accountType,
-    promptVersion,
+    promptVersion: cacheVersion,
     cleanse: opts.cleanse,
     categorize: opts.categorize,
   });
@@ -261,11 +307,20 @@ export const enrichStatement = async (
   const missing: typeof candidateTxs = [];
   let cacheHits = 0;
   for (const tx of candidateTxs) {
-    // A row with a check payee is scored against that per-row payee during
-    // cleanse, so it can't use the description-keyed cache — always re-run it.
-    const skipCache = opts.cleanse && !!tx.payee;
+    // A row carrying a check payee is sent to BOTH passes with that payee, so
+    // its answer isn't a function of the description alone — never read it
+    // from (or write it to) the description-keyed cache, which is shared
+    // across every company's statements.
+    const skipCache = !!tx.payee;
     const hit = skipCache ? null : await enrichmentCache.get(cacheKeyFor(tx.description));
-    if (hit) {
+    // An empty entry carries no answer, and a categorize hit must name a
+    // category that is still active — after a rename/archive the cached name
+    // no longer resolves, so ask the LLM again rather than writing null.
+    const usable =
+      hit !== null &&
+      Object.keys(hit).length > 0 &&
+      (!opts.categorize || isActiveCategory(hit.category));
+    if (hit && usable) {
       cacheHits += 1;
       resolved.push({
         txId: tx.id,
@@ -285,200 +340,261 @@ export const enrichStatement = async (
   let llmCalls = 0;
   let costMicros = 0n;
   let model: string | null = null;
-  let providerId: 'local' | 'anthropic' | 'vibe_router' | null = null;
+  let omittedCount = 0;
+  let enrichedCount = 0;
+  const passes: EnrichPassRecord[] = [];
+  const modelLabels: string[] = [];
 
-  if (missing.length > 0) {
-    const categoryNames = activeCategories.map((c) => c.name);
-    const txForPrompt = missing.map((t, i) => ({
-      index: i,
-      raw_description: t.description,
-      amount_cents: Number(t.amountCents),
-      trntype: t.trntype,
-      ...(t.payee ? { payee: t.payee } : {}),
-    }));
+  // Guarded from the first LLM pass through the final write: once a pass may
+  // have billed (Anthropic), a failure — a response that fails validation, a
+  // truncated reply, the second pass erroring, a DB error — must still leave
+  // an audit row and add the spend to the statement's ledger before it
+  // propagates.
+  try {
+    if (missing.length > 0) {
+      const categoryNames = activeCategories.map((c) => c.name);
+      const txForPrompt = missing.map((t, i) => ({
+        index: i,
+        raw_description: t.description,
+        amount_cents: Number(t.amountCents),
+        trntype: t.trntype,
+        ...(t.payee ? { payee: t.payee } : {}),
+      }));
 
-    // Cleanse and category are INDEPENDENT processes — each has its own provider
-    // / model / token settings (the per-process matrix). Run each requested pass
-    // as its own LLM call, then merge the results by row index.
-    interface CleanseFields {
-      cleansedDescription: string | null;
-      merchantName: string | null;
-      processor: string | null;
-      transactionType: string | null;
-      isOpaque: boolean | null;
-      confidence: string | null;
-      payeeConfidence: number | null;
-    }
-    const cleanseByIndex = new Map<number, CleanseFields>();
-    const categoryByIndex = new Map<number, string | null>();
-    const modelLabels: string[] = [];
+      // Cleanse and category are INDEPENDENT processes — each has its own provider
+      // / model / token settings (the per-process matrix). Run each requested pass
+      // as its own LLM call, then merge the results by row index.
+      interface CleanseFields {
+        cleansedDescription: string | null;
+        merchantName: string | null;
+        processor: string | null;
+        transactionType: string | null;
+        isOpaque: boolean | null;
+        confidence: string | null;
+        payeeConfidence: number | null;
+      }
+      const cleanseByIndex = new Map<number, CleanseFields>();
+      const categoryByIndex = new Map<number, string | null>();
 
-    const runPass = async (proc: 'cleanse' | 'category'): Promise<void> => {
-      const isCleanse = proc === 'cleanse';
-      const built = await buildProviderForProcess(db, proc);
-      providerId = built.providerId;
-      await checkMonthlyCap(db, built.providerId);
-      const systemPrompt = enrichmentSystemPromptFor({
-        cleanse: isCleanse,
-        categorize: !isCleanse,
-        accountType,
-        categories: activeCategories.map((c) => ({
-          name: c.name,
-          description: c.description ?? null,
-        })),
-        mode: promptOverrides.mode,
-        cleanseRulesOverride: promptOverrides.cleanseRules,
-        categorizeRulesOverride: promptOverrides.categorizeRules,
-        fullSystemPromptOverride: promptOverrides.fullSystemPrompt,
-      });
-      const userPrompt = enrichmentUserPromptFor({ transactions: txForPrompt });
-      const jsonSchema = schemas.enrichment.buildEnrichmentJsonSchema({
-        cleanse: isCleanse,
-        categorize: !isCleanse,
-        categoryNames,
-      });
-      const completion = await built.provider.complete({
-        systemPrompt,
-        userPrompt,
-        schema: jsonSchema,
-        schemaName: 'transaction_enrichment',
-      });
-      llmCalls += 1;
-      costMicros += completion.telemetry.costMicros;
-      modelLabels.push(`${proc}:${completion.telemetry.model}`);
-      const parsed = schemas.enrichment.EnrichmentResponse.parse(completion.data);
-      for (const out of parsed.transactions) {
-        if (isCleanse) {
-          cleanseByIndex.set(out.index, {
-            cleansedDescription: out.cleansed_description ?? null,
-            merchantName: out.merchant_name ?? null,
-            processor: out.processor ?? null,
-            transactionType: out.transaction_type ?? null,
-            isOpaque: out.is_opaque ?? null,
-            confidence: out.confidence ?? null,
-            payeeConfidence: out.payee_confidence ?? null,
+      const runPass = async (proc: EnrichProc): Promise<void> => {
+        const isCleanse = proc === 'cleanse';
+        const built = await buildProviderForProcess(db, proc);
+        const pass: EnrichPassRecord = { proc, provider: built.providerId, ok: false };
+        passes.push(pass);
+        await checkMonthlyCap(db, built.providerId);
+        const systemPrompt = enrichmentSystemPromptFor({
+          cleanse: isCleanse,
+          categorize: !isCleanse,
+          accountType,
+          categories: activeCategories.map((c) => ({
+            name: c.name,
+            description: c.description ?? null,
+          })),
+          mode: promptOverrides.mode,
+          cleanseRulesOverride: promptOverrides.cleanseRules,
+          categorizeRulesOverride: promptOverrides.categorizeRules,
+          fullSystemPromptOverride: promptOverrides.fullSystemPrompt,
+        });
+        const userPrompt = enrichmentUserPromptFor({ transactions: txForPrompt });
+        const jsonSchema = schemas.enrichment.buildEnrichmentJsonSchema({
+          cleanse: isCleanse,
+          categorize: !isCleanse,
+          categoryNames,
+        });
+        // Counted before the await so a call that throws is still on record.
+        llmCalls += 1;
+        const completion = await built.provider.complete({
+          systemPrompt,
+          userPrompt,
+          schema: jsonSchema,
+          schemaName: 'transaction_enrichment',
+        });
+        costMicros += completion.telemetry.costMicros;
+        modelLabels.push(`${proc}:${completion.telemetry.model}`);
+        const parsed = schemas.enrichment.EnrichmentResponse.parse(completion.data);
+        for (const out of parsed.transactions) {
+          if (isCleanse) {
+            cleanseByIndex.set(out.index, {
+              cleansedDescription: out.cleansed_description ?? null,
+              merchantName: out.merchant_name ?? null,
+              processor: out.processor ?? null,
+              transactionType: out.transaction_type ?? null,
+              isOpaque: out.is_opaque ?? null,
+              confidence: out.confidence ?? null,
+              payeeConfidence: out.payee_confidence ?? null,
+            });
+          } else {
+            categoryByIndex.set(out.index, out.category ?? null);
+          }
+        }
+        pass.ok = true;
+      };
+
+      if (opts.cleanse) await runPass('cleanse');
+      if (opts.categorize) await runPass('category');
+      model = modelLabels.join(' + ') || null;
+
+      // Merge the (independent) cleanse + category outputs per missing row.
+      for (let i = 0; i < missing.length; i += 1) {
+        const tx = missing[i]!;
+        const c = cleanseByIndex.get(i);
+        // A row the model left out of a requested pass's response has no answer:
+        // leave it untouched (no null overwrite of prior enrichment, no
+        // enrichment_run_at stamp) and uncached.
+        if ((opts.cleanse && !c) || (opts.categorize && !categoryByIndex.has(i))) {
+          omittedCount += 1;
+          continue;
+        }
+        let cleansedDescription = opts.cleanse ? (c?.cleansedDescription ?? null) : null;
+        const categoryName = opts.categorize ? (categoryByIndex.get(i) ?? null) : null;
+        const merchantName = opts.cleanse ? (c?.merchantName ?? null) : null;
+        const processor = opts.cleanse ? (c?.processor ?? null) : null;
+        const transactionType = opts.cleanse ? (c?.transactionType ?? null) : null;
+        const isOpaque = opts.cleanse ? (c?.isOpaque ?? null) : null;
+        const confidence = opts.cleanse ? (c?.confidence ?? null) : null;
+        // Payee adoption: when the row has a check payee and the model judges it a
+        // reasonable match (> threshold), use the payee as the cleansed display
+        // description — it's the most accurate counterparty name we have.
+        if (
+          opts.cleanse &&
+          tx.payee &&
+          (c?.payeeConfidence ?? 0) > PAYEE_USE_CONFIDENCE_THRESHOLD
+        ) {
+          cleansedDescription = tx.payee;
+        }
+        resolved.push({
+          txId: tx.id,
+          cleansedDescription,
+          categoryName,
+          merchantName,
+          processor,
+          transactionType,
+          isOpaque,
+          confidence,
+        });
+        // Best-effort cache write so the same merchant on the next statement is a
+        // hit. Only description-pure answers are cached: never a payee row (its
+        // prompt carried the per-row payee), never a category that doesn't map to
+        // an active one, never an empty entry (the cache drops those).
+        if (!tx.payee && (!opts.categorize || isActiveCategory(categoryName))) {
+          void enrichmentCache.set(cacheKeyFor(tx.description), {
+            ...(cleansedDescription !== null ? { cleansedDescription } : {}),
+            ...(categoryName !== null ? { category: categoryName } : {}),
+            ...(merchantName !== null ? { merchantName } : {}),
+            ...(processor !== null ? { processor } : {}),
+            ...(transactionType !== null ? { transactionType } : {}),
+            ...(isOpaque !== null ? { isOpaque } : {}),
+            ...(confidence !== null ? { confidence } : {}),
           });
-        } else {
-          categoryByIndex.set(out.index, out.category ?? null);
         }
       }
-    };
-
-    if (opts.cleanse) await runPass('cleanse');
-    if (opts.categorize) await runPass('category');
-    model = modelLabels.join(' + ') || null;
-
-    // Merge the (independent) cleanse + category outputs per missing row.
-    for (let i = 0; i < missing.length; i += 1) {
-      const tx = missing[i]!;
-      const c = cleanseByIndex.get(i);
-      let cleansedDescription = opts.cleanse ? (c?.cleansedDescription ?? null) : null;
-      const categoryName = opts.categorize ? (categoryByIndex.get(i) ?? null) : null;
-      const merchantName = opts.cleanse ? (c?.merchantName ?? null) : null;
-      const processor = opts.cleanse ? (c?.processor ?? null) : null;
-      const transactionType = opts.cleanse ? (c?.transactionType ?? null) : null;
-      const isOpaque = opts.cleanse ? (c?.isOpaque ?? null) : null;
-      const confidence = opts.cleanse ? (c?.confidence ?? null) : null;
-      // Payee adoption: when the row has a check payee and the model judges it a
-      // reasonable match (> threshold), use the payee as the cleansed display
-      // description — it's the most accurate counterparty name we have.
-      let adoptedPayee = false;
-      if (opts.cleanse && tx.payee && (c?.payeeConfidence ?? 0) > PAYEE_USE_CONFIDENCE_THRESHOLD) {
-        cleansedDescription = tx.payee;
-        adoptedPayee = true;
-      }
-      resolved.push({
-        txId: tx.id,
-        cleansedDescription,
-        categoryName,
-        merchantName,
-        processor,
-        transactionType,
-        isOpaque,
-        confidence,
-      });
-      // Best-effort cache write so the same merchant on the next statement is a
-      // hit. Skip rows whose cleanse adopted a per-row payee — the result is
-      // not a pure function of the (description-keyed) cache.
-      if (!adoptedPayee) {
-        void enrichmentCache.set(cacheKeyFor(tx.description), {
-          ...(cleansedDescription !== null ? { cleansedDescription } : {}),
-          ...(categoryName !== null ? { category: categoryName } : {}),
-          ...(merchantName !== null ? { merchantName } : {}),
-          ...(processor !== null ? { processor } : {}),
-          ...(transactionType !== null ? { transactionType } : {}),
-          ...(isOpaque !== null ? { isOpaque } : {}),
-          ...(confidence !== null ? { confidence } : {}),
-        });
-      }
     }
+
+    // Apply updates. One transaction per row keeps the trigger-based
+    // audit-log immutability behaviour clean (we only INSERT to audit_log)
+    // and avoids partial-row commits when the FK lookup fails.
+    await db.transaction(async (tx) => {
+      for (const r of resolved) {
+        const update: Record<string, unknown> = { enrichmentRunAt: sql`now()` };
+        if (opts.cleanse) {
+          update.cleansedDescription = r.cleansedDescription;
+          update.enrichmentMerchantName = r.merchantName;
+          update.enrichmentProcessor = r.processor;
+          update.enrichmentTransactionType = r.transactionType;
+          update.enrichmentIsOpaque = r.isOpaque;
+          update.enrichmentConfidence = r.confidence;
+        }
+        if (opts.categorize) {
+          const categoryId = r.categoryName
+            ? (categoryNameToId.get(r.categoryName.toLowerCase()) ?? null)
+            : null;
+          update.businessCategoryId = categoryId;
+        }
+        // Drizzle requires .set to be non-empty; the enrichmentRunAt
+        // touch above guarantees it. A row deleted mid-run (re-extraction)
+        // updates nothing and isn't counted.
+        const updated = await tx
+          .update(transactions)
+          .set(update)
+          .where(eq(transactions.id, r.txId))
+          .returning({ id: transactions.id });
+        enrichedCount += updated.length;
+      }
+
+      // Enrichment spend counts toward the Anthropic monthly cap, which sums
+      // the statements' cost ledger.
+      await addStatementLlmCost(tx, stmtId, costMicros);
+
+      await tx.insert(auditLog).values({
+        actorUserId: opts.actorUserId,
+        entityType: 'statement',
+        entityId: stmtId,
+        action: 'statement.enriched',
+        payload: {
+          cleanse: opts.cleanse,
+          categorize: opts.categorize,
+          txCount: allTxs.length,
+          enrichedCount,
+          skippedUserEditedCount,
+          omittedCount,
+          cacheHits,
+          llmCalls,
+          costMicros: costMicros.toString(),
+          model,
+          provider: summarizeProvider(passes),
+          passes,
+        },
+      });
+    });
+  } catch (err) {
+    // Failure audit: which passes ran on which provider, calls made and spend
+    // incurred — the error class only (messages may echo model output / PII).
+    const errorClass = err instanceof Error ? err.name : typeof err;
+    try {
+      await writeAudit(db, {
+        actorUserId: opts.actorUserId,
+        entityType: 'statement',
+        entityId: stmtId,
+        action: 'statement.enrich-failed',
+        payload: {
+          cleanse: opts.cleanse,
+          categorize: opts.categorize,
+          passes,
+          llmCalls,
+          costMicros: costMicros.toString(),
+          model: modelLabels.join(' + ') || null,
+          errorClass,
+        },
+      });
+    } catch (auditErr) {
+      logger.error(
+        { stmtId, errorClass: (auditErr as Error).name },
+        'failed to write statement.enrich-failed audit row',
+      );
+    }
+    try {
+      await addStatementLlmCost(db, stmtId, costMicros);
+    } catch (costErr) {
+      logger.error(
+        { stmtId, costMicros: costMicros.toString(), errorClass: (costErr as Error).name },
+        'failed to add failed-enrichment spend to the statement ledger',
+      );
+    }
+    throw err;
   }
 
-  // Map category names to ids in one pass — the schema enforced the LLM
-  // to pick from the active set, but case differences or a removed
-  // category between "list-fetch" and "row-update" would break the
-  // FK if we trusted the name blindly.
-  const categoryNameToId = new Map<string, string>(
-    activeCategories.map((c) => [c.name.toLowerCase(), c.id]),
-  );
-
-  // Apply updates. One transaction per row keeps the trigger-based
-  // audit-log immutability behaviour clean (we only INSERT to audit_log)
-  // and avoids partial-row commits when the FK lookup fails.
-  let enrichedCount = 0;
-  await db.transaction(async (tx) => {
-    for (const r of resolved) {
-      const update: Record<string, unknown> = { enrichmentRunAt: sql`now()` };
-      if (opts.cleanse) {
-        update.cleansedDescription = r.cleansedDescription;
-        update.enrichmentMerchantName = r.merchantName;
-        update.enrichmentProcessor = r.processor;
-        update.enrichmentTransactionType = r.transactionType;
-        update.enrichmentIsOpaque = r.isOpaque;
-        update.enrichmentConfidence = r.confidence;
-      }
-      if (opts.categorize) {
-        const categoryId = r.categoryName
-          ? (categoryNameToId.get(r.categoryName.toLowerCase()) ?? null)
-          : null;
-        update.businessCategoryId = categoryId;
-      }
-      // Drizzle requires .set to be non-empty; the enrichmentRunAt
-      // touch above guarantees it.
-      await tx.update(transactions).set(update).where(eq(transactions.id, r.txId));
-      enrichedCount += 1;
-    }
-
-    await tx.insert(auditLog).values({
-      actorUserId: opts.actorUserId,
-      entityType: 'statement',
-      entityId: stmtId,
-      action: 'statement.enriched',
-      payload: {
-        cleanse: opts.cleanse,
-        categorize: opts.categorize,
-        txCount: allTxs.length,
-        enrichedCount,
-        skippedUserEditedCount,
-        cacheHits,
-        llmCalls,
-        costMicros: costMicros.toString(),
-        model,
-        provider: providerId,
-      },
-    });
-  });
-
+  const provider = summarizeProvider(passes);
   logger.info(
     {
       stmtId,
       txCount: allTxs.length,
       enrichedCount,
       skippedUserEditedCount,
+      omittedCount,
       cacheHits,
       llmCalls,
       costMicros: costMicros.toString(),
-      provider: providerId,
+      provider,
     },
     'statement enriched',
   );
@@ -487,11 +603,12 @@ export const enrichStatement = async (
     txCount: allTxs.length,
     enrichedCount,
     skippedUserEditedCount,
+    omittedCount,
     cacheHits,
     llmCalls,
     costMicros,
     model,
-    provider: providerId,
+    provider,
   };
 };
 

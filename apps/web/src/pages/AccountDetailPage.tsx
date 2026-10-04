@@ -14,6 +14,7 @@ import {
   useDeleteAccount,
   useUpdateAccount,
   type CsvTemplate,
+  type UpdateAccountInput,
 } from '../hooks/useAccounts';
 import { hasFeature, useMe } from '../hooks/useAuth';
 import { FEATURE } from '../lib/features';
@@ -70,6 +71,9 @@ export function AccountDetailPage() {
   const a = account.data;
   const isAdmin = me.data?.role === 'admin';
   const canUpload = hasFeature(me.data?.features, FEATURE.uploads);
+  // Credit cards can't carry a routing number (DB CHECK
+  // accounts_credit_card_no_routing), so the edit form never offers one.
+  const isCreditCard = a.accountType === 'CREDITCARD';
 
   const openEdit = (): void => {
     setEditNickname(a.nickname);
@@ -86,15 +90,16 @@ export function AccountDetailPage() {
       setEditError('Nickname is required');
       return;
     }
+    const patch: UpdateAccountInput = { nickname: trimmed, defaultCsvTemplate: editTemplate };
+    // Send the routing number only when it changed (blank = clear → null),
+    // so a nickname/template edit doesn't rewrite it, and never for credit
+    // cards.
+    if (!isCreditCard) {
+      const routing = editRouting.trim().length === 0 ? null : editRouting.trim();
+      if (routing !== (a.routingNumber ?? null)) patch.routingNumber = routing;
+    }
     try {
-      await updateAccount.mutateAsync({
-        id: a.id,
-        patch: {
-          nickname: trimmed,
-          defaultCsvTemplate: editTemplate,
-          routingNumber: editRouting.trim().length === 0 ? null : editRouting.trim(),
-        },
-      });
+      await updateAccount.mutateAsync({ id: a.id, patch });
       setEditOpen(false);
       toast.success('Account updated');
     } catch (err) {
@@ -224,17 +229,19 @@ export function AccountDetailPage() {
                 <option value="generic">generic — full denormalized row</option>
               </select>
             </label>
-            <label className="block text-xs text-ink-muted sm:col-span-2">
-              Routing number (optional)
-              <input
-                type="text"
-                value={editRouting}
-                onChange={(e) => setEditRouting(e.target.value)}
-                placeholder="9-digit ABA — leave blank for credit cards"
-                className="mt-1 w-full rounded-md border border-surface-muted px-3 py-1.5 text-sm font-mono tabular-nums"
-                inputMode="numeric"
-              />
-            </label>
+            {!isCreditCard ? (
+              <label className="block text-xs text-ink-muted sm:col-span-2">
+                Routing number (optional)
+                <input
+                  type="text"
+                  value={editRouting}
+                  onChange={(e) => setEditRouting(e.target.value)}
+                  placeholder="9-digit ABA — leave blank to clear"
+                  className="mt-1 w-full rounded-md border border-surface-muted px-3 py-1.5 text-sm font-mono tabular-nums"
+                  inputMode="numeric"
+                />
+              </label>
+            ) : null}
           </div>
           {editError ? (
             <p role="alert" className="mt-2 text-sm text-danger">

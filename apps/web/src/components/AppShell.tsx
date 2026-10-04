@@ -1,5 +1,5 @@
 import { type ReactNode } from 'react';
-import { Link, NavLink } from 'react-router-dom';
+import { Link, NavLink, useLocation } from 'react-router-dom';
 
 import { hasFeature, useLogout, useMe } from '../hooks/useAuth';
 import { withBase } from '../lib/api';
@@ -17,6 +17,7 @@ const NAV: Array<{ to: string; label: string; feature: string; adminOnly?: boole
 export function AppShell({ children }: { children: ReactNode }) {
   const me = useMe();
   const logout = useLogout();
+  const location = useLocation();
   const isAdmin = me.data?.role === 'admin';
   const visibleNav = NAV.filter(
     (item) => (!item.adminOnly || isAdmin) && hasFeature(me.data?.features, item.feature),
@@ -97,7 +98,10 @@ export function AppShell({ children }: { children: ReactNode }) {
           </div>
         </header>
         <main className="flex-1 overflow-auto p-6">
-          <ErrorBoundary>{children}</ErrorBoundary>
+          {/* resetKey, not key: navigating away from a crashed page clears the
+              error screen, without remounting the routed pages (and losing
+              their state) on every path change. */}
+          <ErrorBoundary resetKey={location.pathname}>{children}</ErrorBoundary>
         </main>
       </div>
       <ShortcutOverlay />

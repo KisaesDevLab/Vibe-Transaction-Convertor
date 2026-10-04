@@ -102,6 +102,47 @@ const pinoLogger = (): Logger => ({
 const wrap = (plaintext: string): string => wrapSecret(plaintext).toString('base64');
 const unwrap = (wrapped: string): string => unwrapSecret(Buffer.from(wrapped, 'base64'));
 
+const RETURN_TO_BASE = 'http://rt.invalid';
+
+const hasControlOrBackslash = (v: string): boolean => {
+  for (let i = 0; i < v.length; i += 1) {
+    const c = v.charCodeAt(i);
+    if (c < 0x20 || c === 0x7f || c === 0x5c) return true;
+  }
+  return false;
+};
+
+// A same-origin path. The engine's own check only refuses non-'/' values,
+// '//', '/\' and CR/LF, so `/%09/evil.example/x` passes it as
+// `/\t/evil.example/x` — and browsers strip the tab from the Location
+// header, which turns it into the protocol-relative //evil.example/x.
+const isSafeReturnTo = (v: string): boolean => {
+  if (!v.startsWith('/') || hasControlOrBackslash(v)) return false;
+  try {
+    return new URL(v, RETURN_TO_BASE).origin === RETURN_TO_BASE;
+  } catch {
+    return false;
+  }
+};
+
+// Drops every return_to from a request URL when any of them is not a plain
+// same-origin path, so the engine falls back to its default return path
+// after sign-in instead of redirecting off-site.
+export const stripUnsafeReturnTo = (url: string): string => {
+  let parsed: URL;
+  try {
+    parsed = new URL(url, RETURN_TO_BASE);
+  } catch {
+    // Runs inside body-parser's callback, so it must not throw. The engine
+    // cannot parse such a URL either, so it redirects nowhere.
+    return url;
+  }
+  const values = parsed.searchParams.getAll('return_to');
+  if (values.every(isSafeReturnTo)) return url;
+  parsed.searchParams.delete('return_to');
+  return parsed.pathname + parsed.search;
+};
+
 export const createTxVibeAuth = (opts: TxVibeAuthOptions = {}): TxVibeAuth => {
   const db = opts.db ?? defaultDb;
   const pool = opts.pool ?? defaultPool;
@@ -222,7 +263,10 @@ export const createTxVibeAuth = (opts: TxVibeAuthOptions = {}): TxVibeAuth => {
       if (err) return next(err);
       // toHttpRequest reads originalUrl, which carries the prefix only when
       // the proxy kept it; rebuild from the always-stripped req.url instead.
-      const httpReq = { ...toHttpRequest(req, res), url: spaPrefix + req.url };
+      const httpReq = {
+        ...toHttpRequest(req, res),
+        url: spaPrefix + stripUnsafeReturnTo(req.url),
+      };
       auth
         .handle(httpReq)
         .then((r) => {

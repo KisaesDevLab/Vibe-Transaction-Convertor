@@ -1,5 +1,5 @@
-import { Worker } from 'bullmq';
-import { and, eq, inArray, sql } from 'drizzle-orm';
+import { UnrecoverableError, Worker } from 'bullmq';
+import { and, eq, inArray, ne, sql, type SQL } from 'drizzle-orm';
 import { readFile } from 'node:fs/promises';
 
 import {
@@ -10,10 +10,12 @@ import {
   detectMultiAccount,
   extractTextLayerFromBuffer,
   rasterizePdf,
+  removeRasterDir,
   repairPromptFor,
   routePdf,
   vibeOcrFile,
   type ExtractionMethod,
+  type RasterizedPage,
 } from '@vibe-tx-converter/extractor';
 import { findSuspectRows, reconcileGoldenRule, repairPass } from '@vibe-tx-converter/reconciler';
 import {
@@ -31,7 +33,9 @@ import {
   buildProviderForId,
   buildProviderForProcessId,
   invalidateProviderCache,
+  processModelForProvider,
   providerOrderFor,
+  resolveAiMode,
   resolveModelLabelForProvider,
   resolveProviderPolicy,
   resolveVisionModelLabel,
@@ -53,23 +57,53 @@ type StatementStatus = NonNullable<typeof statements.$inferInsert.status>;
 // MAX_PAGES. Operators split larger statements.
 const MAX_OCR_PAGES = 100;
 
-const setStatus = async (
-  statementId: string,
-  status: StatementStatus,
-  patch: Record<string, unknown> = {},
-): Promise<void> => {
-  await db
-    .update(statements)
-    .set({ status, updatedAt: sql`now()`, ...patch })
-    .where(eq(statements.id, statementId));
-};
-
 export class CancelledError extends Error {
   constructor() {
     super('extraction cancelled by operator');
     this.name = 'CancelledError';
   }
 }
+
+// A failure that re-running the job cannot fix: the same input deterministically
+// fails the same way (force-text on a PDF with no text layer, the OCR page cap,
+// the Anthropic monthly spend cap). The BullMQ wrapper turns it — like an
+// ExtractionResponseError (schema mismatch / truncation) — into an
+// UnrecoverableError so the job is not retried (see errorForBullmq).
+export class PermanentExtractionError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'PermanentExtractionError';
+  }
+}
+
+// True when re-running the extraction would fail identically. Transport /
+// timeout / 5xx errors are NOT permanent and keep BullMQ's retry/backoff — and
+// neither is an ExtractionResponseError the extractor flags `transient` (an
+// EMPTY completion, e.g. the model was evicted mid-request). The flag is read
+// structurally so this compiles whether or not the extractor types it.
+export const isPermanentExtractionFailure = (err: unknown): boolean =>
+  err instanceof PermanentExtractionError ||
+  (err instanceof ExtractionResponseError && (err as { transient?: boolean }).transient !== true);
+
+// Mid-run status transition. Guarded so it can never resurrect a statement that
+// /cancel or /split marked `failed` while this job was running (they cannot
+// remove a locked, active job) or that DELETE removed: 0 rows matched means the
+// operator pulled the plug, so throw CancelledError (the cooperative-cancel path
+// — no failure audit row, no status write). The job-start write in
+// processExtraction is deliberately unconditional instead: a BullMQ retry must
+// be able to revive a statement the previous attempt marked `failed`.
+const setStatus = async (
+  statementId: string,
+  status: StatementStatus,
+  patch: Record<string, unknown> = {},
+): Promise<void> => {
+  const updated = await db
+    .update(statements)
+    .set({ status, updatedAt: sql`now()`, ...patch })
+    .where(and(eq(statements.id, statementId), ne(statements.status, 'failed')))
+    .returning({ id: statements.id });
+  if (updated.length === 0) throw new CancelledError();
+};
 
 // Cooperative cancellation. Any of the following is treated as
 // "the operator pulled the plug, stop touching this statement":
@@ -96,6 +130,37 @@ const checkCancelled = async (statementId: string): Promise<void> => {
   }
   if (row.status === 'failed') {
     throw new CancelledError();
+  }
+};
+
+// checkCancelled as a boolean, for the failure path: true when the row is now
+// `failed` or gone. A read error answers false so the original failure still
+// surfaces (and is retried when transient) instead of being masked.
+const cancelledMidRun = async (statementId: string): Promise<boolean> => {
+  try {
+    await checkCancelled(statementId);
+    return false;
+  } catch (err) {
+    if (err instanceof CancelledError) return true;
+    logger.warn(
+      { stmtId: statementId, err: (err as Error).message },
+      'could not re-check cancellation on the extraction failure path',
+    );
+    return false;
+  }
+};
+
+// Remove a rasterizePdf per-call temp dir once its page buffers have been read.
+// Best-effort: a cleanup failure must never mask the extraction's own result
+// (or the error already propagating out of the caller's try/finally).
+const removeRasterDirSafely = async (pages: RasterizedPage[], stmtId: string): Promise<void> => {
+  try {
+    await removeRasterDir(pages);
+  } catch (err) {
+    logger.warn(
+      { stmtId, err: (err as Error).message },
+      'failed to remove rasterized page temp dir (continuing)',
+    );
   }
 };
 
@@ -193,6 +258,13 @@ const checkAnthropicMonthlyCap = async (stmtId: string): Promise<string | null> 
   return null;
 };
 
+// SET-clause SQL that ADDS `micros` to statements.llm_cost_micros (never
+// overwrites): the column is the Anthropic monthly-cap ledger summed by
+// checkAnthropicMonthlyCap, so earlier runs (re-extracts) and rejected paid
+// attempts must keep counting.
+const addToLlmCostLedger = (micros: bigint): SQL =>
+  sql`coalesce(${statements.llmCostMicros}, 0) + ${micros.toString()}::bigint`;
+
 const mapLlmTxs = (txs: schemas.extraction.ExtractionResult['transactions']): ProcessedTx[] =>
   txs.map((t, idx) => ({
     postedDate: t.posted_date,
@@ -257,6 +329,18 @@ const ocrImagesToMarkdown = async (
   };
 };
 
+// A repair (LLM re-read or heuristic) is accepted when it closes the balance to
+// the cent without adding out-of-period rows. Demanding `verified` would also
+// demand zero period violations and so discard a balance-closing repair
+// whenever a row is legitimately dated outside the period; the repaired result
+// keeps whatever status it reconciles to (a period-only discrepancy stays
+// export-gated for the operator).
+const repairClosesBalance = (
+  before: ReturnType<typeof reconcileGoldenRule>,
+  after: ReturnType<typeof reconcileGoldenRule>,
+): boolean =>
+  after.deltaCents === 0n && after.periodBoundsViolations <= before.periodBoundsViolations;
+
 // Run extraction + reconciliation + repair using a single provider. The
 // LLM call (and any same-provider repair calls) accumulate into the
 // telemetry roll-up. Errors are caught and converted into a rejection
@@ -298,7 +382,13 @@ const attemptExtraction = async (
   if (provider.id === 'anthropic') {
     const blocked = await checkAnthropicMonthlyCap(ctx.stmtId);
     if (blocked !== null) {
-      return { providerId, rejection: 'http', error: new Error(blocked), ...empty };
+      // Deterministic for the rest of the month — a BullMQ retry can't fix it.
+      return {
+        providerId,
+        rejection: 'http',
+        error: new PermanentExtractionError(blocked),
+        ...empty,
+      };
     }
   }
 
@@ -402,7 +492,14 @@ const attemptExtraction = async (
   // re-read (ctx.markdown is ''), and an image re-extract repair is a
   // separate follow-on. A vision discrepancy falls through to the
   // discrepancy outcome and surfaces in review.
-  if (reconciled.status === 'discrepancy' && ctx.markdown.length > 0) {
+  // Skipped when the balance already ties (deltaCents === 0n): that discrepancy
+  // is purely out-of-period rows, which an amount repair cannot fix — the call
+  // would be pointless (and paid on Anthropic).
+  if (
+    reconciled.status === 'discrepancy' &&
+    reconciled.deltaCents !== 0n &&
+    ctx.markdown.length > 0
+  ) {
     const suspects = findSuspectRows(
       openingCents,
       effectiveTxs.map((t) => ({
@@ -446,7 +543,7 @@ const attemptExtraction = async (
       totalOutputTokens += repairResult.telemetry.outputTokens ?? 0;
       totalCallCount += 1;
       totalCostMicros += repairResult.telemetry.costMicros;
-      if (verifyAfterLlmRepair.status === 'verified') {
+      if (repairClosesBalance(reconciled, verifyAfterLlmRepair)) {
         effectiveTxs = repairedTxs;
         reconciled = verifyAfterLlmRepair;
         repairApplied = `llm-repair (${repairedTxs.length} rows)`;
@@ -466,7 +563,7 @@ const attemptExtraction = async (
             providerId,
             deltaAfterRepair: verifyAfterLlmRepair.deltaCents.toString(),
           },
-          'LLM repair did not verify — falling through to heuristic repair',
+          'LLM repair did not close the balance — falling through to heuristic repair',
         );
       }
     } catch (err) {
@@ -480,12 +577,20 @@ const attemptExtraction = async (
   // Heuristic repair (sign-flip / drop-row) — cheap last resort before
   // giving up and letting the orchestrator try the secondary provider.
   if (reconciled.status === 'discrepancy') {
-    const candidate = repairPass(
-      effectiveTxs.map((t) => ({ amountCents: t.amountCents, description: t.description })),
-      reconciled.deltaCents,
-    );
+    // Running balances let the drop-duplicate rule tell an OCR double-capture
+    // (repeats the printed balance) from two real same-day same-amount rows.
+    const repairInput = effectiveTxs.map((t) => ({
+      amountCents: t.amountCents,
+      description: t.description,
+      postedDate: t.postedDate,
+      runningBalanceCents: t.runningBalanceCents,
+    }));
+    const candidate = repairPass(repairInput, reconciled.deltaCents);
     if (candidate) {
       const repairedAmounts = candidate.transactions;
+      // Log-safe fix label: the reconciler's fixDescription embeds the row's
+      // transaction description (PII), so logs carry only the kind.
+      const fixKind = repairedAmounts.length === effectiveTxs.length ? 'flip-sign' : 'drop-row';
       let candidateTxs: typeof effectiveTxs;
       if (repairedAmounts.length === effectiveTxs.length) {
         candidateTxs = effectiveTxs.map((t, i) => ({
@@ -496,10 +601,20 @@ const attemptExtraction = async (
         const out: typeof effectiveTxs = [];
         let r = 0;
         for (const original of effectiveTxs) {
+          const kept = repairedAmounts[r] as
+            | {
+                amountCents: bigint;
+                description?: string;
+                postedDate?: string;
+                runningBalanceCents?: bigint | null;
+              }
+            | undefined;
           if (
-            r < repairedAmounts.length &&
-            repairedAmounts[r]!.amountCents === original.amountCents &&
-            repairedAmounts[r]!.description === original.description
+            kept !== undefined &&
+            kept.amountCents === original.amountCents &&
+            kept.description === original.description &&
+            kept.postedDate === original.postedDate &&
+            kept.runningBalanceCents === original.runningBalanceCents
           ) {
             out.push(original);
             r += 1;
@@ -515,18 +630,15 @@ const attemptExtraction = async (
         periodEnd,
         transactionDates: candidateTxs.map((t) => t.postedDate),
       });
-      if (verifyAfterRepair.status === 'verified') {
+      if (repairClosesBalance(reconciled, verifyAfterRepair)) {
         effectiveTxs = candidateTxs;
         reconciled = verifyAfterRepair;
         repairApplied = candidate.fixDescription;
-        logger.info(
-          { stmtId: ctx.stmtId, providerId, fix: candidate.fixDescription },
-          'reconcile repair applied',
-        );
+        logger.info({ stmtId: ctx.stmtId, providerId, fixKind }, 'reconcile repair applied');
       } else {
         logger.info(
-          { stmtId: ctx.stmtId, providerId, fix: candidate.fixDescription },
-          'reconcile repair candidate rejected — still discrepant after fix',
+          { stmtId: ctx.stmtId, providerId, fixKind },
+          'reconcile repair candidate rejected — balance still off (or more out-of-period rows) after fix',
         );
       }
     }
@@ -556,19 +668,50 @@ const attemptExtraction = async (
   };
 };
 
+// A discrepancy whose balance ties to the cent: the only failure is
+// out-of-period rows (Phase 16 #2 — `verified` also requires zero), e.g. a
+// legitimately back-dated row or an MDY/DMY slip. The balance already ties, so
+// a provider / OCR / text-layer fallback (Anthropic egress + cost, or a full
+// re-OCR) would only risk trading it for a result that does not. It never
+// triggers a fallback; it is persisted as a discrepancy (export stays gated)
+// and the operator fixes the dates in review.
+const isPeriodOnlyDiscrepancy = (a: AttemptOutcome): boolean =>
+  a.rejection === 'discrepancy' && a.reconciled?.deltaCents === 0n;
+
+// Rank an attempt's outcome: verified (4) > period-only discrepancy — balance
+// ties, rows out of period (3) > balance discrepancy — rows we can commit for
+// review (2) > empty-txs — parsed but no rows (1) > http/malformed — no data
+// at all (0).
+const attemptRank = (a: AttemptOutcome): number => {
+  switch (a.rejection) {
+    case null:
+      return 4;
+    case 'discrepancy':
+      return isPeriodOnlyDiscrepancy(a) ? 3 : 2;
+    case 'empty-txs':
+      return 1;
+    default:
+      return 0;
+  }
+};
+
 // Choose between the primary attempt (which triggered fallback) and the
-// secondary attempt. "Usable" = produced data we could potentially
-// commit; HTTP/malformed errors yield no data. Among usable outcomes
-// prefer the verified one; otherwise prefer the fallback (operator
-// opted in, secondary is the explicit second opinion).
-const pickBetterAttempt = (primary: AttemptOutcome, secondary: AttemptOutcome): AttemptOutcome => {
-  const usable = (a: AttemptOutcome): boolean =>
-    a.rejection !== 'http' && a.rejection !== 'malformed';
-  if (usable(secondary) && !usable(primary)) return secondary;
-  if (usable(primary) && !usable(secondary)) return primary;
-  if (secondary.rejection === null && primary.rejection !== null) return secondary;
-  if (primary.rejection === null && secondary.rejection !== null) return primary;
-  return secondary;
+// secondary attempt: the better-ranked outcome wins, so an empty secondary
+// never replaces a primary that produced rows. On a tie prefer the fallback
+// (operator opted in, secondary is the explicit second opinion). Also used to
+// pick between the input-method fallbacks (text-layer vs OCR).
+export const pickBetterAttempt = (
+  primary: AttemptOutcome,
+  secondary: AttemptOutcome,
+): AttemptOutcome => (attemptRank(secondary) >= attemptRank(primary) ? secondary : primary);
+
+// Which repair produced an attempt's rows: the same-provider LLM re-read
+// (`llm-repair (N rows)`, set in attemptExtraction) or the reconciler's
+// heuristic sign-flip / drop-row (its fixDescription, which embeds the affected
+// row's transaction description — never log that text itself).
+const repairKindOf = (repairApplied: string | null): 'llm-repair' | 'heuristic' | null => {
+  if (repairApplied === null) return null;
+  return repairApplied.startsWith('llm-repair') ? 'llm-repair' : 'heuristic';
 };
 
 // Diagnostic record persisted to audit_log on every extraction
@@ -693,6 +836,21 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
   let providerFallbackFired = false;
   let ocrFallbackFired = false;
   let textFallbackFired = false;
+  // Spend across EVERY attempt this run (chosen + rejected, incl. in-attempt
+  // repair calls) — added to statements.llm_cost_micros, the Anthropic
+  // monthly-cap ledger, so rejected paid attempts and re-extracts still count.
+  let runCostMicros = 0n;
+  // Set once a terminal write (AMBIGUOUS halt / final persist) has added
+  // runCostMicros to the ledger; otherwise the outer catch records it, so a
+  // cancelled or failed run's spend still counts toward the cap.
+  let runCostPersisted = false;
+  // Errors from every attempt that threw this run (http / malformed), so the
+  // hard-failure path can tell a deterministic failure from a transient one.
+  const attemptErrors: Error[] = [];
+  // Set once the job-start write has replaced any earlier attempt's `failed`
+  // status. From then on only /cancel, /split (→ failed) or DELETE can leave
+  // the row failed / missing before finalizeJobFailure runs.
+  let jobStartWritten = false;
   let phaseStart = Date.now();
   // Phase tracker — updated at each transition so the failure audit
   // can say "we were in `ocr-markdown` when this fired".
@@ -731,7 +889,12 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
         },
       });
     } catch (auditErr) {
-      logger.warn({ stmtId, step, auditErr }, 'failed to write extraction-step audit row');
+      // Message only: a pg error's `detail` can echo the failing row — i.e. the
+      // step payload (OCR markdown, model JSON, transactions).
+      logger.warn(
+        { stmtId, step, err: (auditErr as Error).message },
+        'failed to write extraction-step audit row',
+      );
     }
   };
   // Hoisted so the outer catch can include them in the failure trace
@@ -815,7 +978,15 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
   });
 
   try {
-    await setStatus(stmtId, 'preprocessing');
+    // Job-start write: deliberately UNCONDITIONAL (unlike the guarded mid-run
+    // setStatus) so a BullMQ retry can revive a statement the previous attempt
+    // marked failed. Clears that attempt's errorMessage too — otherwise a
+    // retry that succeeds still shows the stale "Extraction failed" banner.
+    await db
+      .update(statements)
+      .set({ status: 'preprocessing', errorMessage: null, updatedAt: sql`now()` })
+      .where(eq(statements.id, stmtId));
+    jobStartWritten = true;
     currentPhase = 'preprocessing';
 
     // Drop any cached provider before each job. The provider cache lives in this
@@ -878,7 +1049,7 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
       method = 'ocr';
     } else if (strategy === 'force-text') {
       if (!analysis.hasTextLayer) {
-        throw new Error(
+        throw new PermanentExtractionError(
           'force-text strategy requested but this PDF has no text layer — ' +
             'switch to auto / force-ocr / auto-ocr-fallback / auto-text-fallback',
         );
@@ -946,37 +1117,54 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
     // standalone Dockerfile installs it; on host machines the operator needs
     // `brew install poppler` (or apt/choco). Rasterize to PNG — lossless is
     // best for OCR fidelity and matches the `image/png` data-URL GLM-OCR
-    // expects. DPI is operator-tunable.
-    const produceOcrImages = async (): Promise<OcrPage[]> => {
+    // expects. DPI is operator-tunable. `vibeOcrFailure` is set when GLM-OCR runs
+    // only as the stand-in for a configured VibeOCR that just failed.
+    const produceOcrImages = async (vibeOcrFailure?: Error): Promise<OcrPage[]> => {
+      // No outDir: rasterizePdf renders into a fresh per-call temp dir, removed
+      // below once every page buffer has been read into memory.
       const rasters = await rasterizePdf(data.sourcePdfPath, {
         dpi: aiSettings.ocrDpi,
         format: 'png',
       });
-      const scopedRasters = rasters.filter((r) => inRange(r.index));
-      // Hard page cap. All page buffers are held resident at once here, so at
-      // operator-tunable DPI a pathological upload could otherwise OOM the
-      // worker. Statements this large are vanishingly rare; fail loud and tell
-      // the operator to split.
-      if (scopedRasters.length > MAX_OCR_PAGES) {
-        throw new ExtractionResponseError({
-          summary: `scanned statement has ${scopedRasters.length} pages, exceeding the OCR cap of ${MAX_OCR_PAGES}; split it into smaller statements`,
-          rawResponse: '',
-        });
+      try {
+        const scopedRasters = rasters.filter((r) => inRange(r.index));
+        // Hard page cap. All page buffers are held resident at once here, so at
+        // operator-tunable DPI a pathological upload could otherwise OOM the
+        // worker. Statements this large are vanishingly rare; fail loud and tell
+        // the operator to split. Deterministic — a retry would fail the same way —
+        // when GLM-OCR is the engine. As the stand-in for a failed VibeOCR (which
+        // has no page cap) it is not: a retry may reach VibeOCR again, so throw a
+        // plain, retryable error naming both causes.
+        if (scopedRasters.length > MAX_OCR_PAGES) {
+          if (vibeOcrFailure) {
+            throw new Error(
+              `VibeOCR failed: ${vibeOcrFailure.message}; GLM-OCR fallback can't take ${scopedRasters.length} pages (cap ${MAX_OCR_PAGES})`,
+              { cause: vibeOcrFailure },
+            );
+          }
+          throw new PermanentExtractionError(
+            `scanned statement has ${scopedRasters.length} pages, exceeding the OCR cap of ${MAX_OCR_PAGES}; split it into smaller statements`,
+          );
+        }
+        return await Promise.all(
+          scopedRasters.map(async (r) => ({
+            data: await readFile(r.path),
+            mediaType: r.mediaType,
+            pageIndex: r.index,
+          })),
+        );
+      } finally {
+        await removeRasterDirSafely(rasters, stmtId);
       }
-      return Promise.all(
-        scopedRasters.map(async (r) => ({
-          data: await readFile(r.path),
-          mediaType: r.mediaType,
-          pageIndex: r.index,
-        })),
-      );
     };
 
     // GLM-OCR path (ADR-025): rasterize → OCR each page on the local VLM. Used
     // as the engine when ocrEngine='glm', and as the automatic fallback when
     // VibeOCR is unset/unreachable. Returns per-page transcriptions.
-    const produceGlmOcrPages = async (): Promise<Array<{ index: number; text: string }>> => {
-      const pages = await produceOcrImages();
+    const produceGlmOcrPages = async (
+      vibeOcrFailure?: Error,
+    ): Promise<Array<{ index: number; text: string }>> => {
+      const pages = await produceOcrImages(vibeOcrFailure);
       const localProvider = await buildProviderForId(db, 'local');
       const ocr = await ocrImagesToMarkdown(localProvider, pages);
       return ocr.pages;
@@ -1017,7 +1205,10 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
             { stmtId, err: (err as Error).message },
             'VibeOCR failed — falling back to GLM-OCR per-page',
           );
-          pages = await produceGlmOcrPages();
+          // An unconfigured VibeOCR is not an outage a retry can outlast: GLM-OCR
+          // is then the de facto engine and its page cap stays permanent.
+          const vibeOcrFailure = err instanceof Error ? err : new Error(String(err));
+          pages = await produceGlmOcrPages(aiSettings.vibeOcrUrl ? vibeOcrFailure : undefined);
         }
       } else {
         pages = await produceGlmOcrPages();
@@ -1054,29 +1245,37 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
     );
 
     // Header-crop read (ADR-pending; integration doc §3). The statement-model
-    // engine reads transactions PER PAGE, but a table-dominated page-1 OCR can
-    // drop the bank/account/period/balance prose. For scanned statements, OCR
-    // just the top band of page 1 and prepend it so the per-page model picks up
-    // the header. Best-effort — a failure never blocks extraction.
+    // engine reads transactions PER PAGE, but a table-dominated first-page OCR
+    // can drop the bank/account/period/balance prose. For scanned statements,
+    // OCR just the top band of the statement's FIRST page and insert it under
+    // that page's marker so the per-page model picks up the header. For a split
+    // child that is its range's first page — a pages 4–6 child must read its own
+    // account's header, never page 1's (another account's). Best-effort — a
+    // failure never blocks extraction.
     if (
       aiSettings.extractionEngine === 'statement-model' &&
       (method === 'ocr' || method === 'hybrid')
     ) {
       try {
         const headerDpi = aiSettings.ocrDpi || 150;
+        const headerPage = pageRange?.start ?? 1; // 1-based
+        // No outDir: rasterizePdf renders into a fresh per-call temp dir (never
+        // shared with the page-OCR rasters), removed once the crop is read.
         const headerRasters = await rasterizePdf(data.sourcePdfPath, {
           dpi: headerDpi,
           format: 'png',
-          firstPage: 1,
-          lastPage: 1,
+          firstPage: headerPage,
+          lastPage: headerPage,
           cropHeightPx: Math.round(2.0 * headerDpi), // top ~2 inches
-          // Distinct outDir — rasterizePdf wipes its outDir, so never share the
-          // OCR rasters' `pages/<base>` dir.
-          outDir: `${data.sourcePdfPath}.header`,
         });
+        let buf: Buffer | null = null;
+        try {
+          if (headerRasters[0]) buf = await readFile(headerRasters[0].path);
+        } finally {
+          await removeRasterDirSafely(headerRasters, stmtId);
+        }
         let headerText = '';
-        if (headerRasters[0]) {
-          const buf = await readFile(headerRasters[0].path);
+        if (buf) {
           if (aiSettings.ocrEngine === 'vibe' && aiSettings.vibeOcrUrl) {
             const hr = await vibeOcrFile(buf, 'header.png', 'image/png', {
               baseUrl: aiSettings.vibeOcrUrl,
@@ -1098,16 +1297,16 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
           }
         }
         if (headerText) {
-          const p1 = markdown.match(/^#\s*Page\s+1\s*$/im);
-          if (p1 && p1.index != null) {
-            const at = p1.index + p1[0].length;
+          const pageMarker = markdown.match(new RegExp(`^#\\s*Page\\s+${headerPage}\\s*$`, 'im'));
+          if (pageMarker && pageMarker.index != null) {
+            const at = pageMarker.index + pageMarker[0].length;
             markdown = `${markdown.slice(0, at)}\n\n${headerText}\n${markdown.slice(at)}`;
           } else {
-            markdown = `# Page 1\n\n${headerText}\n\n${markdown}`;
+            markdown = `# Page ${headerPage}\n\n${headerText}\n\n${markdown}`;
           }
           await logStep(
             'header-crop',
-            { chars: headerText.length, engine: aiSettings.ocrEngine },
+            { page: headerPage, chars: headerText.length, engine: aiSettings.ocrEngine },
             headerText,
           );
         }
@@ -1161,6 +1360,11 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
       policy = await resolveProviderPolicy(db);
       ({ primary, secondary } = providerOrderFor(policy));
     }
+    // Router mode: buildProviderForProcessId returns the Vibe AI Router whatever
+    // id is asked for, and failover is the router's own fallback-chain job. A
+    // worker-side secondary attempt would just resend the identical prompt to the
+    // router and write a false local→anthropic extraction-fallback audit row.
+    if ((await resolveAiMode(db)) === 'router') secondary = null;
     // The statement-model engine is local-only; when extraction is pinned to
     // Anthropic it is silently bypassed (Anthropic runs the legacy prompt path).
     // Surface that so the operator isn't confused about which path ran.
@@ -1181,7 +1385,11 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
     // which differs only when a provider fallback fires.
     await setStatus(stmtId, 'extracting', {
       llmProvider: primary,
-      llmModelVersion: extractionCfg.model ?? (await resolveModelLabelForProvider(db, primary)),
+      // Same family rule as buildProviderForProcessId: a per-process model only
+      // applies to its own provider family, so label what will actually run.
+      llmModelVersion:
+        processModelForProvider(extractionCfg.model, primary) ??
+        (await resolveModelLabelForProvider(db, primary)),
     });
     let attemptCtx: AttemptContext = {
       stmtId,
@@ -1191,21 +1399,28 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
     };
 
     const persistAmbiguousHalt = async (a: AttemptOutcome): Promise<void> => {
-      await db
+      // Guarded like setStatus: never resurrect a statement /cancel or /split
+      // marked failed (or DELETE removed) mid-run.
+      const halted = await db
         .update(statements)
         .set({
           status: 'awaiting-locale-confirmation',
+          errorMessage: null,
           sourceDateFormat: 'AMBIGUOUS',
           sourceDateFormatConfidence: a.dateFormatConfidence,
           llmProvider: a.providerId,
           llmInputTokens: a.totalInputTokens,
           llmOutputTokens: a.totalOutputTokens,
           llmCallCount: a.totalCallCount,
-          llmCostMicros: a.totalCostMicros,
+          // ADD this run's spend (every attempt so far) to the ledger.
+          llmCostMicros: addToLlmCostLedger(runCostMicros),
           llmModelVersion: a.modelVersion,
           updatedAt: sql`now()`,
         })
-        .where(eq(statements.id, stmtId));
+        .where(and(eq(statements.id, stmtId), ne(statements.status, 'failed')))
+        .returning({ id: statements.id });
+      if (halted.length === 0) throw new CancelledError();
+      runCostPersisted = true;
       logger.info(
         { stmtId, providerId: a.providerId },
         'extraction halted: ambiguous source date format — awaiting operator confirmation',
@@ -1233,11 +1448,27 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
       // reach here, so Anthropic-on-OCR'd-markdown is allowed (ADR-023).
       const resolvedPrimary: ProviderId = primary;
       const resolvedSecondary: ProviderId | null = secondary;
+      // Roll every attempt (chosen or not) into the run's spend + error lists.
+      const recordAttempt = (a: AttemptOutcome, durationMs: number): void => {
+        attempts.push(traceEntryFor(a, inputMethod, durationMs));
+        runCostMicros += a.totalCostMicros;
+        if (a.error) attemptErrors.push(a.error);
+      };
       const firstStart = Date.now();
       const first = await attemptExtraction(resolvedPrimary, ctx);
-      attempts.push(traceEntryFor(first, inputMethod, Date.now() - firstStart));
+      recordAttempt(first, Date.now() - firstStart);
       if (first.dateFormat === 'AMBIGUOUS' && !ctx.dateFormatOverride) return first;
       if (first.rejection === null || resolvedSecondary === null) return first;
+      if (isPeriodOnlyDiscrepancy(first)) {
+        logger.info(
+          { stmtId, providerId: first.providerId, inputMethod },
+          'balance ties but rows fall outside the period — keeping it for review, no provider fallback',
+        );
+        return first;
+      }
+      // /cancel or /split may have landed during the primary attempt — never
+      // start the secondary (possibly Anthropic egress) for a cancelled row.
+      await checkCancelled(stmtId);
       providerFallbackFired = true;
       await writeAudit(db, {
         entityType: 'statement',
@@ -1268,11 +1499,12 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
       await setStatus(stmtId, 'extracting', {
         llmProvider: resolvedSecondary,
         llmModelVersion:
-          extractionCfg.model ?? (await resolveModelLabelForProvider(db, resolvedSecondary)),
+          processModelForProvider(extractionCfg.model, resolvedSecondary) ??
+          (await resolveModelLabelForProvider(db, resolvedSecondary)),
       });
       const secondStart = Date.now();
       const second = await attemptExtraction(resolvedSecondary, ctx);
-      attempts.push(traceEntryFor(second, inputMethod, Date.now() - secondStart));
+      recordAttempt(second, Date.now() - secondStart);
       if (second.dateFormat === 'AMBIGUOUS' && !ctx.dateFormatOverride) return second;
       return pickBetterAttempt(first, second);
     };
@@ -1296,11 +1528,18 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
     //   - strategy is `auto-ocr-fallback`, and
     //   - we tried text-layer first (otherwise there's nothing to fall
     //     back to), and
-    //   - the provider stack rejected with any of the four triggers.
+    //   - the provider stack rejected with any of the four triggers — except a
+    //     period-only discrepancy (balance ties; see isPeriodOnlyDiscrepancy).
     // Provider fallback runs *inside* each input attempt — so the OCR
     // retry also exercises the secondary provider via runProviderFallback.
     // Worst case: 4 LLM calls (text×{primary,secondary} → ocr×{primary,secondary}).
-    if (strategy === 'auto-ocr-fallback' && method === 'text' && chosen.rejection !== null) {
+    if (
+      strategy === 'auto-ocr-fallback' &&
+      method === 'text' &&
+      chosen.rejection !== null &&
+      !isPeriodOnlyDiscrepancy(chosen)
+    ) {
+      await checkCancelled(stmtId);
       ocrFallbackFired = true;
       await writeAudit(db, {
         entityType: 'statement',
@@ -1347,14 +1586,17 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
     // Mirror fallback: auto-text-fallback starts with OCR; if the OCR-fed
     // LLM call rejected and the PDF has a text layer, retry using the
     // text layer. Skipped silently when no text layer exists — there's
-    // nothing to fall back to. Worst case mirrors auto-ocr-fallback:
+    // nothing to fall back to — and for a period-only discrepancy (balance
+    // ties; see isPeriodOnlyDiscrepancy). Worst case mirrors auto-ocr-fallback:
     // 4 LLM calls (ocr×{primary,secondary} → text×{primary,secondary}).
     if (
       strategy === 'auto-text-fallback' &&
       method === 'ocr' &&
       chosen.rejection !== null &&
+      !isPeriodOnlyDiscrepancy(chosen) &&
       analysis.hasTextLayer
     ) {
+      await checkCancelled(stmtId);
       textFallbackFired = true;
       await writeAudit(db, {
         entityType: 'statement',
@@ -1400,7 +1642,19 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
     // diagnostic-capture path (statement.extraction-failed audit row,
     // user-friendly errorMessage on the statements row).
     if (chosen.rejection === 'http' || chosen.rejection === 'malformed') {
-      throw chosen.error ?? new Error('extraction failed with no usable result');
+      const chosenError = chosen.error ?? new Error('extraction failed with no usable result');
+      // A deterministic error makes the BullMQ job unrecoverable (no retry).
+      // If another attempt this run failed TRANSIENTLY (5xx / timeout /
+      // network), surface that one instead so the retry still happens — e.g. a
+      // cold-start Ollama timeout followed by an Anthropic fallback blocked by
+      // the monthly cap. Every attempt's error stays in the failure trace.
+      const transientError = isPermanentExtractionFailure(chosenError)
+        ? attemptErrors.find((e) => !isPermanentExtractionFailure(e))
+        : undefined;
+      // /cancel or /split may have landed while the failing call was in flight:
+      // finish as a cooperative cancel, not a (possibly retried) failure.
+      await checkCancelled(stmtId);
+      throw transientError ?? chosenError;
     }
 
     await checkCancelled(stmtId);
@@ -1416,7 +1670,10 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
         txCount: chosen.effectiveTxs.length,
         reconciliation: chosen.reconciled?.status ?? null,
         deltaCents: chosen.reconciled?.deltaCents?.toString() ?? null,
-        repairApplied: chosen.repairApplied ?? null,
+        // Kind only: this detail is also logged at info level, and a heuristic
+        // fix description embeds a transaction description (PII). The full text
+        // is in the statement.extracted audit payload.
+        repairKind: repairKindOf(chosen.repairApplied),
       },
       // The exact raw JSON the extraction model returned (post-parse source).
       chosen.rawJson ?? undefined,
@@ -1446,9 +1703,9 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
       });
     }
 
-    // OCR runs in the same local Ollama vision call as extraction, so its
-    // tokens/cost are already in the chosen attempt's telemetry — no separate
-    // OCR usage to roll up.
+    // OCR runs locally (cost 0), so the only spend is the extraction attempts.
+    // Tokens / call count describe the chosen attempt; the cost ledger gets this
+    // run's TOTAL spend (every attempt, chosen or rejected) ADDED to it.
     await db
       .update(statements)
       .set({
@@ -1456,10 +1713,12 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
         llmInputTokens: chosen.totalInputTokens,
         llmOutputTokens: chosen.totalOutputTokens,
         llmCallCount: chosen.totalCallCount,
-        llmCostMicros: chosen.totalCostMicros,
+        llmCostMicros: addToLlmCostLedger(runCostMicros),
         llmModelVersion: chosen.modelVersion,
-        sourceDateFormat: chosen.dateFormat,
-        sourceDateFormatConfidence: chosen.dateFormatConfidence,
+        // An operator-confirmed format wins over the model's report (which may
+        // still say AMBIGUOUS) — otherwise the next re-extract halts again.
+        sourceDateFormat: dateFormatOverride ?? chosen.dateFormat,
+        sourceDateFormatConfidence: dateFormatOverride ? 1 : chosen.dateFormatConfidence,
         periodStart: chosen.periodStart,
         periodEnd: chosen.periodEnd,
         openingBalanceCents: chosen.openingBalanceCents,
@@ -1467,6 +1726,7 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
         updatedAt: sql`now()`,
       })
       .where(eq(statements.id, stmtId));
+    runCostPersisted = true;
 
     const effectiveTxs = chosen.effectiveTxs;
     const reconciled = chosen.reconciled;
@@ -1527,6 +1787,15 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
           `low confidence (< ${reviewConfidenceThreshold}` +
           `${method === 'ocr' || method === 'hybrid' ? ', via OCR' : ''}). Verify their dates and ` +
           `amounts against the source statement before exporting.`
+        : null;
+
+    // A heuristic sign-flip / drop-row made the balance tie by changing or
+    // removing a row the model extracted — it can be wrong, so hold for review.
+    // (An LLM re-read repair is a fresh extraction, not a forced edit.)
+    const autoRepairNote =
+      repairKindOf(repairApplied) === 'heuristic'
+        ? `Auto-repair applied (${repairApplied}) to make the balance tie — verify against ` +
+          `the source before exporting.`
         : null;
 
     // Rows that fail to insert (e.g. a regex-valid but invalid calendar date the
@@ -1599,6 +1868,7 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
       reviewHoldReason =
         [
           missingBoundsNote,
+          autoRepairNote,
           chosen.extractionNotes,
           droppedAmountNote,
           skippedNote,
@@ -1614,6 +1884,8 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
           reconciliationStatus: reconciled.status === 'verified' ? 'verified' : 'discrepancy',
           periodBoundsViolations: reconciled.periodBoundsViolations,
           status: 'review',
+          // A retry that succeeded must not keep the failed attempt's message.
+          errorMessage: null,
           // Local OCR emits no per-page classification (Shield removed).
           pageClassifications: null,
           // Low-confidence rows hold the statement for human review before
@@ -1663,9 +1935,23 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
     if (autoCheckPayee && effectiveTxs.some((t) => t.checkNumber && !t.payee)) {
       try {
         const res = await resolveCheckPayees(db, stmtId);
+        // Widened view so this compiles against either resolver result shape —
+        // the text-parse telemetry fields are newer than the base result.
+        const tel = res as typeof res & {
+          textProviderId?: string | null;
+          textParseCalls?: number;
+          textParseCostMicros?: bigint;
+        };
         await logStep('check-payee', {
           matched: res.matchedCount,
           candidates: res.candidateCount,
+          // Which provider parsed the check text (anthropic = egress) and its
+          // spend, plus the vision/OCR model + total cost of the pass.
+          textProvider: tel.textProviderId ?? null,
+          textParseCalls: tel.textParseCalls ?? 0,
+          textParseCostMicros: String(tel.textParseCostMicros ?? 0n),
+          costMicros: String(res.costMicros),
+          model: res.model ?? null,
         });
       } catch (err) {
         logger.warn(
@@ -1701,11 +1987,41 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
     });
     currentPhase = 'done';
   } catch (err) {
+    // No terminal write recorded this run's spend (cancelled / failed before
+    // the halt or final persist): add it now — paid attempts count toward the
+    // Anthropic monthly cap whatever the outcome. A deleted row updates 0 rows.
+    if (!runCostPersisted && runCostMicros > 0n) {
+      try {
+        await db
+          .update(statements)
+          .set({ llmCostMicros: addToLlmCostLedger(runCostMicros) })
+          .where(eq(statements.id, stmtId));
+      } catch (costErr) {
+        logger.warn(
+          { stmtId, err: (costErr as Error).message },
+          'failed to record LLM spend for an unfinished extraction run',
+        );
+      }
+    }
     // CancelledError is the operator pulling the plug — the /cancel
     // route already wrote the reason, and the outer worker catch
     // swallows it without writing an audit row. Re-throw without
     // touching audit_log.
     if (err instanceof CancelledError) throw err;
+    // /cancel or /split may have marked the row failed — or DELETE removed it —
+    // while a call was in flight that then failed (e.g. a timeout). The worker
+    // writes `failed` itself only in finalizeJobFailure, after this, so a failed
+    // or missing row means the operator pulled the plug: finish as the
+    // cooperative cancel above (no failure audit row, no overwrite of the cancel
+    // verdict, no BullMQ retry — whose unconditional job-start write would
+    // revive the statement, and a split parent would duplicate its children).
+    if (jobStartWritten && (await cancelledMidRun(stmtId))) {
+      logger.info(
+        { stmtId, phase: currentPhase, errorClass: (err as Error)?.constructor?.name ?? 'Error' },
+        'extraction failed after the statement was cancelled — treating as cancelled',
+      );
+      throw new CancelledError();
+    }
     // Rich failure trace — same shape as the success / halted-ambiguous
     // traces, plus a fully described error (class, name, message,
     // cause chain, truncated stack). With this in place the operator
@@ -1748,8 +2064,12 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
         payload: failureDiagnostic,
       });
     } catch (auditErr) {
-      // Don't let an audit write failure mask the real error.
-      logger.warn({ auditErr }, 'failed to write extraction-failed audit row');
+      // Don't let an audit write failure mask the real error. Message only — a
+      // pg error's `detail` can echo the failing row (the diagnostic payload).
+      logger.warn(
+        { stmtId, err: (auditErr as Error).message },
+        'failed to write extraction-failed audit row',
+      );
     }
     throw err;
   }
@@ -1759,9 +2079,13 @@ export const processExtraction = async (data: ExtractionJobData): Promise<void> 
 // be unit-tested without a live BullMQ runtime. A CancelledError keeps the
 // /cancel verdict already written by the route (returns 'cancelled', no row
 // write). Any other error marks the statement `failed` with a user-facing
-// message and returns 'failed' — the caller then rethrows so BullMQ records
-// the failure and applies its retry/backoff. The rich diagnostic audit row was
-// already written inside processExtraction's own catch.
+// message and returns 'failed' — the caller then rethrows (via errorForBullmq)
+// so BullMQ records the failure and retries it only when transient. The rich
+// diagnostic audit row was already written inside processExtraction's own catch.
+// That write is guarded like setStatus: a row already `failed` (/cancel or
+// /split landed after processExtraction's own re-check) or deleted keeps the
+// operator's verdict and returns 'cancelled' — no overwrite, and no retry whose
+// unconditional job-start write would revive the statement.
 export const finalizeJobFailure = async (
   jobData: ExtractionJobData,
   err: unknown,
@@ -1774,7 +2098,11 @@ export const finalizeJobFailure = async (
   const e = err as Error;
   logger.error(
     {
-      err,
+      // Never hand pino a raw ExtractionResponseError: its enumerable
+      // rawResponse is the full model output (descriptions, payees, amounts)
+      // and the err serializer would copy it into the log. Class + message +
+      // summary only; the bounded raw snippet is in the extraction-failed audit row.
+      ...(err instanceof ExtractionResponseError ? { summary: err.summary } : { err }),
       jobId,
       errorClass: e?.constructor?.name ?? 'Error',
       message: e?.message ?? String(err),
@@ -1787,11 +2115,33 @@ export const finalizeJobFailure = async (
     err instanceof ExtractionResponseError
       ? `${err.message} — full LLM response captured in audit_log`
       : (e?.message ?? 'extraction failed');
-  await db
+  const marked = await db
     .update(statements)
     .set({ status: 'failed', errorMessage: userMessage, updatedAt: sql`now()` })
-    .where(eq(statements.id, jobData.statementId));
+    .where(and(eq(statements.id, jobData.statementId), ne(statements.status, 'failed')))
+    .returning({ id: statements.id });
+  if (marked.length === 0) {
+    logger.info({ jobId }, 'statement was cancelled or deleted mid-run — keeping that verdict');
+    return 'cancelled';
+  }
   return 'failed';
+};
+
+// What the BullMQ processor rethrows once finalizeJobFailure has marked the
+// statement failed. A deterministic failure becomes an UnrecoverableError so
+// BullMQ skips the remaining attempts — re-running would repeat OCR + LLM (and
+// any Anthropic egress) only to fail identically, flip the UI failed → running
+// and append duplicate audit rows. Transport / timeout / 5xx errors are returned
+// unchanged and keep the queue's retry/backoff.
+export const errorForBullmq = (err: unknown): unknown =>
+  isPermanentExtractionFailure(err) ? new UnrecoverableError((err as Error).message) : err;
+
+// WORKER_CONCURRENCY → a positive integer. Unset / non-numeric / < 1 falls back
+// to 1 — a NaN made the BullMQ Worker constructor throw, so the worker never
+// started.
+export const parseWorkerConcurrency = (raw: string | undefined): number => {
+  const n = Number.parseInt(raw ?? '', 10);
+  return Number.isFinite(n) && n >= 1 ? n : 1;
 };
 
 export const startExtractionWorker = async (): Promise<Worker<ExtractionJobData>> => {
@@ -1808,8 +2158,9 @@ export const startExtractionWorker = async (): Promise<Worker<ExtractionJobData>
         await processExtraction(job.data);
       } catch (err) {
         const verdict = await finalizeJobFailure(job.data, err, job.id);
-        // Rethrow non-cancelled failures so BullMQ records them and retries.
-        if (verdict === 'failed') throw err;
+        // Rethrow non-cancelled failures so BullMQ records them; only transient
+        // ones are retried (deterministic ones → UnrecoverableError).
+        if (verdict === 'failed') throw errorForBullmq(err);
       }
     },
     {
@@ -1825,7 +2176,7 @@ export const startExtractionWorker = async (): Promise<Worker<ExtractionJobData>
       // and a noisy retry; GPU operators waste nothing because the
       // job finishes in seconds and releases the lock immediately.
       lockDuration: lockMs + 60_000,
-      concurrency: Math.max(1, Number(process.env.WORKER_CONCURRENCY ?? 1)),
+      concurrency: parseWorkerConcurrency(process.env.WORKER_CONCURRENCY),
     },
   );
 };

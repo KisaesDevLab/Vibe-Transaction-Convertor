@@ -138,23 +138,37 @@ First match wins. The verbatim rule order:
 2. **LLM hint provided** and a known enum value → use it (reason
    `llm-hint`).
 3. **Description regex pass.** Each rule below tested in order against
-   the normalized description. First match wins.
+   the normalized description. First match wins. Every pattern is
+   wrapped as `\b(?:…)\b`, so the word boundaries bind to **each**
+   alternative — `adp` does not match inside `LEADPAGES`, `gusto` not
+   inside `AUGUSTO'S`, `int paid` not inside `SPRINT PAID`, `to acct`
+   not inside `AUTO ACCT`.
    - `interest|int paid|int earned|interest credit` → `INT`
-   - `dividend|div paid` → `DIV`
-   - `service charge|maintenance fee|monthly fee` → `SRVCHG`
-   - `\bfee\b|overdraft fee|nsf fee` → `FEE`
-   - `atm withdrawal|atm w\/d|withdrawal at machine|atm cash` → `ATM`
-   - `direct deposit|payroll|adp|paychex|gusto|salary deposit` →
-     `DIRECTDEP`
-   - `ach debit|preauthorized debit|direct debit` → `DIRECTDEBIT`
-   - `transfer|xfer|to acct|from acct|tfr to|tfr from` → `XFER`
-   - `pos purchase|debit card purchase|visa purchase` → `POS`
-   - `online payment|bill pay|web pay|epay` → `PAYMENT`
+   - `dividends?|div paid` → `DIV`
+   - `service charges?|maintenance fees?|monthly fees?` → `SRVCHG`
+   - `fees?|overdraft fees?|nsf fees?` → `FEE`
+   - `atm withdrawals?|atm w ?d|withdrawals? at machine|atm cash` →
+     `ATM` (normalization turns `ATM W/D` into `atm w d`)
+   - `direct deposits?|payroll|adp|paychex|gusto|salary deposits?` →
+     `DIRECTDEP` — **money in only** (a business paying its own payroll
+     is a debit and falls through to the later rules / sign fallback)
+   - `ach debits?|preauthorized debits?|direct debits?` → `DIRECTDEBIT`
+   - `transfer…|xfer…|to acct|from acct|tfr to|tfr from` → `XFER`
+     (`transfer`/`xfer` also match inflections such as `TRANSFERRED`)
+   - `pos purchases?|debit card purchases?|visa purchases?` → `POS`
+   - `online pay(ments?|mt)|bill pay(ments?|mt)?|web pay(ments?|mt)?|epay(ments?|mt)?`
+     → `PAYMENT`
    - `wire (in|received)` → `XFER`
    - `wire (out|sent)` → `XFER`
-   - `deposit` → `DEP` (after the more specific deposit-like rules
-     above have run)
-   - `cash withdrawal|cash out` → `CASH`
+   - `deposits?` → `DEP` — **money in only** (after the more specific
+     deposit-like rules above have run; a money-out "DEPOSIT REVERSAL"
+     falls through to the sign fallback)
+   - `cash withdrawals?|cash out` → `CASH`
+
+   "Money in" is judged from the account holder's perspective: credit
+   cards store charges positive, so their amounts are negated before a
+   rule's sign condition is checked.
+
 4. **Sign fallback.**
    - On a **credit card**: `amountCents > 0` → `DEBIT` (charge);
      `amountCents <= 0` → `PAYMENT`.

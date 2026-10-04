@@ -6,6 +6,12 @@ import { useCopyToClipboard } from '../hooks/useCopyToClipboard';
 import { useToast } from '../components/Toast';
 import { ApiError } from '../lib/api';
 
+// Vibe Auth break-glass local admin (ADR-027). Its password is provisioned by
+// the appliance (`vibe-auth breakglass ensure`) and the API refuses to reset
+// it (403), so the row offers no reset action. Mirrors BREAKGLASS_EMAIL in
+// apps/api/src/lib/vibe-auth-users.ts.
+const BREAKGLASS_EMAIL = 'vibe-breakglass@vibe-tx-converter.local';
+
 const formatRelativeTime = (iso: string): string => {
   const ms = Date.now() - new Date(iso).getTime();
   if (ms < 60_000) return 'just now';
@@ -49,7 +55,10 @@ export function UsersAdminPage() {
       const { temporaryPassword } = await reset.mutateAsync(id);
       setResetTemp({ id, temp: temporaryPassword });
     } catch (err) {
+      // 403 (e.g. the break-glass account) and 404 (user gone) carry the
+      // server's message; a 404 also means this list is stale.
       toast.error(err instanceof ApiError ? err.message : 'reset failed');
+      if (err instanceof ApiError && err.status === 404) void list.refetch();
     }
   };
 
@@ -156,13 +165,22 @@ export function UsersAdminPage() {
                   {u.lastLoginAt ? formatRelativeTime(u.lastLoginAt) : 'never'}
                 </td>
                 <td className="px-3 py-2 text-right">
-                  <button
-                    type="button"
-                    onClick={() => onReset(u.id)}
-                    className="rounded border border-surface-muted px-2 py-1 text-xs"
-                  >
-                    Reset password
-                  </button>
+                  {u.email.toLowerCase() === BREAKGLASS_EMAIL ? (
+                    <span
+                      className="text-xs text-ink-subtle"
+                      title="Break-glass password is managed by the Vibe Appliance"
+                    >
+                      break-glass
+                    </span>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => onReset(u.id)}
+                      className="rounded border border-surface-muted px-2 py-1 text-xs"
+                    >
+                      Reset password
+                    </button>
+                  )}
                 </td>
               </tr>
             ))}

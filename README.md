@@ -14,7 +14,7 @@ Self-hosted. Local-first. No telemetry. No phone-home.
 cp .env.example .env
 # set SESSION_SECRET to >= 32 random bytes
 docker compose --profile standalone up -d
-open http://localhost:4000
+open http://localhost   # Caddy on :80 fronts the API (port 4000 is internal only)
 ```
 
 The first request lands on `/register` because no users exist; create

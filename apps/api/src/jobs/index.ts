@@ -15,8 +15,11 @@ export const startWorkers = (): void => {
     return;
   }
   // startExtractionWorker resolves its lock duration from the DB, so it's async;
-  // fire-and-forget here (inline mode) — it logs its own startup errors.
-  void startExtractionWorker();
+  // fire-and-forget here (inline mode). Log a startup failure rather than leave
+  // an unhandled rejection that would take the API process down with it.
+  void startExtractionWorker().catch((err: unknown) => {
+    logger.error({ err }, 'extraction worker failed to start');
+  });
   startMaintenanceWorker();
   started = true;
   logger.info('inline workers started: extraction + maintenance');

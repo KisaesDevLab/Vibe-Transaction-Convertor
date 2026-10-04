@@ -117,6 +117,15 @@ const fetchCategoryNamesFor = async (db: Db, txs: Transaction[]): Promise<Map<st
   return new Map(rows.map((r) => [r.id, r.name]));
 };
 
+// Credit-card statements are STORED in statement sign (extractor SYSTEM_PROMPT
+// "Credit-card (INVERTED)"): charges positive, payments/refunds negative, an
+// owed closing balance positive — that is what the Golden Rule reconciles.
+// Every export, though, speaks from the account HOLDER's perspective (OFX spec
+// 3.2.9.2; QuickBooks / Quicken / Xero imports): purchases negative, payments
+// positive, an owed balance negative. Flip at export time only — stored
+// amounts and FITIDs (ADR-005, hashed from the stored sign) never change.
+const holderSign = (account: Account): bigint => (account.accountType === 'CREDITCARD' ? -1n : 1n);
+
 const buildOfxStmt = (stmt: Statement, account: Account, txs: Transaction[]): BuildOfxResult => {
   if (stmt.openingBalanceCents === null || stmt.closingBalanceCents === null) {
     throw new ConflictError('statement has no opening/closing balance — cannot build OFX');
@@ -124,6 +133,7 @@ const buildOfxStmt = (stmt: Statement, account: Account, txs: Transaction[]): Bu
   if (!stmt.periodStart || !stmt.periodEnd) {
     throw new ConflictError('statement has no period bounds — cannot build OFX');
   }
+  const sgn = holderSign(account);
   // Phase 22 item 19/21: resolve BANKID via the canonical fallback ladder.
   const { bankId, source: bankIdSource } = resolveBankId(account.routingNumber, account.intuBid);
   const ofxStmt: Stmt = {
@@ -144,9 +154,7 @@ const buildOfxStmt = (stmt: Statement, account: Account, txs: Transaction[]): Bu
       // and it actually differs from the raw bank string, promote
       // cleansed to <NAME> and tuck the raw original into <MEMO> so
       // QuickBooks shows the human-readable form but operators can
-      // audit-trace to the bank's exact wording. checkNumber retains
-      // priority over memo (existing behaviour: paper-check rows
-      // already convey the relevant info via <CHECKNUM>).
+      // audit-trace to the bank's exact wording.
       const useCleansed =
         typeof t.cleansedDescription === 'string' &&
         t.cleansedDescription.length > 0 &&
@@ -159,18 +167,18 @@ const buildOfxStmt = (stmt: Statement, account: Account, txs: Transaction[]): Bu
       const out: Stmt['transactions'][number] = {
         trntype: t.trntype,
         postedDate: t.postedDate,
-        amountCents: t.amountCents,
+        amountCents: sgn * t.amountCents,
         fitid: t.fitid,
         name,
       };
-      if (t.checkNumber) {
-        out.checkNumber = t.checkNumber;
-      } else if (usePayee || useCleansed) {
-        out.memo = t.description;
-      }
+      if (t.checkNumber) out.checkNumber = t.checkNumber;
+      // <MEMO> carries the full raw description whenever <NAME> doesn't: when
+      // a payee / cleansed name replaced it, or when it is longer than NAME's
+      // 32-char limit and would otherwise lose its tail (Phase 21 #10).
+      if (usePayee || useCleansed || t.description.length > 32) out.memo = t.description;
       return out;
     }),
-    ledgerBalanceCents: stmt.closingBalanceCents,
+    ledgerBalanceCents: sgn * stmt.closingBalanceCents,
     startDate: stmt.periodStart,
     endDate: stmt.periodEnd,
     asOf: stmt.createdAt,
@@ -182,7 +190,7 @@ const buildOfxStmt = (stmt: Statement, account: Account, txs: Transaction[]): Bu
 // Review hold: a LIVE gate. The extraction worker sets `reviewHoldReason`
 // whenever any row is below the review-confidence threshold (OCR-error safety
 // net), so this fires for low-confidence statements and blocks export until the
-// operator acknowledges via the statements route. There is no allowOverride
+// operator acknowledges via the statements route. There is no override
 // bypass — acknowledgement is the only way through.
 const assertNotHeldForReview = (stmt: Statement): void => {
   if (stmt.reviewHoldReason && !stmt.reviewHoldAcknowledged) {
@@ -190,10 +198,45 @@ const assertNotHeldForReview = (stmt: Statement): void => {
   }
 };
 
+// The ONE export gate, shared by renderExport and renderExportSlices so the
+// single-file, split and bundle paths can't drift apart. In order:
+//   1. Lifecycle — only a statement whose extraction finished (`review`) or
+//      that was already exported has a trustworthy transaction set. Re-extract,
+//      date-format confirmation, split and failed runs wipe or replace the
+//      transactions but can leave a stale reconciliation status behind, so the
+//      reconciliation check alone would export an empty or stale file.
+//   2. Golden Rule — DENY by default (ADR-010). Only `verified`, or
+//      `overridden` (the typed-confirmation, audit-logged
+//      POST /override-reconciliation flow — Phase 16 #17), passes. There is no
+//      per-request override: `discrepancy`, `pending`, `failed` and null are
+//      all blocked, so a new code path that leaves a statement un-reconciled
+//      can't silently export.
+//   3. Review hold (above).
+const assertExportable = (stmt: Statement): void => {
+  if (stmt.status !== 'review' && stmt.status !== 'exported') {
+    throw new ConflictError(`export blocked — statement is ${stmt.status}, not ready for export`);
+  }
+  const status = stmt.reconciliationStatus;
+  if (status !== 'verified' && status !== 'overridden') {
+    if (status === 'discrepancy') {
+      throw new ConflictError(
+        'reconciliation discrepancy — resolve it or override the reconciliation before exporting',
+      );
+    }
+    throw new ConflictError(
+      `export blocked — statement is not reconciled (status: ${status ?? 'pending'})`,
+    );
+  }
+  assertNotHeldForReview(stmt);
+};
+
 export interface RenderedExport {
   format: ExportFormat;
   contentType: string;
   filename: string;
+  // Account + period stem shared by every format of this statement (no
+  // template, part or extension) — names the split / bundle zips.
+  baseName: string;
   bytes: Buffer;
   intuBidUsed?: string;
   bankIdSource?: BankIdSource;
@@ -203,25 +246,9 @@ export const renderExport = async (
   db: Db,
   statementId: string,
   format: ExportFormat,
-  opts: { allowOverride?: boolean } = {},
 ): Promise<RenderedExport> => {
   const { stmt, account, txs } = await fetchStatementContext(db, statementId);
-  // Golden Rule gate — DENY by default (ADR-010). Export is allowed only when
-  // the statement reconciled (`verified`) or the operator already type-confirmed
-  // an override (`overridden`), or it's a `discrepancy` exported with an explicit
-  // override this call. Anything else (`pending`, `failed`, null) is blocked, so
-  // a new code path that leaves a statement un-reconciled can't silently export.
-  const status = stmt.reconciliationStatus;
-  const overrideOk = status === 'discrepancy' && opts.allowOverride === true;
-  if (status !== 'verified' && status !== 'overridden' && !overrideOk) {
-    if (status === 'discrepancy') {
-      throw new ConflictError('reconciliation discrepancy — export requires override');
-    }
-    throw new ConflictError(
-      `export blocked — statement is not reconciled (status: ${status ?? 'pending'})`,
-    );
-  }
-  assertNotHeldForReview(stmt);
+  assertExportable(stmt);
 
   const baseName = buildExportBaseName(account, stmt);
 
@@ -237,13 +264,19 @@ export const renderExport = async (
     // downstream tools rely on. Skip the category fetch when not needed.
     const categoryNamesById =
       tmpl === 'generic' ? await fetchCategoryNamesFor(db, txs) : new Map<string, string>();
+    // Holder-perspective signs for every template (see holderSign): a CC
+    // charge lands negative / in the Debit column, a payment positive / in
+    // the Credit column, an owed running balance negative. The generic CSV
+    // is the documented QuickBooks Online import path (docs/qbo-import.md),
+    // so it follows the same convention.
+    const sgn = holderSign(account);
     const csv = renderCsv(
       tmpl,
       txs.map((t) => ({
         postedDate: t.postedDate,
         description: t.description,
-        amountCents: t.amountCents,
-        runningBalanceCents: t.runningBalanceCents,
+        amountCents: sgn * t.amountCents,
+        runningBalanceCents: t.runningBalanceCents === null ? null : sgn * t.runningBalanceCents,
         trntype: t.trntype,
         fitid: t.fitid,
         ...(t.checkNumber ? { checkNumber: t.checkNumber } : {}),
@@ -263,7 +296,11 @@ export const renderExport = async (
     return {
       format,
       contentType: 'text/csv; charset=utf-8',
-      filename: `${baseName}.csv`,
+      // The template is part of the name (Phase 20 #11) — four CSV templates
+      // share one base name, and the bundle zip would otherwise keep only
+      // the last of four same-named entries.
+      filename: `${baseName}_${tmpl}.csv`,
+      baseName,
       bytes: Buffer.from(csv, 'utf8'),
     };
   }
@@ -274,6 +311,7 @@ export const renderExport = async (
       format,
       contentType: 'application/x-ofx',
       filename: `${baseName}.ofx`,
+      baseName,
       bytes: Buffer.from(renderOfxXml(ast, overrideNote ? { overrideNote } : {}), 'utf8'),
       bankIdSource,
     };
@@ -283,6 +321,7 @@ export const renderExport = async (
       format,
       contentType: 'application/vnd.intu.qbo',
       filename: `${baseName}.qbo`,
+      baseName,
       bytes: Buffer.from(renderQbo(ast), 'utf8'),
       intuBidUsed: ast.bankAccountInfo.intuBid ?? FALLBACK_INTU_BID,
       bankIdSource,
@@ -293,6 +332,7 @@ export const renderExport = async (
       format,
       contentType: 'application/vnd.intu.qfx',
       filename: `${baseName}.qfx`,
+      baseName,
       bytes: Buffer.from(renderQfx(ast), 'utf8'),
       intuBidUsed: ast.bankAccountInfo.intuBid ?? FALLBACK_INTU_BID,
       bankIdSource,
@@ -310,30 +350,14 @@ export const renderExportSlices = async (
   db: Db,
   statementId: string,
   format: ExportFormat,
-  opts: { allowOverride?: boolean } = {},
 ): Promise<RenderedExport[]> => {
   if (format !== 'qbo' && format !== 'qfx') {
-    return [await renderExport(db, statementId, format, opts)];
+    return [await renderExport(db, statementId, format)];
   }
   const { stmt, account, txs } = await fetchStatementContext(db, statementId);
-  // Golden Rule gate — DENY by default (ADR-010). Export is allowed only when
-  // the statement reconciled (`verified`) or the operator already type-confirmed
-  // an override (`overridden`), or it's a `discrepancy` exported with an explicit
-  // override this call. Anything else (`pending`, `failed`, null) is blocked, so
-  // a new code path that leaves a statement un-reconciled can't silently export.
-  const status = stmt.reconciliationStatus;
-  const overrideOk = status === 'discrepancy' && opts.allowOverride === true;
-  if (status !== 'verified' && status !== 'overridden' && !overrideOk) {
-    if (status === 'discrepancy') {
-      throw new ConflictError('reconciliation discrepancy — export requires override');
-    }
-    throw new ConflictError(
-      `export blocked — statement is not reconciled (status: ${status ?? 'pending'})`,
-    );
-  }
-  assertNotHeldForReview(stmt);
+  assertExportable(stmt);
   if (txs.length <= QBO_SPLIT_THRESHOLD) {
-    return [await renderExport(db, statementId, format, opts)];
+    return [await renderExport(db, statementId, format)];
   }
   const baseName = buildExportBaseName(account, stmt);
   const slices: RenderedExport[] = [];
@@ -346,6 +370,7 @@ export const renderExportSlices = async (
       format,
       contentType: format === 'qbo' ? 'application/vnd.intu.qbo' : 'application/vnd.intu.qfx',
       filename: `${baseName}_part${part}.${ext}`,
+      baseName,
       bytes: Buffer.from(format === 'qbo' ? renderQbo(ast) : renderQfx(ast), 'utf8'),
       intuBidUsed: ast.bankAccountInfo.intuBid ?? FALLBACK_INTU_BID,
       bankIdSource,

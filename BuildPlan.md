@@ -1803,6 +1803,7 @@ packages/fidir/src/
 | `VIBETC_FORCE_OCR`             | no          | `false`                        | force OCR regardless of routing                                                        |
 | `VIBETC_DESKEW`                | no          | `false`                        | reserved for v2                                                                        |
 | `VIBETC_EXTRACTION_TIMEOUT_MS` | no          | `600000`                       | per-job timeout                                                                        |
+| `PDFTOPPM_TIMEOUT_MS`          | no          | `600000`                       | hard ceiling on one pdftoppm rasterization run (process killed past it)                |
 | `AUDIT_RETENTION_DAYS`         | no          | unset (keep forever)           | audit pruning                                                                          |
 | `VIBE_AUTH_MODE`               | no          | `local`                        | `local` \| `both` \| `oidc_only` (ADR-027); admin UI overrides                         |
 | `VIBE_OIDC_ISSUER`             | conditional | —                              | Vibe Auth issuer URL; required for `both`/`oidc_only` unless set in the admin UI       |

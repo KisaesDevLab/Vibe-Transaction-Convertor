@@ -8,7 +8,8 @@
 // rolls the schema version back with the rows it belongs to (see the
 // RESTORE section). Keeping the dump to these two schemas means
 // restoring into a fresh database touches nothing else on a shared
-// Postgres instance.
+// Postgres instance — which is also why import and restore refuse a
+// dump that carries any other schema (see foreignDumpSchemas).
 
 import { execFile, spawn } from 'node:child_process';
 import { copyFile, mkdir, open, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
@@ -163,23 +164,54 @@ export const filterSchemaEntries = (tocListing: string): string =>
 // it forward cleanly.
 export const BACKUP_SCHEMAS = ['vibetc', 'drizzle'] as const;
 
+// Schemas in a dump's TOC that a vibetc backup never carries. The restore
+// drops and recreates EVERY schema the dump lists, so restoring a
+// whole-database dump would wipe `public` or — on a shared appliance
+// Postgres — another app's schema, and the safety dump (BACKUP_SCHEMAS
+// only) could not bring them back.
+export const foreignDumpSchemas = (schemas: readonly string[]): string[] =>
+  schemas.filter((s) => !(BACKUP_SCHEMAS as readonly string[]).includes(s));
+
+const assertOnlyBackupSchemas = (schemas: readonly string[]): void => {
+  const foreign = foreignDumpSchemas(schemas);
+  if (foreign.length > 0) {
+    throw new Error(
+      `dump also contains schema(s) ${foreign.join(', ')}: it is a whole-database dump, not a vibetc backup; restoring it would drop and replace them. Take it with pg_dump --schema=vibetc --schema=drizzle.`,
+    );
+  }
+};
+
 export const createBackup = async (): Promise<BackupSummary> => {
   const dir = await ensureDir();
   const filename = newFilename();
   const path = join(dir, filename);
+  // pg_dump creates its --file before it even connects, so dumping
+  // straight to the final name would list a failed dump (0 bytes or
+  // truncated) as a backup, and an in-progress one under its final name.
+  // Write to a sibling the listing never matches (the retention sweep reaps
+  // it only once it is a day stale, i.e. a crashed dump), and only rename it
+  // into place once pg_dump exited cleanly.
+  const partial = `${path}.partial`;
   const { args: connArgs, env } = pgConnectionArgs();
   const args: string[] = [
     '--no-owner',
     ...BACKUP_SCHEMAS.map((s) => `--schema=${s}`),
     '--format=custom',
     '--file',
-    path,
+    partial,
     ...connArgs,
   ];
   try {
     await execFileP('pg_dump', args, { maxBuffer: 64 * 1024 * 1024, env });
   } catch (err) {
+    await rm(partial, { force: true }).catch(() => undefined);
     throw pgToolError('pg_dump', err);
+  }
+  try {
+    await rename(partial, path);
+  } catch (err) {
+    await rm(partial, { force: true }).catch(() => undefined);
+    throw err;
   }
   const s = await stat(path);
   return {
@@ -264,6 +296,7 @@ export const importBackup = async (
       }). It is a backup of some other database.`,
     );
   }
+  assertOnlyBackupSchemas(schemas);
 
   const dir = await ensureDir();
   // Keep the original name when it is one of ours, so a dump downloaded
@@ -301,34 +334,52 @@ export const importBackup = async (
   return { filename, sizeBytes: s.size, createdAt: s.mtime.toISOString() };
 };
 
+// A `.partial` this old is the leftover of a pg_dump that died with the
+// process (createBackup removes the partial of a dump that merely failed, but
+// a crash or kill mid-dump leaves it behind, and nothing lists or deletes it).
+// pg_dump keeps writing to the file — bumping its mtime — for as long as the
+// dump runs, so a partial untouched for a day cannot be one still in progress.
+const STALE_PARTIAL_MS = 24 * 60 * 60 * 1000;
+
 // Phase 26 #21: nightly sweep of backups older than retention. Default
-// 90 days; operators override via BACKUP_RETENTION_DAYS env var.
-export const cleanupExpiredBackups = async (): Promise<{ removed: number }> => {
+// 90 days; operators override via BACKUP_RETENTION_DAYS env var (<= 0 keeps
+// backups forever). Stale `.partial` dumps are reaped either way.
+export const cleanupExpiredBackups = async (): Promise<{
+  removed: number;
+  partialsRemoved: number;
+}> => {
   const days = Number.parseInt(process.env.BACKUP_RETENTION_DAYS ?? '90', 10);
-  if (!Number.isFinite(days) || days <= 0) return { removed: 0 };
-  const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
+  const retentionOn = Number.isFinite(days) && days > 0;
+  const now = Date.now();
+  const backupCutoff = now - days * 24 * 60 * 60 * 1000;
+  const partialCutoff = now - STALE_PARTIAL_MS;
   const dir = backupDir();
   let entries: string[];
   try {
     entries = await readdir(dir);
   } catch {
-    return { removed: 0 };
+    return { removed: 0, partialsRemoved: 0 };
   }
   let removed = 0;
+  let partialsRemoved = 0;
   for (const f of entries) {
-    if (!/^vibetc-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{1,4}Z\.dump$/.test(f)) continue;
+    const partial = /^vibetc-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{1,4}Z\.dump\.partial$/.test(f);
+    const backup =
+      retentionOn && /^vibetc-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{1,4}Z\.dump$/.test(f);
+    if (!partial && !backup) continue;
     const path = join(dir, f);
     try {
       const s = await stat(path);
-      if (s.mtimeMs < cutoff) {
+      if (s.mtimeMs < (partial ? partialCutoff : backupCutoff)) {
         await rm(path, { force: true });
-        removed += 1;
+        if (partial) partialsRemoved += 1;
+        else removed += 1;
       }
     } catch {
       // skip
     }
   }
-  return { removed };
+  return { removed, partialsRemoved };
 };
 
 // ---------------------------------------------------------------------
@@ -453,6 +504,26 @@ const recyclePool = async (): Promise<string[]> => {
   }
 };
 
+// Drop the in-process caches built from system_settings (LLM provider
+// instances, engine URL, Anthropic price table — 60 s TTL each). Loaded
+// lazily, like the queue above, so the CLI restore does not pull the LLM
+// stack in at startup. Never throws: by the time this runs the restore
+// has committed, and a stale cache expires on its own within a minute.
+const invalidateSettingsCaches = async (): Promise<void> => {
+  try {
+    const [llm, engines, pricing] = await Promise.all([
+      import('./llm-provider.js'),
+      import('./engines.js'),
+      import('./pricing.js'),
+    ]);
+    llm.invalidateProviderCache();
+    engines.invalidateEngineCache();
+    pricing.invalidatePricingCache();
+  } catch (err) {
+    logger.warn({ err }, 'could not invalidate settings caches after restore');
+  }
+};
+
 const quoteIdent = (name: string): string => `"${name.replace(/"/g, '""')}"`;
 
 // Extensions living inside one of the schemas we're about to drop, so
@@ -512,22 +583,28 @@ export const summarizeSqlError = (stderr: string): string => {
   return [...errors, ...rest].join('\n');
 };
 
-// Stream `pg_restore --file -` into psql, with the preamble ahead of it
-// and COMMIT appended only if pg_restore finished cleanly. Resolves on a
-// committed restore; rejects with the failing tool's stderr otherwise.
-const runPipedRestore = async (
-  dumpPath: string,
-  tocPath: string,
-  preamble: string,
-  connArgs: string[],
-  env: Record<string, string | undefined>,
-): Promise<void> => {
-  const restoreArgs = ['--no-owner', '--use-list', tocPath, '--file', '-', dumpPath];
-  const psqlArgs = [...connArgs, '--no-psqlrc', '--quiet', '-v', 'ON_ERROR_STOP=1', '--file', '-'];
+export interface PipedCommand {
+  command: string;
+  args: string[];
+}
 
-  await new Promise<void>((resolve, reject) => {
-    const restore = spawn('pg_restore', restoreArgs, { env, stdio: ['ignore', 'pipe', 'pipe'] });
-    const psql = spawn('psql', psqlArgs, { env, stdio: ['pipe', 'ignore', 'pipe'] });
+// Stream the SQL a `pg_restore --file -` writes into psql, with the
+// preamble ahead of it and COMMIT appended only if pg_restore finished
+// cleanly. Resolves on a committed restore; rejects with the failing
+// tool's stderr otherwise. Exported (with the commands as parameters) so
+// tests can drive the plumbing with stand-in processes.
+export const pipeRestoreIntoPsql = (
+  restoreCmd: PipedCommand,
+  psqlCmd: PipedCommand,
+  preamble: string,
+  env: Record<string, string | undefined>,
+): Promise<void> =>
+  new Promise<void>((resolve, reject) => {
+    const restore = spawn(restoreCmd.command, restoreCmd.args, {
+      env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const psql = spawn(psqlCmd.command, psqlCmd.args, { env, stdio: ['pipe', 'ignore', 'pipe'] });
 
     let restoreErr = '';
     let psqlErr = '';
@@ -593,16 +670,45 @@ const runPipedRestore = async (
       restoreCode = code ?? 1;
       // Committing by hand is the whole point: if pg_restore died
       // mid-stream we close stdin without a COMMIT, psql disconnects
-      // with the transaction open, and Postgres rolls it back.
-      if (restoreCode === 0) psql.stdin.end('\nCOMMIT;\n');
-      else psql.stdin.end();
+      // with the transaction open, and Postgres rolls it back. (Skipped
+      // when psql already exited and its stdin is destroyed: there is no
+      // session left to commit in or to close.)
+      if (!psql.stdin.destroyed) {
+        if (restoreCode === 0) psql.stdin.end('\nCOMMIT;\n');
+        else psql.stdin.end();
+      }
       finish();
     });
     psql.on('close', (code) => {
       psqlCode = code ?? 1;
+      // psql can exit before pg_restore is done: ON_ERROR_STOP, the
+      // preamble's DROP hitting lock_timeout, a failed connect. Its stdin
+      // is destroyed, so pipe() unpipes and PAUSES restore.stdout — and
+      // pg_restore then blocks forever on a full pipe, its 'close' never
+      // fires and this promise never settles. Detach and drain it instead,
+      // so pg_restore runs to the end and exits and finish() can report
+      // psql's error. (A no-op once pg_restore has finished.)
+      restore.stdout.unpipe(psql.stdin);
+      restore.stdout.resume();
       finish();
     });
   });
+
+const runPipedRestore = async (
+  dumpPath: string,
+  tocPath: string,
+  preamble: string,
+  connArgs: string[],
+  env: Record<string, string | undefined>,
+): Promise<void> => {
+  const restoreArgs = ['--no-owner', '--use-list', tocPath, '--file', '-', dumpPath];
+  const psqlArgs = [...connArgs, '--no-psqlrc', '--quiet', '-v', 'ON_ERROR_STOP=1', '--file', '-'];
+  await pipeRestoreIntoPsql(
+    { command: 'pg_restore', args: restoreArgs },
+    { command: 'psql', args: psqlArgs },
+    preamble,
+    env,
+  );
 };
 
 // pg_restore/psql stderr is accurate but terse. Add the one sentence
@@ -661,6 +767,10 @@ export const restoreBackup = async (
       `${filename} contains no schema definition — it is not a vibetc backup, or it is truncated.`,
     );
   }
+  // Checked here as well as on upload: a dump can also reach the backups
+  // directory by being copied onto the host, and the preamble below drops
+  // every schema the dump lists.
+  assertOnlyBackupSchemas(schemas);
 
   const warnings: string[] = [];
   if (!schemas.includes('drizzle')) {
@@ -699,6 +809,10 @@ export const restoreBackup = async (
     warnings.push(...(await recyclePool()));
     await resume();
   }
+
+  // The restore replaced system_settings wholesale; don't keep serving the
+  // pre-restore provider, engine URL and price table from cache.
+  await invalidateSettingsCaches();
 
   // The restore rolled the drizzle bookkeeping back with the data, so a
   // pre-upgrade backup lands on an old schema that this build's

@@ -6,6 +6,7 @@ import {
   LocalGatewayProvider,
   computeAnthropicCostMicros,
   describeAnthropicRequest,
+  describeJsonParseError,
   expandArrayTransactions,
   parseExtractionResponse,
   sanitizeSchemaForOllama,
@@ -145,6 +146,99 @@ describe('expandArrayTransactions (parallel-array salvage)', () => {
     expect(expandArrayTransactions(input)).toEqual(input);
   });
 
+  it('keeps an explicit null element null — never borrows the last element (C12)', () => {
+    const out = expandArrayTransactions({
+      transactions: [{ description: ['A', 'B', 'C'], amount_cents: [100, null, 300] }],
+    }) as { transactions: Array<Record<string, unknown>> };
+    expect(out.transactions.map((t) => t.amount_cents)).toEqual([100, null, 300]);
+  });
+
+  it('a SHORT amount array yields null past its end — never repeats a figure', () => {
+    const out = expandArrayTransactions({
+      transactions: [{ description: ['A', 'B', 'C'], amount_cents: [100, 200] }],
+    }) as { transactions: Array<Record<string, unknown>> };
+    expect(out.transactions.map((t) => t.amount_cents)).toEqual([100, 200, null]);
+  });
+
+  it('indexes every parallel field: money → null past the end, others repeat their last', () => {
+    const out = expandArrayTransactions({
+      transactions: [
+        {
+          posted_date: ['2026-04-06', '2026-04-07'],
+          description: ['A', 'B'],
+          amount_cents: [100, 200, 300],
+          running_balance_cents: [1_100, 1_300],
+          source_page: 2,
+        },
+      ],
+    }) as { transactions: Array<Record<string, unknown>> };
+    expect(out.transactions).toEqual([
+      {
+        posted_date: '2026-04-06',
+        description: 'A',
+        amount_cents: 100,
+        running_balance_cents: 1_100,
+        source_page: 2,
+      },
+      {
+        posted_date: '2026-04-07',
+        description: 'B',
+        amount_cents: 200,
+        running_balance_cents: 1_300,
+        source_page: 2,
+      },
+      {
+        posted_date: '2026-04-07',
+        description: 'B',
+        amount_cents: 300,
+        running_balance_cents: null,
+        source_page: 2,
+      },
+    ]);
+  });
+
+  it('a short amount array is re-asked (signal) or flagged (salvage), never fabricated', () => {
+    const raw = JSON.stringify({
+      period: { start: '2026-04-01', end: '2026-04-30' },
+      balances: { opening_cents: 0, closing_cents: 300 },
+      source_date_format: { format: 'MDY', confidence: 0.9 },
+      transactions: [
+        {
+          posted_date: '2026-04-06',
+          description: ['A', 'B', 'C'],
+          amount_cents: [100, 200],
+          source_page: 1,
+        },
+      ],
+    });
+    expect(() => parseExtractionResponse(raw, undefined, { salvageAmounts: false })).toThrow(
+      expect.objectContaining({ nullAmountRows: 1 }),
+    );
+    const out = parseExtractionResponse(raw);
+    expect(out.transactions.map((t) => t.amount_cents)).toEqual([100, 200, 0]);
+    expect(out.notes).toMatch(/1 transaction\(s\) had an unreadable amount/);
+  });
+
+  it('an explicit null amount inside a compressed row is flagged, not fabricated', () => {
+    const out = parseExtractionResponse(
+      JSON.stringify({
+        period: { start: '2026-04-01', end: '2026-04-30' },
+        balances: { opening_cents: 0, closing_cents: 400 },
+        source_date_format: { format: 'MDY', confidence: 0.9 },
+        transactions: [
+          {
+            posted_date: '2026-04-06',
+            description: ['A', 'B', 'C'],
+            amount_cents: [100, null, 300],
+            source_page: 1,
+          },
+        ],
+      }),
+    );
+    expect(out.transactions.map((t) => t.amount_cents)).toEqual([100, 0, 300]);
+    expect(out.notes).toMatch(/1 transaction\(s\) had an unreadable amount/);
+  });
+
   it('parseExtractionResponse salvages a compressed response end-to-end', () => {
     const raw = JSON.stringify({
       period: { start: '2026-04-01', end: '2026-04-30' },
@@ -262,9 +356,184 @@ describe('parseExtractionResponse — field + structural salvage (never fail on 
     expect(t.check_number).toBe('1234');
   });
 
-  it('defaults a missing source_date_format to MDY', () => {
+  it('treats a missing source_date_format as AMBIGUOUS (never a silent MDY guess)', () => {
     const out = parseExtractionResponse(JSON.stringify(base({ source_date_format: null }, {})));
-    expect(out.source_date_format.format).toBe('MDY');
+    // AMBIGUOUS → the worker halts in awaiting-locale-confirmation.
+    expect(out.source_date_format.format).toBe('AMBIGUOUS');
+    expect(out.notes).toMatch(/source date format was missing or unrecognized/);
+  });
+
+  it('accepts a lower-case or bare-string declared format', () => {
+    const lower = parseExtractionResponse(
+      JSON.stringify(base({ source_date_format: { format: 'dmy', confidence: 0.8 } }, {})),
+    );
+    expect(lower.source_date_format).toMatchObject({ format: 'DMY', confidence: 0.8 });
+    const bare = parseExtractionResponse(JSON.stringify(base({ source_date_format: 'ymd' }, {})));
+    expect(bare.source_date_format.format).toBe('YMD');
+    const amb = parseExtractionResponse(
+      JSON.stringify(base({ source_date_format: { format: 'ambiguous', confidence: 0.3 } }, {})),
+    );
+    expect(amb.source_date_format.format).toBe('AMBIGUOUS');
+  });
+
+  it.each([
+    ['MM/DD/YYYY', 'MDY'],
+    ['M/D/Y', 'MDY'],
+    ['mm/dd/yy', 'MDY'],
+    ['mdy', 'MDY'],
+    ['DD/MM/YYYY', 'DMY'],
+    ['dd.mm.yyyy', 'DMY'],
+    ['YYYY-MM-DD', 'YMD'],
+    ['ISO', 'YMD'],
+    ['ISO 8601', 'YMD'],
+    ['Textual', 'TEXTUAL'],
+  ])('normalizes a declared format spelled %j → %s (no AMBIGUOUS halt)', (spelled, fmt) => {
+    const out = parseExtractionResponse(
+      JSON.stringify(base({ source_date_format: { format: spelled, confidence: 0.8 } }, {})),
+    );
+    expect(out.source_date_format).toMatchObject({ format: fmt, confidence: 0.8 });
+    expect(out.notes ?? '').not.toMatch(/missing or unrecognized/);
+  });
+
+  it('an unrecognizable declared format is still AMBIGUOUS', () => {
+    const out = parseExtractionResponse(JSON.stringify(base({ source_date_format: 'local' }, {})));
+    expect(out.source_date_format.format).toBe('AMBIGUOUS');
+    expect(out.notes).toMatch(/missing or unrecognized/);
+  });
+
+  it('keeps a non-string model note (array / object) when merging salvage notes', () => {
+    const nullAmountRow = { amount_cents: null, description: 'B' };
+    const fromArray = parseExtractionResponse(
+      JSON.stringify(base({ notes: ['page 2 blurry', 'check images'] }, nullAmountRow)),
+    );
+    expect(fromArray.notes).toMatch(/^page 2 blurry; check images 1 transaction\(s\) had an/);
+    const fromObject = parseExtractionResponse(
+      JSON.stringify(base({ notes: { warning: 'faded' }, source_date_format: null }, {})),
+    );
+    expect(fromObject.notes).toMatch(
+      /^\{"warning":"faded"\} source date format was missing or unrecognized/,
+    );
+  });
+
+  it('a long model note is trimmed so all our salvage notes fit the 2000-char cap', () => {
+    const out = parseExtractionResponse(
+      JSON.stringify(
+        base({ notes: 'x'.repeat(2_500), source_date_format: null }, { amount_cents: null }),
+      ),
+    );
+    expect(out.notes!.length).toBeLessThanOrEqual(2_000);
+    expect(out.notes).toMatch(
+      /x 1 transaction\(s\) had an unreadable amount .*exporting\. source date format was missing or unrecognized .*confirmed\.$/,
+    );
+  });
+});
+
+describe('parseExtractionResponse — date order (C27)', () => {
+  const withDate = (posted_date: string, sdf: unknown) => ({
+    period: { start: '2026-04-01', end: '2026-05-31' },
+    balances: { opening_cents: 0, closing_cents: 100 },
+    source_date_format: sdf,
+    transactions: [{ posted_date, description: 'A', amount_cents: 100, source_page: 1 }],
+  });
+
+  it('reads a non-ISO date in the declared DMY order (no MDY assumption)', () => {
+    const out = parseExtractionResponse(
+      JSON.stringify(withDate('05/04/2026', { format: 'DMY', confidence: 0.9 })),
+    );
+    expect(out.transactions[0]!.posted_date).toBe('2026-04-05');
+    expect(out.notes).toMatch(/converted using the DMY order/);
+  });
+
+  it('the operator override wins over the declared format and is forced into the result', () => {
+    const out = parseExtractionResponse(
+      JSON.stringify(withDate('05/04/2026', { format: 'MDY', confidence: 0.9 })),
+      undefined,
+      { dateFormat: 'DMY' },
+    );
+    expect(out.transactions[0]!.posted_date).toBe('2026-04-05');
+    expect(out.source_date_format).toMatchObject({ format: 'DMY', confidence: 1 });
+  });
+
+  it('an override fills a missing format (no AMBIGUOUS halt after the operator confirmed)', () => {
+    const out = parseExtractionResponse(JSON.stringify(withDate('2026-04-05', null)), undefined, {
+      dateFormat: 'MDY',
+    });
+    expect(out.source_date_format).toMatchObject({ format: 'MDY', confidence: 1 });
+    expect(out.notes ?? '').not.toMatch(/missing or unrecognized/);
+  });
+
+  it('flags an ambiguous day/month read when the order is unknown', () => {
+    const out = parseExtractionResponse(
+      JSON.stringify(withDate('05/04/2026', { format: 'TEXTUAL', confidence: 0.9 })),
+    );
+    expect(out.transactions[0]!.posted_date).toBe('2026-05-04'); // read as month/day…
+    expect(out.notes).toMatch(/1 row date\(s\) used an ambiguous day\/month order/); // …and flagged
+  });
+
+  it('an unambiguous date under an unknown order is read the only valid way', () => {
+    const out = parseExtractionResponse(
+      JSON.stringify(withDate('13/04/2026', { format: 'TEXTUAL', confidence: 0.9 })),
+    );
+    expect(out.transactions[0]!.posted_date).toBe('2026-04-13');
+    expect(out.notes ?? '').not.toMatch(/ambiguous day\/month/);
+  });
+
+  it('an impossible reading under the declared order still ditto/period-fills with a note', () => {
+    const out = parseExtractionResponse(
+      JSON.stringify(withDate('13/04/2026', { format: 'MDY', confidence: 0.9 })),
+    );
+    expect(out.transactions[0]!.posted_date).toBe('2026-04-01'); // period start
+    expect(out.notes).toMatch(/unreadable date/);
+  });
+});
+
+describe('parseExtractionResponse — closing balance (C09)', () => {
+  const stmt = (balances: unknown, rows: Array<Record<string, unknown>>) => ({
+    period: { start: '2026-05-01', end: '2026-05-31' },
+    balances,
+    source_date_format: { format: 'MDY', confidence: 0.9 },
+    transactions: rows.map((r) => ({ description: 'R', source_page: 1, ...r })),
+  });
+
+  it('keeps the printed closing over the last running balance and notes the disagreement', () => {
+    // The model dropped the trailing $300.00 row: the last running balance is
+    // $1200.00 but the statement prints $1500.00. Using the derived value would
+    // reconcile the rows against themselves and falsely verify.
+    const out = parseExtractionResponse(
+      JSON.stringify(
+        stmt({ opening_cents: 100_000, closing_cents: 150_000 }, [
+          { posted_date: '2026-05-02', amount_cents: 20_000, running_balance_cents: 120_000 },
+        ]),
+      ),
+    );
+    expect(out.balances.closing_cents).toBe(150_000);
+    expect(out.notes).toMatch(
+      /printed closing balance \(\$1500\.00\) differs from the last running balance \(\$1200\.00\)/,
+    );
+  });
+
+  it('no disagreement note when the printed closing matches the chain', () => {
+    const out = parseExtractionResponse(
+      JSON.stringify(
+        stmt({ opening_cents: 100_000, closing_cents: 120_000 }, [
+          { posted_date: '2026-05-02', amount_cents: 20_000, running_balance_cents: 120_000 },
+        ]),
+      ),
+    );
+    expect(out.balances.closing_cents).toBe(120_000);
+    expect(out.notes).toBeUndefined();
+  });
+
+  it('still derives a MISSING closing from the running-balance chain', () => {
+    const out = parseExtractionResponse(
+      JSON.stringify(
+        stmt({ opening_cents: 100_000 }, [
+          { posted_date: '2026-05-02', amount_cents: 20_000, running_balance_cents: 120_000 },
+        ]),
+      ),
+    );
+    expect(out.balances.closing_cents).toBe(120_000);
+    expect(out.notes).toMatch(/balance was missing/);
   });
 });
 
@@ -1066,6 +1335,358 @@ describe('LocalGatewayProvider empty-completion handling', () => {
       summary: 'local gateway returned an empty completion',
       issues: 'finish_reason=length',
     });
+  });
+});
+
+describe('LocalGatewayProvider.complete (C13)', () => {
+  const completeOpts = { systemPrompt: 's', userPrompt: 'u', schema: { type: 'object' } };
+
+  it('sends the configured maxCompletionTokens (not a hard 6000) when no per-call cap', async () => {
+    let body: { max_tokens?: number } = {};
+    const provider = new LocalGatewayProvider({
+      baseUrl: 'http://gw.test',
+      maxCompletionTokens: 20_000,
+      fetcher: async (_url, init) => {
+        body = JSON.parse((init as RequestInit).body as string) as typeof body;
+        return okJsonResponse({ choices: [{ message: { content: '{"ok":true}' } }] });
+      },
+    });
+    const r = await provider.complete(completeOpts);
+    expect(body.max_tokens).toBe(20_000);
+    expect(r.data).toEqual({ ok: true });
+    await provider.complete({ ...completeOpts, maxOutputTokens: 4096 }); // per-call cap wins
+    expect(body.max_tokens).toBe(4096);
+  });
+
+  it('throws an actionable truncation error on finish_reason=length (not "not valid JSON")', async () => {
+    const provider = new LocalGatewayProvider({
+      baseUrl: 'http://gw.test',
+      maxCompletionTokens: 20_000,
+      fetcher: async () =>
+        okJsonResponse({
+          choices: [
+            { message: { content: '{"transactions": [{"index": 0' }, finish_reason: 'length' },
+          ],
+        }),
+    });
+    await expect(provider.complete(completeOpts)).rejects.toMatchObject({
+      name: 'ExtractionResponseError',
+      summary: 'ollama complete() output truncated at max_tokens (20000)',
+      rawResponse: '{"transactions": [{"index": 0',
+    });
+  });
+});
+
+describe('LocalGatewayProvider statement-model date override (C11b)', () => {
+  it('tells every page the confirmed order, reads rows with it, and forces source_date_format', async () => {
+    const prev = process.env.VIBETC_STATEMENT_PAGE_RETRY_MS;
+    process.env.VIBETC_STATEMENT_PAGE_RETRY_MS = '0';
+    const sent: string[] = [];
+    try {
+      const provider = new LocalGatewayProvider({
+        baseUrl: 'http://gw.test',
+        modelId: 'qwen2.5-stmt',
+        statementModelMode: true,
+        fetcher: async (_url, init) => {
+          const body = JSON.parse((init as RequestInit).body as string) as {
+            messages: Array<{ content: string }>;
+          };
+          sent.push(body.messages[0]!.content);
+          return okJsonResponse({
+            message: {
+              content: JSON.stringify({
+                source_date_format: 'MDY', // the model's guess — overridden
+                period: { start_date: '2026-04-01', end_date: '2026-04-30' },
+                transactions: [{ date: '05/04/2026', source_text: 'ROW', amount_cents: 100 }],
+              }),
+            },
+          });
+        },
+      });
+      const r = await provider.extract('# Page 1\n\nROW\n\n# Page 2\n\nROW2', {
+        dateFormatOverride: 'DMY',
+      });
+      expect(sent).toHaveLength(2);
+      for (const content of sent) {
+        expect(content.startsWith('Dates on this statement are written in DMY order')).toBe(true);
+      }
+      expect(r.data.source_date_format).toMatchObject({ format: 'DMY', confidence: 1 });
+      expect(r.data.transactions.map((t) => t.posted_date)).toEqual(['2026-04-05', '2026-04-05']);
+    } finally {
+      if (prev === undefined) delete process.env.VIBETC_STATEMENT_PAGE_RETRY_MS;
+      else process.env.VIBETC_STATEMENT_PAGE_RETRY_MS = prev;
+    }
+  });
+
+  it('sends no date-order line when there is no override', async () => {
+    let content = '';
+    const provider = new LocalGatewayProvider({
+      baseUrl: 'http://gw.test',
+      modelId: 'qwen2.5-stmt',
+      statementModelMode: true,
+      fetcher: async (_url, init) => {
+        content = (
+          JSON.parse((init as RequestInit).body as string) as {
+            messages: Array<{ content: string }>;
+          }
+        ).messages[0]!.content;
+        return okJsonResponse({
+          message: {
+            content: JSON.stringify({
+              source_date_format: 'MDY',
+              period: { start_date: '2026-04-01', end_date: '2026-04-30' },
+              transactions: [{ date: '2026-04-05', source_text: 'ROW', amount_cents: 100 }],
+            }),
+          },
+        });
+      },
+    });
+    await provider.extract('# Page 1\n\nROW');
+    expect(content.startsWith('<statement_ocr>')).toBe(true);
+  });
+});
+
+describe('LocalGatewayProvider statement-model closing balance', () => {
+  it('does not hold a complete statement whose page 2 reports its own closing', async () => {
+    const prev = process.env.VIBETC_STATEMENT_PAGE_RETRY_MS;
+    process.env.VIBETC_STATEMENT_PAGE_RETRY_MS = '0';
+    // Per-page outputs: page 2 reports its own last running balance as the
+    // closing; page 3 prints none — so the merged "printed" closing is page 2's.
+    const perPage: Record<string, unknown> = {
+      P1: {
+        source_date_format: 'MDY',
+        period: { start_date: '2026-05-01', end_date: '2026-05-31' },
+        balances: { opening_balance_cents: 100_000, closing_balance_cents: null },
+        transactions: [
+          {
+            date: '2026-05-02',
+            source_text: 'A',
+            amount_cents: 10_000,
+            running_balance_cents: 110_000,
+          },
+        ],
+      },
+      P2: {
+        balances: { opening_balance_cents: null, closing_balance_cents: 130_000 },
+        transactions: [
+          {
+            date: '2026-05-10',
+            source_text: 'B',
+            amount_cents: 20_000,
+            running_balance_cents: 130_000,
+          },
+        ],
+      },
+      P3: {
+        balances: { opening_balance_cents: null, closing_balance_cents: null },
+        transactions: [
+          {
+            date: '2026-05-20',
+            source_text: 'C',
+            amount_cents: -5_000,
+            running_balance_cents: 125_000,
+          },
+        ],
+      },
+    };
+    try {
+      const provider = new LocalGatewayProvider({
+        baseUrl: 'http://gw.test',
+        modelId: 'qwen2.5-stmt',
+        statementModelMode: true,
+        fetcher: async (_url, init) => {
+          const content = (
+            JSON.parse((init as RequestInit).body as string) as {
+              messages: Array<{ content: string }>;
+            }
+          ).messages[0]!.content;
+          const key = ['P1', 'P2', 'P3'].find((k) => content.includes(k))!;
+          return okJsonResponse({ message: { content: JSON.stringify(perPage[key]) } });
+        },
+      });
+      const r = await provider.extract('# Page 1\n\nP1\n\n# Page 2\n\nP2\n\n# Page 3\n\nP3');
+      expect(r.data.balances).toEqual({ opening_cents: 100_000, closing_cents: 125_000 });
+      expect(r.data.notes).toBeUndefined(); // nothing to hold for review
+    } finally {
+      if (prev === undefined) delete process.env.VIBETC_STATEMENT_PAGE_RETRY_MS;
+      else process.env.VIBETC_STATEMENT_PAGE_RETRY_MS = prev;
+    }
+  });
+});
+
+describe('JSON parse failures never quote model output (error messages are logged/stored)', () => {
+  const parseErr = (s: string): unknown => {
+    try {
+      JSON.parse(s);
+    } catch (err) {
+      return err;
+    }
+    throw new Error('expected JSON.parse to throw');
+  };
+
+  it('describeJsonParseError keeps only the error name and offset', () => {
+    expect(describeJsonParseError(parseErr('Jane Doe acct 4444555566'))).toBe('SyntaxError');
+    expect(describeJsonParseError(parseErr('{"a": 1 "b": 2}'))).toMatch(
+      /^SyntaxError at position \d+$/,
+    );
+    expect(describeJsonParseError(parseErr('{"a": 1} trailing'))).toBe('SyntaxError at position 9');
+    expect(describeJsonParseError(parseErr(''))).toBe('SyntaxError: unexpected end of JSON input');
+  });
+
+  it('parseExtractionResponse: the raw text stays in rawResponse only', () => {
+    let err: unknown;
+    try {
+      parseExtractionResponse('Jane Doe acct 4444555566');
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(ExtractionResponseError);
+    const e = err as ExtractionResponseError;
+    expect(e.issues).toBe('SyntaxError; prose-recovery attempt also failed');
+    expect(e.message).not.toMatch(/Jane|4444555566/);
+    expect(e.rawResponse).toBe('Jane Doe acct 4444555566');
+  });
+
+  it('statement model: an unparseable page is non-transient and names no model text', async () => {
+    const prev = process.env.VIBETC_STATEMENT_PAGE_RETRY_MS;
+    process.env.VIBETC_STATEMENT_PAGE_RETRY_MS = '0';
+    try {
+      const provider = new LocalGatewayProvider({
+        baseUrl: 'http://gw.test',
+        modelId: 'qwen2.5-stmt',
+        statementModelMode: true,
+        fetcher: async () => okJsonResponse({ message: { content: 'Jane Doe acct 4444555566' } }),
+      });
+      const err = await provider.extract('# Page 1\n\nROW').catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(ExtractionResponseError);
+      expect((err as ExtractionResponseError).message).not.toMatch(/Jane|4444555566/);
+      expect((err as ExtractionResponseError).transient).toBeUndefined();
+    } finally {
+      if (prev === undefined) delete process.env.VIBETC_STATEMENT_PAGE_RETRY_MS;
+      else process.env.VIBETC_STATEMENT_PAGE_RETRY_MS = prev;
+    }
+  });
+});
+
+describe('ExtractionResponseError.transient — set for empty completions only', () => {
+  const image = [{ data: Buffer.from('i'), mediaType: 'image/jpeg' as const }];
+  const completeOpts = { systemPrompt: 's', userPrompt: 'u', schema: { type: 'object' } };
+  const gateway = (choice: Record<string, unknown>) =>
+    new LocalGatewayProvider({
+      baseUrl: 'http://gw.test',
+      fetcher: async () => okJsonResponse({ choices: [choice] }),
+    });
+
+  it('text path: an empty completion is transient, unless it stopped at the token cap', async () => {
+    await expect(
+      gateway({ message: { content: '' }, finish_reason: 'stop' }).extract('md'),
+    ).rejects.toMatchObject({
+      summary: 'local gateway returned an empty completion',
+      transient: true,
+    });
+    await expect(
+      gateway({ message: { content: '' }, finish_reason: 'length' }).extract('md'),
+    ).rejects.toMatchObject({ transient: false });
+  });
+
+  it('complete(): an empty completion is transient, unless at the token cap', async () => {
+    await expect(
+      gateway({ message: { content: '' }, finish_reason: 'stop' }).complete(completeOpts),
+    ).rejects.toMatchObject({ transient: true });
+    await expect(
+      gateway({ message: { content: '' }, finish_reason: 'length' }).complete(completeOpts),
+    ).rejects.toMatchObject({ transient: false });
+  });
+
+  it('vision: an empty completion is transient, unless done_reason=length', async () => {
+    const vision = (body: unknown) =>
+      new LocalGatewayProvider({
+        baseUrl: 'http://gw.test',
+        fetcher: async () => okJsonResponse(body),
+      });
+    await expect(
+      vision({ message: { content: '' }, done_reason: 'stop' }).extract('', { images: image }),
+    ).rejects.toMatchObject({
+      summary: 'ollama vision returned an empty completion',
+      transient: true,
+    });
+    await expect(
+      vision({ message: { content: '' }, done_reason: 'length' }).extract('', { images: image }),
+    ).rejects.toMatchObject({ issues: 'done_reason=length', transient: false });
+  });
+
+  it('statement model: still transient after the per-page retries are exhausted', async () => {
+    const prev = process.env.VIBETC_STATEMENT_PAGE_RETRY_MS;
+    process.env.VIBETC_STATEMENT_PAGE_RETRY_MS = '0';
+    try {
+      const provider = new LocalGatewayProvider({
+        baseUrl: 'http://gw.test',
+        modelId: 'qwen2.5-stmt',
+        statementModelMode: true,
+        fetcher: async () => okJsonResponse({ message: { content: '' } }),
+      });
+      const err = await provider.extract('# Page 1\n\nROW').catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(ExtractionResponseError);
+      expect((err as ExtractionResponseError).summary).toMatch(
+        /page 1 of 1 after 3 attempts: statement model returned an empty completion/,
+      );
+      expect((err as ExtractionResponseError).transient).toBe(true);
+    } finally {
+      if (prev === undefined) delete process.env.VIBETC_STATEMENT_PAGE_RETRY_MS;
+      else process.env.VIBETC_STATEMENT_PAGE_RETRY_MS = prev;
+    }
+  });
+
+  it('truncation, unparseable output and schema mismatch are not transient', async () => {
+    const truncated = await gateway({ message: { content: '{"a":' }, finish_reason: 'length' })
+      .extract('md')
+      .catch((e: unknown) => e);
+    expect(truncated).toBeInstanceOf(ExtractionResponseError);
+    expect((truncated as ExtractionResponseError).transient).toBeUndefined();
+    const garbled = await gateway({ message: { content: '{ not json' } })
+      .extract('md')
+      .catch((e: unknown) => e);
+    expect((garbled as ExtractionResponseError).summary).toBe('LLM response was not valid JSON');
+    expect((garbled as ExtractionResponseError).transient).toBeUndefined();
+    const schemaMiss = await gateway({ message: { content: '{"transactions": "nope"}' } })
+      .extract('md')
+      .catch((e: unknown) => e);
+    expect((schemaMiss as ExtractionResponseError).summary).toBe(
+      'LLM response did not match extraction schema',
+    );
+    expect((schemaMiss as ExtractionResponseError).transient).toBeUndefined();
+  });
+});
+
+describe('dateFormatOverride reaches the parser on every provider path (C27)', () => {
+  const nonIso = {
+    ...SAMPLE,
+    transactions: [{ ...SAMPLE.transactions[0], posted_date: '03/04/2026' }],
+  };
+
+  it('LocalGatewayProvider text path', async () => {
+    const provider = new LocalGatewayProvider({
+      baseUrl: 'http://gw.test',
+      fetcher: async () =>
+        okJsonResponse({ choices: [{ message: { content: JSON.stringify(nonIso) } }] }),
+    });
+    const r = await provider.extract('# md', { dateFormatOverride: 'DMY' });
+    expect(r.data.transactions[0]!.posted_date).toBe('2026-04-03');
+    expect(r.data.source_date_format.format).toBe('DMY');
+  });
+
+  it('AnthropicProvider', async () => {
+    const provider = new AnthropicProvider({
+      apiKey: 'k',
+      fetcher: async () =>
+        okJsonResponse({
+          content: [{ type: 'tool_use', name: 'emit_extraction', input: nonIso }],
+          usage: { input_tokens: 1, output_tokens: 1 },
+        }),
+    });
+    const r = await provider.extract('# md', { dateFormatOverride: 'DMY' });
+    expect(r.data.transactions[0]!.posted_date).toBe('2026-04-03');
+    expect(r.data.source_date_format.format).toBe('DMY');
   });
 });
 

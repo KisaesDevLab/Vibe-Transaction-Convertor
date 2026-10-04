@@ -28,6 +28,7 @@ import { featureAccessRouter } from './routes/feature-access.js';
 import { exportJobsRouter, exportsRouter } from './routes/exports.js';
 import { fidirRouter } from './routes/fidir.js';
 import { healthRouter } from './routes/health.js';
+import { reviewMetaRouter } from './routes/review-meta.js';
 import { statementsRouter } from './routes/statements.js';
 import { uploadsByAccountRouter, uploadsRawRouter } from './routes/uploads.js';
 import { versionRouter } from './routes/version.js';
@@ -38,6 +39,14 @@ export interface CreateAppOptions {
   // local-login guard a no-op — the same behaviour as VIBE_AUTH_MODE=local.
   vibeAuth?: TxVibeAuth;
 }
+
+// Request-log URLs must not carry credentials: the OIDC callback arrives as
+// /auth/oidc/callback?code=…&state=… (ADR-027), and the access log runs at
+// info level. Keep the parameter names, drop their values.
+const SECRET_QUERY_PARAM =
+  /([?&](?:code|state|session_state|id_token|access_token|refresh_token|token)=)[^&#]*/gi;
+export const redactUrlSecrets = (url: unknown): unknown =>
+  typeof url === 'string' ? url.replace(SECRET_QUERY_PARAM, '$1[redacted]') : url;
 
 export const createApp = (opts: CreateAppOptions = {}): Express => {
   const app = express();
@@ -99,7 +108,7 @@ export const createApp = (opts: CreateAppOptions = {}): Express => {
       logger,
       customProps: (req) => ({ requestId: (req as express.Request).requestId }),
       serializers: {
-        req: (req) => ({ method: req.method, url: req.url }),
+        req: (req) => ({ method: req.method, url: redactUrlSecrets(req.url) }),
       },
     }),
   );
@@ -147,6 +156,9 @@ export const createApp = (opts: CreateAppOptions = {}): Express => {
   app.use('/api/uploads', requireAuth, requireFeature('uploads'), uploadsRawRouter());
   app.use('/api/statements', requireAuth, requireFeature('statements'), statementsRouter());
   app.use('/api/statements', requireAuth, requireFeature('exports'), exportsRouter());
+  // Review-page metadata (active categories, enrichment toggles) readable by
+  // every statement reviewer, not just admins.
+  app.use('/api/review-meta', requireAuth, requireFeature('statements'), reviewMetaRouter());
   app.use('/api/exports', requireAuth, requireFeature('exports'), exportJobsRouter());
   app.use('/api/audit', requireAuth, requireFeature('admin.audit'), auditRouter());
   app.use('/api/admin/feature-access', requireAuth, featureAccessRouter());

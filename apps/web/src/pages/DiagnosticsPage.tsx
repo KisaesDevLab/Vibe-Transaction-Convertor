@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 
-import { api } from '../lib/api';
+import { api, fetchReady } from '../lib/api';
 
 interface Diagnostics {
   env: {
@@ -21,14 +21,6 @@ interface Diagnostics {
   };
   counts: Record<string, number>;
   uptime: { seconds: number };
-}
-
-interface ReadyCheck {
-  status: 'ok' | 'degraded';
-  dependencies: Record<
-    string,
-    { status: 'ok' | 'fail' | 'unconfigured'; latencyMs?: number; detail?: string }
-  >;
 }
 
 // /api/admin/maintenance/queue-stats response. When Redis is not
@@ -74,9 +66,11 @@ export function DiagnosticsPage() {
     queryFn: () => api.get<Diagnostics>('/api/admin/diagnostics'),
     refetchInterval: 5_000,
   });
+  // fetchReady resolves with the dependency body on 503 too, so a degraded
+  // dependency renders as 'fail' instead of erroring the query.
   const ready = useQuery({
     queryKey: ['health', 'ready'],
-    queryFn: () => api.get<ReadyCheck>('/api/health/ready'),
+    queryFn: fetchReady,
     refetchInterval: 5_000,
   });
   const queue = useQuery({
@@ -135,25 +129,47 @@ export function DiagnosticsPage() {
       </section>
 
       <section className="rounded-lg border border-surface-muted bg-white p-4">
-        <h2 className="text-base font-medium">Dependencies</h2>
-        {ready.data ? (
-          <ul className="mt-3 space-y-1.5 text-sm">
-            {Object.entries(ready.data.dependencies).map(([name, info]) => (
-              <li key={name} className="flex items-center justify-between gap-2">
-                <span className="font-medium">{name}</span>
-                <span className="flex items-center gap-2">
-                  {info.latencyMs !== undefined ? (
-                    <span className="text-xs text-ink-subtle">{info.latencyMs} ms</span>
-                  ) : null}
-                  {info.detail ? (
-                    <span className="text-xs text-ink-subtle">{info.detail}</span>
-                  ) : null}
-                  <Pill ok={info.status} text={info.status} />
-                </span>
-              </li>
-            ))}
-          </ul>
-        ) : null}
+        <div className="flex items-center justify-between gap-2">
+          <h2 className="text-base font-medium">Dependencies</h2>
+          {ready.isError ? (
+            <Pill ok="fail" text="probe unreachable" />
+          ) : ready.data ? (
+            <Pill ok={ready.data.status === 'ok' ? 'ok' : 'fail'} text={ready.data.status} />
+          ) : null}
+        </div>
+        {ready.isError ? (
+          // Checked before `data`: after a failed refetch TanStack keeps the
+          // last good body, which would otherwise keep showing stale green.
+          <p role="alert" className="mt-2 text-sm text-danger">
+            Readiness probe unreachable ({ready.error.message}). Dependency health is unknown.
+          </p>
+        ) : ready.data ? (
+          <>
+            {ready.data.status === 'degraded' ? (
+              <p className="mt-2 text-sm text-danger">
+                Degraded — /api/health/ready returned 503; at least one dependency is failing.
+              </p>
+            ) : null}
+            <ul className="mt-3 space-y-1.5 text-sm">
+              {Object.entries(ready.data.dependencies).map(([name, info]) => (
+                <li key={name} className="flex items-center justify-between gap-2">
+                  <span className="font-medium">{name}</span>
+                  <span className="flex items-center gap-2">
+                    {info.latencyMs !== undefined ? (
+                      <span className="text-xs text-ink-subtle">{info.latencyMs} ms</span>
+                    ) : null}
+                    {info.detail ? (
+                      <span className="text-xs text-ink-subtle">{info.detail}</span>
+                    ) : null}
+                    <Pill ok={info.status} text={info.status} />
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </>
+        ) : (
+          <p className="mt-2 text-sm text-ink-muted">Loading…</p>
+        )}
       </section>
 
       <section className="rounded-lg border border-surface-muted bg-white p-4">

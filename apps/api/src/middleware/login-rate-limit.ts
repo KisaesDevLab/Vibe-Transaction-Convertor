@@ -73,7 +73,28 @@ export const resetLoginRateLimits = async (): Promise<void> => {
     const keys = await redisClient.keys('login:attempts:*');
     if (keys.length > 0) await redisClient.del(...keys);
   } catch {
-    /* best-effort — the limiter fails open anyway */
+    /* best-effort — with Redis down the limiter counts in memory (cleared above) */
+  }
+};
+
+// Count an attempt in Redis when it is configured. If Redis errors (outage,
+// auth, OOM), count in this process's memory instead: the global API limiter
+// fails open on store errors, so letting the attempt through here would leave
+// the login endpoint with no brute-force limit at all for the outage.
+const countAttempt = async (email: string): Promise<{ count: number; resetAt: number }> => {
+  const client = getRedis();
+  if (!client) return incrementMemory(email);
+  try {
+    return await incrementRedis(client, email);
+  } catch (err) {
+    // Name + message only: an ioredis reply error carries the failed command,
+    // whose key embeds the email address.
+    const { name, message } = err as Error;
+    logger.warn(
+      { err: { name, message } },
+      'login rate limit: redis unavailable, counting in memory',
+    );
+    return incrementMemory(email);
   }
 };
 
@@ -85,14 +106,15 @@ export const loginRateLimit: RequestHandler = async (
   try {
     const email = (req.body?.email as string | undefined) ?? '';
     if (!email) return next();
-    const client = getRedis();
-    const bucket = client ? await incrementRedis(client, email) : incrementMemory(email);
+    const bucket = await countAttempt(email);
     if (bucket.count > MAX_ATTEMPTS) {
       const seconds = Math.max(1, Math.ceil((bucket.resetAt - Date.now()) / 1000));
       return next(new RateLimitError(`Too many login attempts; retry in ${seconds}s`));
     }
     next();
   } catch (err) {
+    // Only reached when even the in-memory count failed: fail open rather
+    // than lock every user out of login.
     logger.warn({ err }, 'login rate limit failed open');
     next();
   }

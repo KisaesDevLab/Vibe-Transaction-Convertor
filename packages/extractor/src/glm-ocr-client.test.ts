@@ -3,6 +3,7 @@ import {
   buildOpenAiOcrRequestBody,
   clearOcrCache,
   GlmOcrError,
+  ocrCacheSize,
   ocrPdfPages,
   parseOpenAiChatResponse,
   resetEngineVersionCache,
@@ -237,6 +238,66 @@ describe('ocrPdfPages', () => {
     const buf = Buffer.from('same-bytes');
     await ocrPdfPages([buf, buf, buf], { baseUrl: 'http://x', fetcher, concurrency: 1 });
     expect(ocrCount).toBe(1);
+  });
+
+  it('does not cache an empty transcription — the next run re-OCRs the page (C15)', async () => {
+    let ocrCount = 0;
+    const fetcher = buildFetcher(async ({ url }) => {
+      if (url.endsWith('/version')) return okResponse({ version: 'glm-ocr/test' });
+      ocrCount += 1;
+      return chatResponse(ocrCount === 1 ? '' : '# recovered page');
+    });
+    const buf = Buffer.from('flaky-page');
+    const first = await ocrPdfPages([buf], { baseUrl: 'http://x', fetcher });
+    expect(first.pages[0]?.markdown).toBe('');
+    const second = await ocrPdfPages([buf], { baseUrl: 'http://x', fetcher });
+    expect(ocrCount).toBe(2); // not replayed from cache
+    expect(second.pages[0]?.markdown).toBe('# recovered page');
+  });
+
+  it('keys the cache on model + prompt + endpoint, not just the pixels (C15)', async () => {
+    let ocrCount = 0;
+    const fetcher = buildFetcher(async ({ url }) => {
+      if (url.endsWith('/version')) return okResponse({ version: 'glm-ocr/test' });
+      ocrCount += 1;
+      return chatResponse(`# pass ${ocrCount}`);
+    });
+    const buf = Buffer.from('same-page');
+    await ocrPdfPages([buf], { baseUrl: 'http://x', fetcher, prompt: 'OCR:' });
+    await ocrPdfPages([buf], { baseUrl: 'http://x', fetcher, prompt: 'Table Recognition:' });
+    await ocrPdfPages([buf], { baseUrl: 'http://x', fetcher, prompt: 'OCR:', model: 'glm-ocr-v2' });
+    await ocrPdfPages([buf], { baseUrl: 'http://y', fetcher, prompt: 'OCR:' });
+    expect(ocrCount).toBe(4); // every config change re-OCRs
+    const again = await ocrPdfPages([buf], { baseUrl: 'http://x', fetcher, prompt: 'OCR:' });
+    expect(ocrCount).toBe(4); // identical config → cache hit
+    expect(again.pages[0]?.markdown).toBe('# pass 1');
+  });
+
+  it('bounds the default in-memory cache (oldest evicted beyond 500 entries)', async () => {
+    const fetcher = buildFetcher(async ({ url }) => {
+      if (url.endsWith('/version')) return okResponse({ version: 'glm-ocr/test' });
+      return chatResponse('# page');
+    });
+    const images = Array.from({ length: 520 }, (_, i) => Buffer.from(`page-${i}`));
+    await ocrPdfPages(images, { baseUrl: 'http://x', fetcher, concurrency: 16 });
+    expect(ocrCacheSize()).toBe(500);
+  });
+
+  it('sweeps expired entries from the in-memory cache on write', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const fetcher = buildFetcher(async ({ url }) => {
+      if (url.endsWith('/version')) return okResponse({ version: 'glm-ocr/test' });
+      return chatResponse('# page');
+    });
+    await ocrPdfPages([Buffer.from('a'), Buffer.from('b')], {
+      baseUrl: 'http://x',
+      fetcher,
+      cacheTtlSeconds: 60,
+    });
+    expect(ocrCacheSize()).toBe(2);
+    vi.setSystemTime(Date.now() + 120_000); // both entries are now stale
+    await ocrPdfPages([Buffer.from('c')], { baseUrl: 'http://x', fetcher, cacheTtlSeconds: 60 });
+    expect(ocrCacheSize()).toBe(1);
   });
 
   it('retries on 5xx and eventually succeeds', async () => {

@@ -12,6 +12,7 @@ import { DeleteConfirmDialog } from '../components/DeleteConfirmDialog';
 import { EntityAuditLog } from '../components/EntityAuditLog';
 import { useToast } from '../components/Toast';
 import {
+  exportBlockReason,
   useDeleteExportJob,
   useExportJobs,
   useExportPreview,
@@ -60,7 +61,11 @@ export function ExportPage() {
 
   const overridden = stmt.data?.statement.reconciliationStatus === 'overridden';
   const allowOverride = overridden;
-  const blocked = stmt.data?.statement.reconciliationStatus === 'discrepancy';
+  // Same gate as the review page / server: the statement must be in
+  // review/exported (not re-extracting, failed, or awaiting the date format)
+  // with a verified or overridden reconciliation and no open review hold.
+  const blockReason = stmt.data ? exportBlockReason(stmt.data.statement) : null;
+  const blocked = blockReason !== null;
 
   const preview = useExportPreview(statementId, previewFormat, allowOverride);
 
@@ -160,10 +165,9 @@ export function ExportPage() {
         </p>
       </div>
 
-      {blocked ? (
+      {blockReason ? (
         <div className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">
-          Reconciliation is in <strong>discrepancy</strong>. Fix the rows or override the
-          reconciliation on the review page before exporting.
+          {blockReason}
         </div>
       ) : null}
 

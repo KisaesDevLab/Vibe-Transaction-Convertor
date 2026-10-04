@@ -296,8 +296,10 @@ export const missingFieldsReminderPromptFor = (
 };
 
 // Amount-recovery reminder. The LLM left one or more transactions with a null /
-// unreadable amount_cents. Re-ask it to read the amounts (the DB can't store a
-// null/zero amount, so an unfixed row would otherwise be dropped).
+// unreadable amount_cents. Re-ask it once to read the amounts; any row whose
+// amount is STILL unreadable after this re-ask is kept at 0 and flagged for
+// review (handleNullAmountRows) — rows are never dropped, so the prompt must
+// never tell the model to omit them.
 export const amountReminderPromptFor = (
   markdown: string,
   nullCount: number,
@@ -310,11 +312,15 @@ export const amountReminderPromptFor = (
   return (
     `Your previous response left ${nullCount} transaction(s) with a null or ` +
     `missing amount_cents. Re-read EVERY transaction line in the markdown below ` +
-    `and emit the FULL extraction JSON with a NUMERIC integer amount_cents (in ` +
-    `cents, signed: negative for debits/withdrawals, positive for ` +
-    `credits/deposits) for EVERY row. Never output null for amount_cents. If an ` +
-    `amount is genuinely unreadable, OMIT that transaction entirely rather than ` +
-    `emitting null. Output ONLY the JSON object, no prose.${overrideLine}\n\n` +
+    `and emit the FULL extraction JSON, keeping EVERY transaction, with a NUMERIC ` +
+    `integer amount_cents (in cents) for each row. Use the SAME sign convention ` +
+    `as before: for a bank/depository account, money OUT (debits, withdrawals, ` +
+    `fees, checks) is NEGATIVE and money IN (deposits, credits, interest) is ` +
+    `POSITIVE; for a credit-card account, charges/purchases/fees are POSITIVE and ` +
+    `payments/refunds are NEGATIVE. If an amount is genuinely unreadable, KEEP ` +
+    `that transaction with amount_cents set to null — it will be flagged for ` +
+    `review. Never omit a row and never guess an amount. Output ONLY the JSON ` +
+    `object, no prose.${overrideLine}\n\n` +
     `=== STATEMENT MARKDOWN ===\n${markdown}\n=== END ===`
   );
 };

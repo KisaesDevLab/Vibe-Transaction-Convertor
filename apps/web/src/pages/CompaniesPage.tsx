@@ -10,6 +10,7 @@ import {
 } from '../hooks/useCompanies';
 import { DeleteConfirmDialog } from '../components/DeleteConfirmDialog';
 import { useToast } from '../components/Toast';
+import { useMe } from '../hooks/useAuth';
 import { ApiError } from '../lib/api';
 
 const PAGE_SIZE = 50;
@@ -157,6 +158,9 @@ function CompanyRow({ company }: { company: Company }) {
   const [name, setName] = useState(company.name);
   const update = useUpdateCompany();
   const del = useDeleteCompany();
+  // ?force=true (cascade into accounts) is admin-only on the server; staff
+  // can delete only companies with no accounts.
+  const isAdmin = useMe().data?.role === 'admin';
   const [error, setError] = useState<string | null>(null);
   const [deleteOpen, setDeleteOpen] = useState(false);
 
@@ -174,9 +178,11 @@ function CompanyRow({ company }: { company: Company }) {
   const confirmDelete = async (): Promise<void> => {
     setError(null);
     try {
-      await del.mutateAsync({ id: company.id, force: company.accountCount > 0 });
+      await del.mutateAsync({ id: company.id, force: isAdmin && company.accountCount > 0 });
       setDeleteOpen(false);
     } catch (err) {
+      // Close the modal first: the row-level error renders beneath its overlay.
+      setDeleteOpen(false);
       setError(err instanceof ApiError ? err.message : 'delete failed');
     }
   };
@@ -254,7 +260,9 @@ function CompanyRow({ company }: { company: Company }) {
         title={`Delete company "${company.name}"?`}
         description={
           company.accountCount > 0
-            ? `This will also delete all ${company.accountCount} account${company.accountCount === 1 ? '' : 's'} under it, and every statement / export they own. The audit log row stays.`
+            ? isAdmin
+              ? `This will also delete all ${company.accountCount} account${company.accountCount === 1 ? '' : 's'} under it, and every statement / export they own. The audit log row stays.`
+              : 'Companies that still have accounts can only be deleted by an admin. Delete the accounts first, or ask an admin.'
             : 'The company has no accounts; this is reversible only via a backup restore.'
         }
         confirmText={company.name}

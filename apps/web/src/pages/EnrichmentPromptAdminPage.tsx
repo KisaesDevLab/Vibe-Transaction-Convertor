@@ -38,6 +38,25 @@ interface PromptUpdate {
   fullSystemPrompt?: string | null;
 }
 
+type FieldKey = 'cleanseRules' | 'categorizeRules' | 'fullSystemPrompt';
+
+// What Save sends for one prompt field: undefined = leave it alone, null =
+// clear the saved override, string = store it as the override. Text equal to
+// the built-in default is never stored: the server would keep a verbatim
+// copy as an "override" and later default-prompt updates would never apply.
+// An override that already equals the default is only cleared after an
+// explicit "Reset to default" (resetRequested).
+export const fieldPatch = (
+  value: string,
+  field: PromptField,
+  resetRequested: boolean,
+): string | null | undefined => {
+  if (value === field.defaultValue) {
+    return field.isOverride && (value !== field.current || resetRequested) ? null : undefined;
+  }
+  return value === field.current ? undefined : value;
+};
+
 export function EnrichmentPromptAdminPage() {
   const status = useQuery({
     queryKey: ['admin', 'enrichment-prompt'],
@@ -78,21 +97,36 @@ function Editor({ initial }: { initial: PromptStatus }) {
   const [cleanse, setCleanse] = useState<string>(initial.cleanseRules.current);
   const [categorize, setCategorize] = useState<string>(initial.categorizeRules.current);
   const [full, setFull] = useState<string>(initial.fullSystemPrompt.current);
+  const [resetRequested, setResetRequested] = useState<Partial<Record<FieldKey, boolean>>>({});
+
+  const patches: Record<FieldKey, string | null | undefined> = {
+    cleanseRules: fieldPatch(cleanse, initial.cleanseRules, resetRequested.cleanseRules === true),
+    categorizeRules: fieldPatch(
+      categorize,
+      initial.categorizeRules,
+      resetRequested.categorizeRules === true,
+    ),
+    fullSystemPrompt: fieldPatch(
+      full,
+      initial.fullSystemPrompt,
+      resetRequested.fullSystemPrompt === true,
+    ),
+  };
 
   const dirty =
-    mode !== initial.mode ||
-    cleanse !== initial.cleanseRules.current ||
-    categorize !== initial.categorizeRules.current ||
-    full !== initial.fullSystemPrompt.current;
+    mode !== initial.mode || Object.values(patches).some((patch) => patch !== undefined);
 
   const onSave = async (): Promise<void> => {
     try {
       const update: PromptUpdate = {};
       if (mode !== initial.mode) update.mode = mode;
-      if (cleanse !== initial.cleanseRules.current) update.cleanseRules = cleanse;
-      if (categorize !== initial.categorizeRules.current) update.categorizeRules = categorize;
-      if (full !== initial.fullSystemPrompt.current) update.fullSystemPrompt = full;
+      if (patches.cleanseRules !== undefined) update.cleanseRules = patches.cleanseRules;
+      if (patches.categorizeRules !== undefined) update.categorizeRules = patches.categorizeRules;
+      if (patches.fullSystemPrompt !== undefined) {
+        update.fullSystemPrompt = patches.fullSystemPrompt;
+      }
       await save.mutateAsync(update);
+      setResetRequested({});
       toast.success('Enrichment prompt saved.');
     } catch (err) {
       toast.error(err instanceof ApiError ? err.message : 'save failed');
@@ -104,6 +138,12 @@ function Editor({ initial }: { initial: PromptStatus }) {
     setCleanse(initial.cleanseRules.current);
     setCategorize(initial.categorizeRules.current);
     setFull(initial.fullSystemPrompt.current);
+    setResetRequested({});
+  };
+
+  const resetTo = (key: FieldKey, set: (v: string) => void) => (): void => {
+    set(initial[key].defaultValue);
+    setResetRequested((prev) => ({ ...prev, [key]: true }));
   };
 
   return (
@@ -162,6 +202,8 @@ function Editor({ initial }: { initial: PromptStatus }) {
             description="Sent only when the operator triggers a cleanse. The LLM sees these verbatim under the JSON-output framing."
             value={cleanse}
             onChange={setCleanse}
+            onReset={resetTo('cleanseRules', setCleanse)}
+            pendingClear={patches.cleanseRules === null}
             isOverride={initial.cleanseRules.isOverride}
             defaultValue={initial.cleanseRules.defaultValue}
           />
@@ -178,6 +220,8 @@ function Editor({ initial }: { initial: PromptStatus }) {
             }
             value={categorize}
             onChange={setCategorize}
+            onReset={resetTo('categorizeRules', setCategorize)}
+            pendingClear={patches.categorizeRules === null}
             isOverride={initial.categorizeRules.isOverride}
             defaultValue={initial.categorizeRules.defaultValue}
           />
@@ -195,6 +239,8 @@ function Editor({ initial }: { initial: PromptStatus }) {
           }
           value={full}
           onChange={setFull}
+          onReset={resetTo('fullSystemPrompt', setFull)}
+          pendingClear={patches.fullSystemPrompt === null}
           isOverride={initial.fullSystemPrompt.isOverride}
           defaultValue={initial.fullSystemPrompt.defaultValue}
           rows={20}
@@ -250,6 +296,8 @@ function PromptBlock({
   description,
   value,
   onChange,
+  onReset,
+  pendingClear,
   isOverride,
   defaultValue,
   rows = 14,
@@ -258,6 +306,9 @@ function PromptBlock({
   description: React.ReactNode;
   value: string;
   onChange: (v: string) => void;
+  onReset: () => void;
+  // Save will clear the saved override (the text is back to the default).
+  pendingClear: boolean;
   isOverride: boolean;
   defaultValue: string;
   rows?: number;
@@ -275,12 +326,18 @@ function PromptBlock({
               : 'rounded-full bg-surface-subtle px-2 py-0.5 text-ink-muted'
           }
         >
-          {isOverride ? 'Saved override active' : 'Using built-in default'}
+          {pendingClear
+            ? 'Override will be cleared on save'
+            : isOverride
+              ? 'Saved override active'
+              : 'Using built-in default'}
         </span>
         <button
           type="button"
-          onClick={() => onChange(defaultValue)}
-          disabled={isDefault}
+          onClick={onReset}
+          // Stays enabled while an override is active even if its text
+          // already equals the default, so that override can be cleared.
+          disabled={isDefault && (!isOverride || pendingClear)}
           className="rounded-md border border-surface-muted px-2 py-1 text-xs hover:bg-surface-subtle disabled:opacity-50"
         >
           Reset to default

@@ -17,16 +17,26 @@ const buildStore = (prefix: string): Store | undefined => {
     sharedClient = new Redis(url, { lazyConnect: true, maxRetriesPerRequest: 1 });
     sharedClient.on('error', (err) => logger.warn({ err }, 'redis error (rate-limit)'));
   }
-  return new RedisStore({
+  const store = new RedisStore({
     sendCommand: (...args: string[]) => sharedClient!.call(args[0]!, ...args.slice(1)) as never,
     prefix,
   });
+  // The constructor fires SCRIPT LOAD right away. With Redis down at boot
+  // those promises reject before any request awaits them, and an unhandled
+  // rejection takes the process down. The store reloads a script on its
+  // next use, so a failed preload is safe to drop here.
+  store.incrementScriptSha.catch(() => undefined);
+  store.getScriptSha.catch(() => undefined);
+  return store;
 };
 
 const baseOpts = {
   windowMs: 60 * 1000,
   standardHeaders: 'draft-7' as const,
   legacyHeaders: false,
+  // Fail open: an unreachable Redis lets requests through un-limited
+  // rather than answering every request (health checks included) with 500.
+  passOnStoreError: true,
 };
 
 const buildLimiter = (prefix: string, limit: number): RateLimitRequestHandler => {
@@ -49,6 +59,13 @@ export const resetRateLimiters = async (): Promise<void> => {
   } catch {
     /* best-effort — the limiter fails open on store errors */
   }
+};
+
+// Test helper: drop the shared Redis client so a limiter built against an
+// unreachable REDIS_URL doesn't leave ioredis reconnecting after the test.
+export const closeRateLimitStore = (): void => {
+  sharedClient?.disconnect();
+  sharedClient = undefined;
 };
 
 // Authenticated limiter: a generous cap keyed per-user (not per-IP) so a

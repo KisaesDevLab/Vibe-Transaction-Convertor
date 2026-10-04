@@ -11,6 +11,10 @@ import { Component, type ErrorInfo, type ReactNode } from 'react';
 
 interface Props {
   children: ReactNode;
+  // When this changes while the error screen is up (AppShell passes the route
+  // path), the error is cleared and the children render again. Unlike a React
+  // `key`, it never remounts the children while nothing has crashed.
+  resetKey?: unknown;
 }
 
 interface State {
@@ -31,6 +35,20 @@ export class ErrorBoundary extends Component<Props, State> {
     // the visible message + stack from the recovery screen.
     // eslint-disable-next-line no-console
     console.error('app error boundary caught', error, info.componentStack);
+  }
+
+  override componentDidUpdate(prevProps: Props, prevState: State): void {
+    // Only clear an error that was already on screen before this update: the
+    // update that first shows the error can itself carry a new resetKey (a
+    // route that crashes on arrival), and clearing it then would just
+    // re-render the crashing page.
+    if (
+      prevState.error !== null &&
+      this.state.error !== null &&
+      prevProps.resetKey !== this.props.resetKey
+    ) {
+      this.reset();
+    }
   }
 
   reset = (): void => {

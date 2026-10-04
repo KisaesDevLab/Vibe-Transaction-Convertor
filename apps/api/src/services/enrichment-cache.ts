@@ -36,11 +36,13 @@ export interface EnrichmentCachePayload {
 export interface EnrichmentCacheKey {
   rawDescription: string;
   accountType?: string | null | undefined;
-  // Identifies the prompt+schema variant that produced the cached
+  // Identifies everything besides the description that shaped the cached
   // value. The base constant ENRICHMENT_PROMPT_VERSION reflects the
   // built-in defaults; the service folds in a hash of any operator
-  // prompt overrides so saved customizations transparently
-  // invalidate prior cache entries without a manual flush.
+  // prompt overrides, the active category list (when categorizing) and
+  // each enabled pass's provider:model, so a prompt edit, a category
+  // rename/archive or a model switch transparently invalidates prior
+  // cache entries without a manual flush.
   promptVersion: string;
   // Differentiates "cleansed only" vs "category only" vs "both" so a
   // partial enrichment doesn't satisfy a later request for the missing
@@ -52,7 +54,19 @@ export interface EnrichmentCacheKey {
 // Bumped to '2' when the cleanse pass started emitting the structured fields
 // (merchant_name/processor/transaction_type/is_opaque/confidence) — old cached
 // entries lack them, so invalidate.
-export const ENRICHMENT_PROMPT_VERSION = '2';
+// Bumped to '3' when the key started folding in the category list + per-pass
+// provider:model, and to drop entries written before the fixes for rows the
+// model omitted (cached as `{}`) and payee-influenced results (cached under the
+// bare description).
+export const ENRICHMENT_PROMPT_VERSION = '3';
+
+// An entry with no fields carries no answer — never store one, and treat one
+// read back (written by an older build) as a miss.
+const hasAnyField = (v: unknown): v is EnrichmentCachePayload =>
+  typeof v === 'object' &&
+  v !== null &&
+  !Array.isArray(v) &&
+  Object.values(v).some((x) => x !== null && x !== undefined);
 
 const hashKey = (k: EnrichmentCacheKey): string => {
   const h = createHash('sha256');
@@ -74,12 +88,14 @@ export const enrichmentCache = {
     try {
       const raw = await r.get(KEY_PREFIX + hashKey(key));
       if (!raw) return null;
-      return JSON.parse(raw) as EnrichmentCachePayload;
+      const parsed: unknown = JSON.parse(raw);
+      return hasAnyField(parsed) ? parsed : null;
     } catch {
       return null;
     }
   },
   async set(key: EnrichmentCacheKey, value: EnrichmentCachePayload): Promise<void> {
+    if (!hasAnyField(value)) return;
     const r = client();
     if (!r) return;
     try {

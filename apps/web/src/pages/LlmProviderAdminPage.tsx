@@ -155,6 +155,30 @@ interface TestResult {
   detail: string | null;
 }
 
+// DELETE /llm-provider/anthropic-key. With no ANTHROPIC_API_KEY in the server
+// environment to fall back on, clearing the stored key also moves Anthropic
+// routing back to local; `policyReset` reports what was changed (null when
+// nothing was). `resetProcesses` lists the per-process providers that were
+// pinned to Anthropic.
+interface ClearKeyResult {
+  ok?: boolean;
+  policyReset?: {
+    from: LlmProviderPolicy;
+    to: LlmProviderPolicy;
+    resetProcesses: string[];
+  } | null;
+}
+
+const describePolicyReset = (reset: NonNullable<ClearKeyResult['policyReset']>): string => {
+  const parts: string[] = [];
+  if (reset.from !== reset.to) parts.push(`routing policy ${reset.from} → ${reset.to}`);
+  const procs = Array.isArray(reset.resetProcesses) ? reset.resetProcesses : [];
+  if (procs.length > 0) parts.push(`Anthropic-pinned process providers reset: ${procs.join(', ')}`);
+  return parts.length > 0
+    ? `No Anthropic key remains, so routing was reset — ${parts.join('; ')}.`
+    : 'No Anthropic key remains, so Anthropic routing was reset to local.';
+};
+
 interface CostSummary {
   days7: { totalUsd: number; statements: number };
   days30: { totalUsd: number; statements: number; avgUsdPerStatement: number };
@@ -194,9 +218,13 @@ export function LlmProviderAdminPage() {
     staleTime: 60_000,
   });
 
+  // Mutations below that are fired with .mutate() (not mutateAsync in a
+  // try/catch) report failures through their own onError toast.
   const switchPolicy = useMutation({
     mutationFn: (p: LlmProviderPolicy) => api.post('/api/admin/llm-provider', { policy: p }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'llm-provider'] }),
+    onError: (err) =>
+      toast.error(err instanceof ApiError ? err.message : 'routing policy change failed'),
   });
   const setAiMode = useMutation({
     mutationFn: (mode: 'router' | 'direct') =>
@@ -211,6 +239,8 @@ export function LlmProviderAdminPage() {
     mutationFn: (s: PdfProcessingStrategy) =>
       api.post<{ strategy: PdfProcessingStrategy }>('/api/admin/pdf-strategy', { strategy: s }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'pdf-strategy'] }),
+    onError: (err) =>
+      toast.error(err instanceof ApiError ? err.message : 'PDF strategy change failed'),
   });
   // PDF retention: days = null/0 → disabled, positive int → auto-purge
   // PDFs older than N days. The daily cron honors this; the "Run now"
@@ -224,6 +254,8 @@ export function LlmProviderAdminPage() {
     mutationFn: (days: number | null) =>
       api.post<{ days: number | null }>('/api/admin/pdf-retention', { days }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'pdf-retention'] }),
+    onError: (err) =>
+      toast.error(err instanceof ApiError ? err.message : 'retention change failed'),
   });
   const runRetentionNow = useMutation({
     mutationFn: () =>
@@ -236,18 +268,23 @@ export function LlmProviderAdminPage() {
         skipped: 'disabled' | null;
       }>('/api/admin/pdf-retention/sweep'),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'pdf-retention'] }),
+    onError: (err) => toast.error(err instanceof ApiError ? err.message : 'retention sweep failed'),
   });
   const setKey = useMutation({
     mutationFn: (apiKey: string) => api.post('/api/admin/llm-provider/anthropic-key', { apiKey }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'llm-provider'] }),
   });
   const clearKey = useMutation({
-    mutationFn: () => api.delete('/api/admin/llm-provider/anthropic-key'),
+    mutationFn: () =>
+      api.delete<ClearKeyResult | undefined>('/api/admin/llm-provider/anthropic-key'),
+    // Refetches policy + per-process providers too (both live in this
+    // payload), so a server-side reset shows up immediately.
     onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'llm-provider'] }),
   });
   const setModel = useMutation({
     mutationFn: (model: string) => api.post('/api/admin/llm-provider/anthropic-model', { model }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'llm-provider'] }),
+    onError: (err) => toast.error(err instanceof ApiError ? err.message : 'model change failed'),
   });
   const setBaseUrl = useMutation({
     mutationFn: (baseUrl: string) =>
@@ -317,11 +354,19 @@ export function LlmProviderAdminPage() {
   };
 
   const onClearKey = async (): Promise<void> => {
-    if (!window.confirm('Clear the stored Anthropic API key? Provider will fall back to local.'))
+    if (
+      !window.confirm(
+        'Clear the stored Anthropic API key? An "Anthropic only" or "Anthropic first" routing ' +
+          'policy will be reset to local-only, and any process whose provider is pinned to ' +
+          'Anthropic will be reset too. If ANTHROPIC_API_KEY is set in the server environment, ' +
+          'that key will continue to be used and routing is left unchanged.',
+      )
+    )
       return;
     try {
-      await clearKey.mutateAsync();
+      const result = await clearKey.mutateAsync();
       toast.success('Anthropic key cleared.');
+      if (result?.policyReset) toast.info(describePolicyReset(result.policyReset));
     } catch (err) {
       toast.error(err instanceof ApiError ? err.message : 'clear failed');
     }
@@ -339,18 +384,23 @@ export function LlmProviderAdminPage() {
 
   const onSetCap = async (raw: string): Promise<void> => {
     const value = raw.trim();
-    if (value === '') {
-      await setCap.mutateAsync(null);
-      toast.success('Monthly cap cleared (no limit).');
-      return;
+    let usd: number | null = null;
+    if (value !== '') {
+      const parsed = Number.parseFloat(value);
+      if (!Number.isFinite(parsed) || parsed < 0) {
+        toast.error('Cap must be a non-negative dollar amount.');
+        return;
+      }
+      usd = parsed;
     }
-    const parsed = Number.parseFloat(value);
-    if (!Number.isFinite(parsed) || parsed < 0) {
-      toast.error('Cap must be a non-negative dollar amount.');
-      return;
+    try {
+      await setCap.mutateAsync(usd);
+      toast.success(
+        usd === null ? 'Monthly cap cleared (no limit).' : `Monthly cap set to ${fmtUsd(usd)}.`,
+      );
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : 'failed');
     }
-    await setCap.mutateAsync(parsed);
-    toast.success(`Monthly cap set to ${fmtUsd(parsed)}.`);
   };
 
   const onSaveTimeout = async (raw: string): Promise<void> => {

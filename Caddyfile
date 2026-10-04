@@ -29,9 +29,26 @@
 		header_up X-Forwarded-Proto {scheme}
 	}
 
-	# Cap request body to 32MB; multer enforces a per-PDF limit but the
-	# proxy layer is the right place to block huge accidental uploads.
-	request_body {
+	# Cap request bodies at the proxy. The two upload endpoints get their
+	# own, larger caps; every other request stays at 32MB. The matchers
+	# are mutually exclusive on purpose: stacking an unscoped 32MB limit
+	# with a scoped larger one would apply the smaller of the two.
+	#  - PDF batch upload (multer enforces MAX_UPLOAD_MB per file and
+	#    MAX_BATCH_SIZE files; the batch is buffered in API memory, so
+	#    keep this within the API's RAM budget — raise it if you raise
+	#    those limits).
+	#  - Backup dump upload (streamed to disk; the API enforces
+	#    BACKUP_UPLOAD_MAX_MB, default 2048 — keep this above it).
+	@pdfUpload path /api/accounts/*/uploads
+	@backupUpload path /api/admin/backups/upload
+	@otherBody not path /api/accounts/*/uploads /api/admin/backups/upload
+	request_body @pdfUpload {
+		max_size 1GB
+	}
+	request_body @backupUpload {
+		max_size 8GB
+	}
+	request_body @otherBody {
 		max_size 32MB
 	}
 }

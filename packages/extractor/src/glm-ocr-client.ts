@@ -137,7 +137,18 @@ export class GlmOcrCircuitOpenError extends GlmOcrError {
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
-const hashImage = (buffer: Buffer): string => createHash('sha256').update(buffer).digest('hex');
+// Page cache key: the transcription depends on WHICH engine read the page and
+// HOW, not just the pixels — so the model, prompt, and endpoint are part of the
+// key. Changing the GLM model / prompt / server then re-OCRs instead of
+// replaying a stale transcription.
+const pageCacheKey = (
+  cfg: Pick<InternalConfig, 'model' | 'prompt' | 'baseUrl' | 'ocrPath'>,
+  image: Buffer,
+): string =>
+  createHash('sha256')
+    .update(`${cfg.model}\0${cfg.prompt}\0${cfg.baseUrl}${cfg.ocrPath}\0`)
+    .update(image)
+    .digest('hex');
 
 interface InternalConfig {
   baseUrl: string;
@@ -157,8 +168,12 @@ interface InternalConfig {
   apiKey: string | null;
 }
 
-// In-memory fallback. Honors a soft TTL but doesn't cleanly expire — the
-// process bound caps memory usage in practice.
+// In-memory fallback (the production default — no external cache is injected).
+// Bounded: expired entries are swept on every write, and beyond
+// MEMORY_CACHE_MAX_ENTRIES the oldest insertions are evicted (Map iteration is
+// insertion-ordered), so a long-running worker can't grow it without limit.
+const MEMORY_CACHE_MAX_ENTRIES = 500;
+
 class MemoryCacheStore implements OcrCacheStore {
   private map = new Map<string, { value: OcrPageResult; expiresAt: number }>();
   async get(key: string): Promise<OcrPageResult | null> {
@@ -171,7 +186,21 @@ class MemoryCacheStore implements OcrCacheStore {
     return hit.value;
   }
   async set(key: string, value: OcrPageResult, ttlSeconds: number): Promise<void> {
-    this.map.set(key, { value, expiresAt: Date.now() + ttlSeconds * 1000 });
+    const now = Date.now();
+    for (const [k, entry] of this.map) {
+      if (entry.expiresAt < now) this.map.delete(k);
+    }
+    // Re-insert so a refreshed key moves to the young end of the eviction order.
+    this.map.delete(key);
+    this.map.set(key, { value, expiresAt: now + ttlSeconds * 1000 });
+    while (this.map.size > MEMORY_CACHE_MAX_ENTRIES) {
+      const oldest = this.map.keys().next();
+      if (oldest.done) break;
+      this.map.delete(oldest.value);
+    }
+  }
+  get size(): number {
+    return this.map.size;
   }
   clear(): void {
     this.map.clear();
@@ -180,6 +209,8 @@ class MemoryCacheStore implements OcrCacheStore {
 
 const defaultCache = new MemoryCacheStore();
 export const clearOcrCache = (): void => defaultCache.clear();
+// Test/diagnostic hook: entries currently held by the default in-memory cache.
+export const ocrCacheSize = (): number => defaultCache.size;
 
 // Phase 11 #11: circuit breaker. Module-scoped so multiple ocrPdfPages
 // callers share state. Trips after `THRESHOLD` consecutive failures and
@@ -383,7 +414,7 @@ const ocrPage = async (
   image: Buffer,
   pageIndex: number,
 ): Promise<{ result: OcrPageResult; cached: boolean; diagnostic: OcrParseDiagnostic }> => {
-  const key = hashImage(image);
+  const key = pageCacheKey(cfg, image);
   const hit = await cfg.cache.get(key);
   if (hit) {
     return {
@@ -430,7 +461,12 @@ const ocrPage = async (
         pageIndex,
         cfg.defaultConfidence,
       );
-      await cfg.cache.set(key, normalized, cfg.cacheTtlSeconds);
+      // Only cache a real transcription: an empty page (a transient engine
+      // hiccup, confidence 0) must be re-OCR'd on the next attempt, not
+      // replayed for the whole TTL.
+      if (normalized.markdown.trim().length > 0) {
+        await cfg.cache.set(key, normalized, cfg.cacheTtlSeconds);
+      }
       onSuccess();
       return { result: normalized, cached: false, diagnostic };
     } catch (err) {

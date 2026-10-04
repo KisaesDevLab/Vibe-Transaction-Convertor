@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { decimalString, formatUsd, parseDecimalToCents } from '@vibe-tx-converter/shared';
 
 import { DeleteConfirmDialog } from './DeleteConfirmDialog';
 import { type TransactionPatch, type TransactionRow } from '../hooks/useStatementsList';
 import { type BusinessCategory } from '../hooks/useCategories';
+import { ApiError } from '../lib/api';
 import { cn } from '../lib/cn';
 
 const TRNTYPE_OPTIONS: string[] = [
@@ -31,12 +32,117 @@ const TRNTYPE_OPTIONS: string[] = [
 export type SortField = 'postedDate' | 'amountCents' | 'description' | 'trntype';
 export type SortOrder = 'asc' | 'desc';
 
+// Fallback for the low-confidence ("suspect") cutoff when the API doesn't
+// send the admin-tunable review.confidence_threshold (its default is 0.7).
+export const DEFAULT_SUSPECT_THRESHOLD = 0.7;
+
+// A row is suspect when its confidence is below the review threshold — the
+// same test the server's review hold applies, so the grid's count matches the
+// hold. A threshold of 0 disables the flag (as it disables the hold).
+export const isLowConfidence = (
+  confidence: number | null | undefined,
+  threshold: number,
+): boolean => (confidence ?? 1) < threshold;
+
+// Grid hot-keys are bare single letters. Ignore keys typed into a form control
+// or contenteditable, IME composition, and any chord with a modifier: Ctrl/Cmd+R
+// must still reload the page and Ctrl+S / Ctrl+X belong to the browser (AltGr
+// layouts report ctrlKey + altKey, so those are skipped too).
+export const isGridHotkeyIgnored = (
+  e: Pick<KeyboardEvent, 'ctrlKey' | 'metaKey' | 'altKey' | 'isComposing' | 'target'>,
+): boolean => {
+  if (e.ctrlKey || e.metaKey || e.altKey || e.isComposing) return true;
+  const el = e.target as { tagName?: string; isContentEditable?: boolean } | null;
+  if (!el) return false;
+  if (el.isContentEditable === true) return true;
+  return el.tagName === 'INPUT' || el.tagName === 'SELECT' || el.tagName === 'TEXTAREA';
+};
+
+// The row editor's local field values (amount as the decimal string typed).
+export interface RowEditFields {
+  description: string;
+  amount: string;
+  trntype: string;
+  postedDate: string;
+}
+
+type EditableTx = Pick<TransactionRow, 'description' | 'amountCents' | 'trntype' | 'postedDate'>;
+
+export const editFieldsFromTx = (tx: EditableTx): RowEditFields => ({
+  description: tx.description,
+  amount: decimalString(BigInt(tx.amountCents)),
+  trntype: tx.trntype,
+  postedDate: tx.postedDate,
+});
+
+// Build the PATCH for a row edit. A field is sent only when the operator
+// changed it from what the editor was seeded with (`base`) AND it differs from
+// the row's current value, so saving one field can never write a stale value
+// back over another (e.g. revert a bulk TRNTYPE change). Only touched fields
+// are validated. An empty patch means there is nothing to save.
+export const buildRowEditPatch = (
+  tx: EditableTx,
+  fields: RowEditFields,
+  base: RowEditFields = editFieldsFromTx(tx),
+): { ok: true; patch: TransactionPatch } | { ok: false; error: string } => {
+  const patch: TransactionPatch = {};
+  if (fields.description !== base.description) {
+    const description = fields.description.trim();
+    if (description.length === 0) return { ok: false, error: 'description required' };
+    if (description !== tx.description) patch.description = description;
+  }
+  if (fields.amount !== base.amount) {
+    let cents: bigint;
+    try {
+      cents = parseDecimalToCents(fields.amount);
+    } catch {
+      return { ok: false, error: 'decimal like -4.50' };
+    }
+    if (cents === 0n) return { ok: false, error: 'non-zero' };
+    if (cents !== BigInt(tx.amountCents)) patch.amount_cents = cents.toString();
+  }
+  if (fields.trntype !== base.trntype && fields.trntype !== tx.trntype) {
+    patch.trntype = fields.trntype;
+  }
+  if (fields.postedDate !== base.postedDate) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(fields.postedDate)) {
+      return { ok: false, error: 'date YYYY-MM-DD' };
+    }
+    if (fields.postedDate !== tx.postedDate) patch.posted_date = fields.postedDate;
+  }
+  return { ok: true, patch };
+};
+
+// Delete rows one at a time, carrying on past a failure. A 404 means the row is
+// already gone (e.g. deleted elsewhere), so it counts as deleted — a retry could
+// only 404 again. `onGone` runs for each row that is gone; the ids that could
+// not be deleted are returned.
+export const deleteRowsEach = async (
+  ids: readonly string[],
+  deleteOne: (id: string) => Promise<unknown>,
+  onGone: (id: string) => void,
+): Promise<string[]> => {
+  const failed: string[] = [];
+  for (const id of ids) {
+    let gone: boolean;
+    try {
+      await deleteOne(id);
+      gone = true;
+    } catch (err) {
+      gone = err instanceof ApiError && err.status === 404;
+    }
+    if (gone) onGone(id);
+    else failed.push(id);
+  }
+  return failed;
+};
+
 export interface GridFilters {
   search: string;
   trntype: string | null;
   editedOnly: boolean;
   // Phase 18 #17 — suspect-only toggle. Mirrors the suspect badge in
-  // the row (confidence < 0.7).
+  // the row (confidence below the review confidence threshold).
   suspectOnly: boolean;
   // Inclusive amount-range filter expressed in dollars (decimal string
   // is what the user types). Empty string = unbounded on that side.
@@ -65,6 +171,7 @@ export function TransactionGrid({
   onSelect,
   selectedId,
   categories,
+  suspectThreshold = DEFAULT_SUSPECT_THRESHOLD,
 }: {
   txs: TransactionRow[];
   periodStart: string | null;
@@ -86,8 +193,11 @@ export function TransactionGrid({
   selectedId?: string | null | undefined;
   // Phase 33 — non-archived business categories for the row dropdown.
   // Empty / undefined hides the column; the parent fetches via
-  // useCategories() and passes through.
+  // useReviewCategories() and passes through.
   categories?: BusinessCategory[] | undefined;
+  // Low-confidence cutoff for the suspect badge/filter/count — the server's
+  // admin-tunable review.confidence_threshold (default 0.7).
+  suspectThreshold?: number | undefined;
 }) {
   const [filters, setFilters] = useState<GridFilters>({
     search: '',
@@ -107,6 +217,15 @@ export function TransactionGrid({
     { kind: 'one'; tx: TransactionRow } | { kind: 'bulk'; ids: string[] } | null
   >(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
+  // Ids whose delete failed in the last bulk delete. They stay selected (so
+  // "Delete selected" retries just them); the note below the toolbar counts
+  // the ones still selected.
+  const [bulkDeleteFailedIds, setBulkDeleteFailedIds] = useState<string[]>([]);
+  const isSuspect = useCallback(
+    (confidence: number | null | undefined): boolean =>
+      isLowConfidence(confidence, suspectThreshold),
+    [suspectThreshold],
+  );
   // Phase 18 #16: when on, the row's edit fields commit on blur instead
   // of needing the explicit Save button. Persisted in localStorage so
   // the operator's preference survives reloads.
@@ -131,7 +250,7 @@ export function TransactionGrid({
       filtered = filtered.filter((t) => t.userEdited);
     }
     if (filters.suspectOnly) {
-      filtered = filtered.filter((t) => (t.confidence ?? 1) < 0.7);
+      filtered = filtered.filter((t) => isSuspect(t.confidence));
     }
     // Amount-range filter. We parse the decimal-cent strings only when
     // the operator has typed something — empty input is unbounded on
@@ -172,10 +291,11 @@ export function TransactionGrid({
       if (cmp === 0) cmp = a.seqInDay - b.seqInDay;
       return cmp * dir;
     });
-  }, [txs, filters, sortField, sortOrder]);
+  }, [txs, filters, sortField, sortOrder, isSuspect]);
 
   const editedCount = txs.filter((t) => t.userEdited).length;
-  const suspectCount = txs.filter((t) => (t.confidence ?? 1) < 0.7).length;
+  const suspectCount = txs.filter((t) => isSuspect(t.confidence)).length;
+  const failedDeletesSelected = bulkDeleteFailedIds.filter((id) => selectedIds.has(id)).length;
   const totalAbs = txs.reduce<bigint>(
     (acc, t) => acc + (BigInt(t.amountCents) < 0n ? -BigInt(t.amountCents) : BigInt(t.amountCents)),
     0n,
@@ -186,8 +306,7 @@ export function TransactionGrid({
   // recompute-reconciliation against the live transactions.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      const tag = (e.target as HTMLElement | null)?.tagName;
-      if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
+      if (isGridHotkeyIgnored(e)) return;
       if (e.key === 'j') {
         setActiveRow((i) => Math.min(i + 1, rows.length - 1));
       } else if (e.key === 'k') {
@@ -236,6 +355,14 @@ export function TransactionGrid({
       const next = new Set(prev);
       if (next.has(id)) next.delete(id);
       else next.add(id);
+      return next;
+    });
+  };
+  const deselect = (id: string) => {
+    setSelectedIds((prev) => {
+      if (!prev.has(id)) return prev;
+      const next = new Set(prev);
+      next.delete(id);
       return next;
     });
   };
@@ -291,6 +418,11 @@ export function TransactionGrid({
               Delete selected
             </button>
           ) : null}
+          {failedDeletesSelected > 0 ? (
+            <span className="text-xs text-danger">
+              {failedDeletesSelected} could not be deleted — still selected
+            </span>
+          ) : null}
           <button
             type="button"
             onClick={() => setSelectedIds(new Set())}
@@ -333,7 +465,11 @@ export function TransactionGrid({
         </label>
         <label
           className="flex items-center gap-1.5 text-sm"
-          title="Show only rows the LLM marked low-confidence (< 0.7)"
+          title={
+            suspectThreshold > 0
+              ? `Show only rows below the review confidence threshold (< ${suspectThreshold})`
+              : 'The low-confidence flag is off (review confidence threshold is 0)'
+          }
         >
           <input
             type="checkbox"
@@ -463,16 +599,24 @@ export function TransactionGrid({
                 onToggleCheck={() => toggleSelectOne(tx.id)}
                 isAdmin={isAdmin}
                 autoSave={autoSave}
+                suspect={isSuspect(tx.confidence)}
                 onActivate={() => {
                   setActiveRow(i);
                   onSelect?.(tx);
                 }}
                 onStartEdit={() => setEditingId(tx.id)}
-                onCancelEdit={() => setEditingId(null)}
+                // Only close this row's editor: an earlier auto-save (blur)
+                // can resolve after the operator already opened another row,
+                // and must not close that one.
+                onCancelEdit={() => setEditingId((cur) => (cur === tx.id ? null : cur))}
                 onSave={async (patch) => {
                   await onSave(tx.id, patch);
-                  setEditingId(null);
+                  setEditingId((cur) => (cur === tx.id ? null : cur));
                 }}
+                // The inline Cleansed / Category / Payee cells only PATCH:
+                // closing this row's editor would re-seed it and drop the
+                // description / amount / type / date typed there but unsaved.
+                onSaveCell={(patch) => onSave(tx.id, patch)}
                 onDelete={onDelete ? () => setPendingDelete({ kind: 'one', tx }) : undefined}
                 categories={categories}
               />
@@ -526,10 +670,20 @@ export function TransactionGrid({
           setDeleteBusy(true);
           try {
             if (pendingDelete.kind === 'one') {
-              await onDelete(pendingDelete.tx.id);
+              const id = pendingDelete.tx.id;
+              await onDelete(id);
+              // The row is gone: drop it from the selection and from the last
+              // bulk delete's failures, or a later "Delete selected" 404s on it
+              // and reports it as still undeleted.
+              deselect(id);
+              setBulkDeleteFailedIds((prev) => prev.filter((x) => x !== id));
             } else {
-              for (const id of pendingDelete.ids) await onDelete(id);
-              setSelectedIds(new Set());
+              // Keep going past a failed row (onDelete reports each failure).
+              // Every id that is gone leaves the selection — retrying it would
+              // only 404 — and the failures stay selected for a retry.
+              setBulkDeleteFailedIds([]);
+              const failed = await deleteRowsEach(pendingDelete.ids, onDelete, deselect);
+              setBulkDeleteFailedIds(failed);
             }
             setPendingDelete(null);
           } finally {
@@ -706,11 +860,13 @@ function Row({
   checked,
   isAdmin,
   autoSave,
+  suspect,
   onActivate,
   onToggleCheck,
   onStartEdit,
   onCancelEdit,
   onSave,
+  onSaveCell,
   onDelete,
   categories,
 }: {
@@ -723,46 +879,75 @@ function Row({
   checked: boolean;
   isAdmin?: boolean | undefined;
   autoSave?: boolean | undefined;
+  suspect: boolean;
   onActivate: () => void;
   onToggleCheck: () => void;
   onStartEdit: () => void;
   onCancelEdit: () => void;
+  // Saves the row editor, then closes it.
   onSave: (patch: TransactionPatch) => Promise<unknown>;
+  // Saves an inline cell (Cleansed / Category / Payee); leaves the editor open.
+  onSaveCell: (patch: TransactionPatch) => Promise<unknown>;
   onDelete?: (() => void) | undefined;
   categories?: BusinessCategory[] | undefined;
 }) {
   const [desc, setDesc] = useState(tx.description);
-  const [amount, setAmount] = useState(decimalString(BigInt(tx.amountCents)));
+  const [amount, setAmount] = useState(() => decimalString(BigInt(tx.amountCents)));
   const [trntype, setTrntype] = useState(tx.trntype);
   const [postedDate, setPostedDate] = useState(tx.postedDate);
   const [error, setError] = useState<string | null>(null);
+  // The values the editor was last seeded with; commitEdit only sends fields
+  // the operator changed from these.
+  const seedRef = useRef<RowEditFields>(editFieldsFromTx(tx));
+
+  // Re-seed the editor from the row whenever it isn't being edited. Picks up
+  // refetched values (e.g. a bulk TRNTYPE change) and discards anything typed
+  // then abandoned (Esc, opening another row), so a later Save can't write a
+  // stale value back.
+  useEffect(() => {
+    if (editing) return;
+    const seed = editFieldsFromTx({
+      description: tx.description,
+      amountCents: tx.amountCents,
+      trntype: tx.trntype,
+      postedDate: tx.postedDate,
+    });
+    seedRef.current = seed;
+    setDesc(seed.description);
+    setAmount(seed.amount);
+    setTrntype(seed.trntype);
+    setPostedDate(seed.postedDate);
+  }, [editing, tx.description, tx.amountCents, tx.trntype, tx.postedDate]);
+
+  // An inline error belongs to one edit session.
+  useEffect(() => {
+    setError(null);
+  }, [editing]);
 
   const outsidePeriod =
     periodStart && periodEnd && (tx.postedDate < periodStart || tx.postedDate > periodEnd);
-  const suspect = (tx.confidence ?? 1) < 0.7;
 
   // Single source of truth for the row's commit logic. Both the Save
   // button onClick and (when autoSave is on) the per-input onBlur fire
   // through here. Returns a boolean for downstream chaining if needed.
   const commitEdit = async (): Promise<boolean> => {
-    let cents: bigint;
-    try {
-      cents = parseDecimalToCents(amount);
-    } catch {
-      setError('decimal like -4.50');
+    const result = buildRowEditPatch(
+      tx,
+      { description: desc, amount, trntype, postedDate },
+      seedRef.current,
+    );
+    if (!result.ok) {
+      setError(result.error);
       return false;
     }
-    if (cents === 0n) {
-      setError('non-zero');
-      return false;
+    if (Object.keys(result.patch).length === 0) {
+      // Nothing changed — just leave edit mode (no PATCH, no toast).
+      setError(null);
+      onCancelEdit();
+      return true;
     }
     try {
-      await onSave({
-        description: desc,
-        amount_cents: cents.toString(),
-        trntype,
-        posted_date: postedDate,
-      });
+      await onSave(result.patch);
       setError(null);
       return true;
     } catch (err) {
@@ -863,7 +1048,7 @@ function Row({
             <CleansedCell
               tx={tx}
               onSaveCleansed={async (val) => {
-                await onSave({ cleansed_description: val });
+                await onSaveCell({ cleansed_description: val });
               }}
             />
           </td>
@@ -874,7 +1059,7 @@ function Row({
               tx={tx}
               categories={categories}
               onSaveCategory={async (id) => {
-                await onSave({ business_category_id: id });
+                await onSaveCell({ business_category_id: id });
               }}
             />
           </td>
@@ -886,7 +1071,7 @@ function Row({
         <PayeeCell
           tx={tx}
           onSavePayee={async (val) => {
-            await onSave({ payee: val });
+            await onSaveCell({ payee: val });
           }}
         />
       </td>
@@ -922,11 +1107,7 @@ function Row({
               type="button"
               onClick={(e) => {
                 e.stopPropagation();
-                setDesc(tx.description);
-                setAmount(decimalString(BigInt(tx.amountCents)));
-                setTrntype(tx.trntype);
-                setPostedDate(tx.postedDate);
-                setError(null);
+                // Leaving edit mode re-seeds the fields from the row.
                 onCancelEdit();
               }}
               className="rounded-md border border-surface-muted px-2 py-1 text-xs"

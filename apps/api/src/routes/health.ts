@@ -77,37 +77,87 @@ const checkHttpHealth = async (
   }
 };
 
+interface Readiness {
+  failing: boolean;
+  dependencies: Record<'postgres' | 'redis' | 'llmGateway', DependencyStatus>;
+}
+
+const probeReadiness = async (): Promise<Readiness> => {
+  // Resolve the local LLM gateway (Ollama) URL through the DB-backed config
+  // so an admin editing /admin/engines flips the probe target without a
+  // restart. Probe Ollama's native /api/tags (it has no /health).
+  const llmGwCfg = await getEngineConfig(db, 'llm-gateway').catch(() => null);
+  const ollamaBase = llmGwCfg?.url ?? process.env.OLLAMA_BASE_URL ?? process.env.LLM_GATEWAY_URL;
+  const [postgres, redis, llmGateway] = await Promise.all([
+    checkPostgres(),
+    checkRedis(),
+    checkHttpHealth(
+      'ollama',
+      ollamaBase ? ollamaBase.replace(/\/v1\/?$/, '') : undefined,
+      '/api/tags',
+    ),
+  ]);
+  const dependencies = { postgres, redis, llmGateway };
+  const failing = Object.values(dependencies).some((d) => d.status === 'fail');
+  if (failing) {
+    logger.warn({ dependencies }, 'readiness check failed');
+  }
+  return { failing, dependencies };
+};
+
+// A probe opens its own Postgres and Redis connections, so concurrent
+// callers share the one in flight and a result this fresh is reused.
+const READY_REUSE_MS = 2_000;
+
+// The failure text (host:port, the DB user in an auth failure) is for
+// signed-in users; anonymous callers get the status and latency only.
+const withoutDetail = (d: DependencyStatus): DependencyStatus => ({
+  status: d.status,
+  ...(d.latencyMs === undefined ? {} : { latencyMs: d.latencyMs }),
+});
+
 export const healthRouter = (): Router => {
   const router = Router();
+
+  // Per router, so each createApp() probes its own configuration.
+  let inFlight: Promise<Readiness> | null = null;
+  let last: { at: number; result: Readiness } | null = null;
+
+  const readiness = (): Promise<Readiness> => {
+    if (last && Date.now() - last.at < READY_REUSE_MS) return Promise.resolve(last.result);
+    if (!inFlight) {
+      inFlight = probeReadiness()
+        .then((result) => {
+          last = { at: Date.now(), result };
+          return result;
+        })
+        .finally(() => {
+          inFlight = null;
+        });
+    }
+    return inFlight;
+  };
 
   router.get('/live', (_req, res) => {
     res.json({ status: 'ok' });
   });
 
-  router.get('/ready', async (_req, res) => {
-    // Resolve the local LLM gateway (Ollama) URL through the DB-backed config
-    // so an admin editing /admin/engines flips the probe target without a
-    // restart. Probe Ollama's native /api/tags (it has no /health).
-    const llmGwCfg = await getEngineConfig(db, 'llm-gateway').catch(() => null);
-    const ollamaBase = llmGwCfg?.url ?? process.env.OLLAMA_BASE_URL ?? process.env.LLM_GATEWAY_URL;
-    const [postgres, redis, llmGateway] = await Promise.all([
-      checkPostgres(),
-      checkRedis(),
-      checkHttpHealth(
-        'ollama',
-        ollamaBase ? ollamaBase.replace(/\/v1\/?$/, '') : undefined,
-        '/api/tags',
-      ),
-    ]);
-    const dependencies = { postgres, redis, llmGateway };
-    const failing = Object.values(dependencies).some((d) => d.status === 'fail');
-    if (failing) {
-      logger.warn({ dependencies }, 'readiness check failed');
+  router.get('/ready', async (req, res, next) => {
+    try {
+      const { failing, dependencies } = await readiness();
+      res.status(failing ? 503 : 200).json({
+        status: failing ? 'degraded' : 'ok',
+        dependencies: req.user
+          ? dependencies
+          : {
+              postgres: withoutDetail(dependencies.postgres),
+              redis: withoutDetail(dependencies.redis),
+              llmGateway: withoutDetail(dependencies.llmGateway),
+            },
+      });
+    } catch (err) {
+      next(err);
     }
-    res.status(failing ? 503 : 200).json({
-      status: failing ? 'degraded' : 'ok',
-      dependencies,
-    });
   });
 
   return router;

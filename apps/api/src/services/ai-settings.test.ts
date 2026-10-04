@@ -64,7 +64,8 @@ live('ai-settings (live Postgres)', () => {
     expect(s.checkPayeeAuto).toBe(true);
     expect(s.localStructuredOutput).toBe('grammar');
     // GLM-OCR engine defaults (ADR-025).
-    expect(s.glmOcrModel).toBe('GLM-OCR');
+    // The llama-server advertises the model id exactly as "glm-ocr".
+    expect(s.glmOcrModel).toBe('glm-ocr');
     expect(s.glmOcrTimeoutMs).toBe(120_000);
     expect(s.glmOcrConcurrency).toBe(2);
   });

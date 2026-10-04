@@ -27,6 +27,19 @@ export const useCategories = (opts: { includeArchived?: boolean } = {}) =>
     staleTime: 5 * 60 * 1000,
   });
 
+// Non-archived categories for the review grid's Category dropdown, from the
+// read-only review-meta endpoint any reviewer with the 'statements' feature
+// can call (the /api/admin/categories list above 403s for staff, which hid
+// the Category/Cleansed columns). Keyed under ['categories'] so the admin
+// mutations' prefix invalidation refreshes it too. CategoryAdminPage keeps
+// useCategories().
+export const useReviewCategories = () =>
+  useQuery({
+    queryKey: ['categories', 'review'],
+    queryFn: () => api.get<BusinessCategory[]>('/api/review-meta/categories'),
+    staleTime: 5 * 60 * 1000,
+  });
+
 export interface CreateCategoryInput {
   name: string;
   description?: string | null;
@@ -87,6 +100,17 @@ export const useEnrichmentToggles = () =>
   useQuery({
     queryKey: ['admin', 'enrichment'],
     queryFn: () => api.get<EnrichmentTogglesStatus>('/api/admin/enrichment'),
+    staleTime: 30 * 1000,
+  });
+
+// Same toggle status for the review page, read from the review-meta endpoint
+// so staff (who can run POST /api/statements/:id/enrich) see the enrichment
+// toolbar. Keyed under ['admin', 'enrichment'] so useSetEnrichmentToggle's
+// prefix invalidation refreshes it.
+export const useReviewEnrichmentToggles = () =>
+  useQuery({
+    queryKey: ['admin', 'enrichment', 'review'],
+    queryFn: () => api.get<EnrichmentTogglesStatus>('/api/review-meta/enrichment'),
     staleTime: 30 * 1000,
   });
 

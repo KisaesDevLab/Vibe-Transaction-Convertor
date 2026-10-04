@@ -23,6 +23,7 @@ import { sessions, users } from '../db/schema.js';
 import type { User } from '../db/types.js';
 import { writeAudit } from '../services/audit.js';
 import { hashPassword, verifyPassword } from '../services/auth.js';
+import { BREAKGLASS_EMAIL } from './breakglass.js';
 
 type Role = User['role'];
 const ROLES: readonly Role[] = ['admin', 'staff'];
@@ -44,7 +45,8 @@ export const VIBETC_ROLES: RoleVocabulary = {
 };
 
 export const DEFAULT_BREAKGLASS_USERNAME = 'vibe-breakglass';
-export const BREAKGLASS_EMAIL = 'vibe-breakglass@vibe-tx-converter.local';
+// Defined in the leaf module lib/breakglass.ts (services/auth.ts needs it too).
+export { BREAKGLASS_EMAIL };
 
 export const breakglassUsername = (env: typeof process.env = process.env): string =>
   (env.VIBE_BREAKGLASS_USERNAME?.trim() || DEFAULT_BREAKGLASS_USERNAME).toLowerCase();

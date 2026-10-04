@@ -1,7 +1,24 @@
 import { describe, expect, it } from 'vitest';
 
 import { prepareMarkdown } from '../llm-client.js';
-import { SYSTEM_PROMPT, extractionSystemPromptFor } from './extract.js';
+import { SYSTEM_PROMPT, amountReminderPromptFor, extractionSystemPromptFor } from './extract.js';
+
+describe('amountReminderPromptFor (C14)', () => {
+  const prompt = amountReminderPromptFor('# md', 2);
+
+  it('never tells the model to omit rows — keep them with a null amount for review', () => {
+    expect(prompt).not.toMatch(/OMIT that transaction/i); // the old drop-the-row instruction
+    expect(prompt).toMatch(/keeping EVERY transaction/);
+    expect(prompt).toMatch(/KEEP that transaction with amount_cents set to null/);
+    expect(prompt).toMatch(/Never omit a row and never guess an amount/);
+  });
+
+  it('states the same bank AND credit-card sign convention as the system prompt', () => {
+    expect(prompt).toMatch(/bank\/depository account, money OUT .* is NEGATIVE/s);
+    expect(prompt).toMatch(/credit-card account, charges\/purchases\/fees are POSITIVE/);
+    expect(prompt).toMatch(/payments\/refunds are NEGATIVE/);
+  });
+});
 
 describe('extractionSystemPromptFor', () => {
   it('returns the built-in default in rules mode with no extra instructions', () => {

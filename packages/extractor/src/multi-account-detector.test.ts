@@ -49,6 +49,162 @@ describe('detectMultiAccount', () => {
     expect(r.multiAccount).toBe(false);
     expect(r.uniqueLast4).toEqual([]);
   });
+
+  it('regression (S4): one checking statement with a grouped number + a transfer reference', () => {
+    const pages = [
+      page(0, 'Account Number: 0012-3456-7890'),
+      page(1, 'ONLINE TRANSFER TO SAV ACCT ENDING IN 5678'),
+      page(2, 'Account ending in 7890'),
+    ];
+    const r = detectMultiAccount(pages);
+    expect(r.multiAccount).toBe(false);
+    expect(r.uniqueLast4).toEqual(['7890']); // last 4 of the WHOLE number, not "0012"
+    expect(r.splits).toEqual([{ last4: '7890', pageStart: 0, pageEnd: 2 }]);
+  });
+
+  it('takes the last 4 digits of a space-grouped or masked number', () => {
+    expect(
+      detectMultiAccount([page(0, 'Account Number: 4147 2000 1234 5678')]).uniqueLast4,
+    ).toEqual(['5678']);
+    expect(detectMultiAccount([page(0, 'Acct # XXXX-XXXX-9012')]).uniqueLast4).toEqual(['9012']);
+    expect(detectMultiAccount([page(0, 'Account number\n1234-5678')]).uniqueLast4).toEqual([
+      '5678',
+    ]);
+  });
+
+  it('ignores account references on transaction rows (leading date AND a money amount)', () => {
+    const pages = [
+      page(
+        0,
+        [
+          'Checking Account ending in 1234',
+          '03/15 BILL PAY COMCAST ACCT # 8155400 89.99 1,144.57',
+          '| 03/16 | ACH DEBIT ACCOUNT NUMBER 55554444 | -45.00 | 1,099.57 |',
+          '03/17 PAYEE ACCT 99887766 1234.56',
+        ].join('\n'),
+      ),
+    ];
+    const r = detectMultiAccount(pages);
+    expect(r.multiAccount).toBe(false);
+    expect(r.uniqueLast4).toEqual(['1234']);
+  });
+
+  it('ignores transfer descriptions (transfer / xfer / tfr / to acct / from acct)', () => {
+    const pages = [
+      page(
+        0,
+        [
+          'Account ending in 1234',
+          'ONLINE TRANSFER TO SAV ACCT ENDING IN 5678',
+          'XFER ACCT 2222',
+          'TFR FROM ACCOUNT ENDING 3333',
+          '| Payment to acct ending 4321 | -45.00 |',
+          'Deposit from sav acct 6666',
+        ].join('\n'),
+      ),
+    ];
+    const r = detectMultiAccount(pages);
+    expect(r.multiAccount).toBe(false);
+    expect(r.uniqueLast4).toEqual(['1234']);
+  });
+
+  it('counts a lone mid-page mention of another account (recall over precision)', () => {
+    // A miss would hide the split option entirely; a false positive is only a
+    // dismissible banner — so a single non-transfer, non-row hit counts.
+    const filler = Array.from({ length: 15 }, (_, i) => `line ${i + 1}`).join('\n');
+    const pages = [
+      page(0, `Account ending in 1234\n${filler}\nOverdraft protection: account ending 5678`),
+      page(1, 'Account ending in 1234'),
+    ];
+    const r = detectMultiAccount(pages);
+    expect(r.multiAccount).toBe(true);
+    expect(r.uniqueLast4.sort()).toEqual(['1234', '5678']);
+  });
+
+  describe('multi-account layouts (each must be detected)', () => {
+    const rows = (n: number): string =>
+      Array.from(
+        { length: n },
+        (_, i) => `03/${String(i + 1).padStart(2, '0')} DEBIT CARD PURCHASE 10.00 1,${500 - i}.00`,
+      ).join('\n');
+
+    it('a second account whose section starts mid-page with one header line', () => {
+      const pages = [
+        page(0, `CHECKING\nAccount Number: 1111222233\n${rows(20)}`),
+        page(1, `${rows(15)}\nSAVINGS\nAccount Number: 4444555566\n${rows(3)}`),
+      ];
+      const r = detectMultiAccount(pages);
+      expect(r.multiAccount).toBe(true);
+      expect(r.uniqueLast4.sort()).toEqual(['2233', '5566']);
+    });
+
+    it('a header line that also carries a balance', () => {
+      const pages = [
+        page(0, `Checking Account Number: 1111222233\n${rows(5)}`),
+        page(1, `Savings Account Number: 4444555566 Beginning Balance $5,000.00\n${rows(5)}`),
+      ];
+      const r = detectMultiAccount(pages);
+      expect(r.multiAccount).toBe(true);
+      expect(r.splits).toEqual([
+        { last4: '2233', pageStart: 0, pageEnd: 0 },
+        { last4: '5566', pageStart: 1, pageEnd: 1 },
+      ]);
+    });
+
+    it('a header line starting with the statement period (even with a balance)', () => {
+      const pages = [
+        page(0, `03/01/2024 - 03/31/2024 Account Number: 1111222233\n${rows(5)}`),
+        page(
+          1,
+          `03/01/2024 to 03/31/2024 Account Number: 4444555566 Beginning Balance $5,000.00\n${rows(5)}`,
+        ),
+      ];
+      const r = detectMultiAccount(pages);
+      expect(r.multiAccount).toBe(true);
+      expect(r.uniqueLast4.sort()).toEqual(['2233', '5566']);
+    });
+
+    it('a dash separator ("Account Number - 1111222233")', () => {
+      const pages = [
+        page(0, `Account Number - 1111222233\n${rows(5)}`),
+        page(1, `Account Number – 4444555566\n${rows(5)}`),
+      ];
+      const r = detectMultiAccount(pages);
+      expect(r.multiAccount).toBe(true);
+      expect(r.uniqueLast4.sort()).toEqual(['2233', '5566']);
+    });
+
+    it('a footer-only number on a one-page account', () => {
+      const pages = [
+        page(0, `Checking Account Number: 1111222233\n${rows(20)}`),
+        page(1, `continued checking\n${rows(20)}`),
+        page(2, `SAVINGS STATEMENT\n${rows(20)}\nAccount Number: 4444555566   Page 1 of 1`),
+      ];
+      const r = detectMultiAccount(pages);
+      expect(r.multiAccount).toBe(true);
+      expect(r.splits).toEqual([
+        { last4: '2233', pageStart: 0, pageEnd: 1 },
+        { last4: '5566', pageStart: 2, pageEnd: 2 },
+      ]);
+    });
+
+    it('two accounts on the same page', () => {
+      const pages = [
+        page(
+          0,
+          `Checking Account Number: 1111222233\n${rows(3)}\nSavings Account Number: 4444555566\n${rows(3)}`,
+        ),
+      ];
+      const r = detectMultiAccount(pages);
+      expect(r.multiAccount).toBe(true);
+      expect(r.uniqueLast4.sort()).toEqual(['2233', '5566']);
+    });
+  });
+
+  it('is word-bounded ("subaccount" is not an account label)', () => {
+    const r = detectMultiAccount([page(0, 'Statement subaccount #5555 summary')]);
+    expect(r.uniqueLast4).toEqual([]);
+  });
 });
 
 describe('last4FromMasked', () => {

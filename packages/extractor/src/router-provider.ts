@@ -16,8 +16,11 @@ import { VibeAiClient, VibeAiError, type ChatMessage } from '@kisaes/vibe-ai-cli
 import { schemas } from '@vibe-tx-converter/shared';
 import {
   ExtractionResponseError,
+  describeJsonParseError,
   parseExtractionResponse,
   prepareMarkdown,
+  recoverProseWrappedJson,
+  sanitizeSchemaForOllama,
   type CompleteOptions,
   type CompleteResult,
   type ExtractOptions,
@@ -55,8 +58,16 @@ export interface RouterProviderOptions {
   maxTokens?: number | undefined;
   maxPromptTokens?: number | undefined;
   temperature?: number | undefined;
+  /**
+   * Per-call ceiling (ms) on a router completion, so a hung router/upstream
+   * can't block the worker indefinitely. Default 600000 (10 min) — generous on
+   * purpose; callers should pass the resolved admin LLM timeout.
+   */
+  timeoutMs?: number | undefined;
   fetcher?: typeof fetch | undefined;
 }
+
+const DEFAULT_ROUTER_TIMEOUT_MS = 600_000;
 
 const stripFences = (raw: string): string =>
   raw
@@ -71,6 +82,7 @@ export class RouterProvider implements LlmProvider {
   private readonly maxTokens: number;
   private readonly maxPromptTokens: number | undefined;
   private readonly temperature: number | undefined;
+  private readonly timeoutMs: number;
   private readonly baseUrl: string;
   private readonly fetcher: typeof fetch;
 
@@ -89,6 +101,10 @@ export class RouterProvider implements LlmProvider {
     this.maxTokens = opts.maxTokens ?? 32_000;
     this.maxPromptTokens = opts.maxPromptTokens;
     this.temperature = opts.temperature;
+    this.timeoutMs =
+      opts.timeoutMs !== undefined && Number.isFinite(opts.timeoutMs) && opts.timeoutMs > 0
+        ? opts.timeoutMs
+        : DEFAULT_ROUTER_TIMEOUT_MS;
   }
 
   // Deliberately not SDK client.completeJson: the SDK parses JSON before any
@@ -111,27 +127,63 @@ export class RouterProvider implements LlmProvider {
       const result = await this.client.complete(this.taskClass, messages, {
         maxTokens,
         ...(this.temperature !== undefined ? { temperature: this.temperature } : {}),
-        responseFormat: { type: 'json_schema', name: schemaName, schema },
+        // ADR-024: for local_only task classes the router forwards this schema
+        // unchanged to Ollama, whose grammar engine silently drops enforcement
+        // when it meets a JSON-Schema `pattern`. Strip them (deep copy); Zod
+        // re-validates every response after parsing.
+        responseFormat: {
+          type: 'json_schema',
+          name: schemaName,
+          schema: sanitizeSchemaForOllama(schema),
+        },
+        signal: AbortSignal.timeout(this.timeoutMs),
       });
-      if (result.finishReason === 'length') {
-        // Report the served token count, not just the requested cap — a policy
-        // clamp below the cap is only visible in usage.completionTokens.
-        throw new Error(
-          `vibe-router ${schemaName}: output truncated at max_tokens ` +
-            `(served ${result.usage.completionTokens} completion tokens, requested cap ${maxTokens})`,
-        );
-      }
       // Some backends answer a forced-JSON request with a tool call instead
       // of content (the router's Anthropic adapter maps json_schema to a
       // forced tool) — accept both shapes.
       const raw =
         result.content.trim() !== '' ? result.content : (result.toolCalls[0]?.arguments ?? '');
+      if (result.finishReason === 'length') {
+        // Report the served token count, not just the requested cap — a policy
+        // clamp below the cap is only visible in usage.completionTokens. An
+        // ExtractionResponseError (deterministic: the same cap truncates the
+        // same way, so the worker must not retry it) carrying the partial body.
+        throw new ExtractionResponseError({
+          summary:
+            `vibe-router ${schemaName}: output truncated at max_tokens ` +
+            `(served ${result.usage.completionTokens} completion tokens, requested cap ${maxTokens})`,
+          rawResponse: raw.slice(0, 8_000),
+          issues: 'finish_reason=length',
+        });
+      }
+      if (raw.trim() === '') {
+        // Empty completion not at the cap (e.g. the upstream model was evicted /
+        // reloaded mid-request): transient, so the worker keeps retrying it.
+        throw new ExtractionResponseError({
+          summary: `vibe-router ${schemaName}: returned an empty completion`,
+          rawResponse: '',
+          issues: `finish_reason=${result.finishReason}`,
+          transient: true,
+        });
+      }
       const rawJson = stripFences(raw);
       let data: unknown;
       try {
         data = JSON.parse(rawJson);
-      } catch {
-        throw new Error(`vibe-router ${schemaName}: response was not valid JSON`);
+      } catch (err) {
+        // Same prose-wrapped-JSON recovery as the direct providers; an
+        // unrecoverable body surfaces as ExtractionResponseError (raw response
+        // attached for the audit capture), not a bare Error. `issues` names the
+        // parse error without V8's message, which quotes model output (PII).
+        const recovered = recoverProseWrappedJson(raw);
+        if (recovered === undefined) {
+          throw new ExtractionResponseError({
+            summary: `vibe-router ${schemaName}: response was not valid JSON`,
+            rawResponse: raw.slice(0, 8_000),
+            issues: `${describeJsonParseError(err)}; prose-recovery attempt also failed`,
+          });
+        }
+        data = recovered;
       }
       return {
         rawJson,
@@ -143,6 +195,11 @@ export class RouterProvider implements LlmProvider {
     } catch (err) {
       if (err instanceof VibeAiError) {
         throw new Error(`Vibe AI Router: ${err.message} (${err.code})`);
+      }
+      if (err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError')) {
+        const wrapped = new Error(`vibe-router ${schemaName} timed out after ${this.timeoutMs} ms`);
+        (wrapped as Error & { cause?: unknown }).cause = err;
+        throw wrapped;
       }
       throw err;
     }
@@ -192,6 +249,7 @@ export class RouterProvider implements LlmProvider {
       try {
         const data = parseExtractionResponse(call.rawJson, call.data, {
           salvageAmounts: attempt === 2,
+          dateFormat: opts.dateFormatOverride,
         });
         return {
           data,

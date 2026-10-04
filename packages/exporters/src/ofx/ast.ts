@@ -11,8 +11,8 @@ export interface Stmt {
   ledgerBalanceCents: bigint;
   availableBalanceCents?: bigint | undefined;
   startDate: string; // YYYY-MM-DD
-  endDate: string;
-  asOf: Date; // for <DTSERVER>
+  endDate: string; // YYYY-MM-DD — <DTEND> and the balance <DTASOF> (= period end, Phase 21 #11)
+  asOf: Date; // for <DTSERVER> only
   currency: 'USD';
 }
 

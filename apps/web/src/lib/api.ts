@@ -124,6 +124,45 @@ export const api = {
   delete: <T = unknown>(path: string) => fetchJson<T>('DELETE', path),
 };
 
+// GET /api/health/ready response. Per-dependency `detail` is only included
+// for authenticated callers.
+export interface ReadyDependency {
+  status: 'ok' | 'fail' | 'unconfigured';
+  latencyMs?: number;
+  detail?: string;
+}
+
+export interface ReadyCheck {
+  status: 'ok' | 'degraded';
+  dependencies: Record<string, ReadyDependency>;
+}
+
+const isReadyCheck = (body: unknown): body is ReadyCheck => {
+  const deps = (body as { dependencies?: unknown } | null)?.dependencies;
+  return typeof deps === 'object' && deps !== null;
+};
+
+// Readiness probe for the diagnostics + engines pages. Unlike api.get, a 503
+// is not an error here: when a dependency is down the server answers 503
+// WITH the per-dependency JSON body, and that body is exactly what those
+// pages must show (a 503 must "surface clearly in diagnostics"). Anything
+// else — another status, or a 503/200 without the readiness body (a proxy
+// error page, an SPA fallback) — throws ApiError, and a network failure
+// rejects as usual, so callers can render "probe unreachable" rather than an
+// empty or stale status.
+export const fetchReady = async (): Promise<ReadyCheck> => {
+  const res = await fetch(buildUrl('/api/health/ready'), { credentials: 'include' });
+  const isJson = (res.headers.get('content-type') ?? '').includes('application/json');
+  const body: unknown = isJson ? await res.json().catch(() => null) : null;
+  if ((res.status === 200 || res.status === 503) && isReadyCheck(body)) return body;
+  const serverMessage = (body as { message?: unknown } | null)?.message;
+  throw new ApiError(res.status, {
+    message:
+      `readiness probe returned HTTP ${res.status}` +
+      (typeof serverMessage === 'string' ? `: ${serverMessage}` : ' without a status body'),
+  });
+};
+
 // File download with the same prefix + CSRF + error-shape contract as
 // fetchJson. Must go through withBase() — without it the request
 // escapes the Vibe-Appliance path prefix (e.g. /vibe-tx-converter/)
@@ -159,5 +198,7 @@ export const downloadFile = async (
   document.body.appendChild(a);
   a.click();
   a.remove();
-  URL.revokeObjectURL(url);
+  // Revoking synchronously right after click() can cancel the download in
+  // some browsers; release it once the download has started.
+  setTimeout(() => URL.revokeObjectURL(url), 60_000);
 };

@@ -26,6 +26,7 @@ import {
   clearEngineConfig,
   getAllEngineConfigs,
   getEngineConfig,
+  invalidateEngineCache,
   maskEngineConfig,
   setEngineConfig,
   type EngineKey,
@@ -45,8 +46,15 @@ import {
   type LlmProviderPolicy,
 } from '../services/llm-provider.js';
 import { upsertSetting } from '../services/system-settings.js';
-import { listAiSettings, resolveAiSettings, setAiSetting } from '../services/ai-settings.js';
 import {
+  listAiSettings,
+  PROCESS_IDS,
+  resolveAiSettings,
+  setAiSetting,
+  type ProcessId,
+} from '../services/ai-settings.js';
+import {
+  DEFAULT_TEXT_MODEL,
   probeGlmOcrHealth,
   probeVibeOcrHealth,
   registerTxconvTaskClasses,
@@ -90,7 +98,9 @@ const OLLAMA_BASE_URL_KEY = 'engine.llm_gateway.url';
 const OLLAMA_MODEL_KEY = 'llm.local.model';
 const OLLAMA_VISION_MODEL_KEY = 'llm.local.vision_model';
 const DEFAULT_OLLAMA_BASE_URL = 'http://localhost:11434';
-const DEFAULT_OLLAMA_MODEL = 'qwen3.5:35b-a3b';
+// The extractor's own default (ADR-024), so with no DB/env override the
+// admin page names the model extraction actually runs on.
+const DEFAULT_OLLAMA_MODEL = DEFAULT_TEXT_MODEL;
 // Vision model = the check-payee FALLBACK now (ADR-025): scanned statement OCR
 // runs on GLM-OCR, not Ollama. qwen3-vl:30b is the default check-payee reader.
 const DEFAULT_OLLAMA_VISION_MODEL = 'qwen3-vl:30b';
@@ -530,6 +540,9 @@ export const adminRouter = (): Router => {
           }
         },
       );
+      // Same key as the llm-gateway engine URL (engine.llm_gateway.url), so
+      // the engine cache must drop it too — not just the provider cache.
+      invalidateEngineCache();
       await writeAudit(db, {
         actorUserId: req.user!.id,
         entityType: 'system_settings',
@@ -700,7 +713,43 @@ export const adminRouter = (): Router => {
         entityId: ANTHROPIC_KEY,
         action: 'anthropic-key.clear',
       });
-      res.json({ ok: true });
+      // With no key left anywhere (DB or ANTHROPIC_API_KEY env), every call
+      // routed to Anthropic fails with "no API key". Route back to local
+      // instead of leaving extraction/enrichment broken: an anthropic-only/
+      // -first policy drops to local-only, and a process pinned to Anthropic
+      // goes back to following the policy. (local-first keeps working — its
+      // Anthropic fallback just fails over cleanly.)
+      let policyReset: {
+        from: LlmProviderPolicy;
+        to: LlmProviderPolicy;
+        resetProcesses: ProcessId[];
+      } | null = null;
+      if (!process.env.ANTHROPIC_API_KEY) {
+        const from = await resolveProviderPolicy(db);
+        const to: LlmProviderPolicy =
+          from === 'anthropic-only' || from === 'anthropic-first' ? 'local-only' : from;
+        if (to !== from) await upsertSetting(db, PROVIDER_KEY, to, req.user!.id);
+        const resetProcesses: ProcessId[] = [];
+        for (const proc of PROCESS_IDS) {
+          const key = `llm.process.${proc}.provider`;
+          if ((await readSingleSetting(db, key)) === 'anthropic') {
+            await upsertSetting(db, key, null, req.user!.id);
+            resetProcesses.push(proc);
+          }
+        }
+        if (to !== from || resetProcesses.length > 0) {
+          invalidateProviderCache();
+          policyReset = { from, to, resetProcesses };
+          await writeAudit(db, {
+            actorUserId: req.user!.id,
+            entityType: 'system_settings',
+            entityId: PROVIDER_KEY,
+            action: 'llm-provider.change',
+            payload: { policy: to, reason: 'anthropic-key.clear', resetProcesses },
+          });
+        }
+      }
+      res.json({ ok: true, policyReset });
     } catch (err) {
       next(err);
     }
@@ -781,8 +830,12 @@ export const adminRouter = (): Router => {
   // what's installed. Free-text entry still works for any tag not yet listed.
   // Returns {models:[],ok:false} (not a 500) when Ollama is unreachable.
   router.get('/llm-provider/local-models', async (_req, res) => {
+    // This handler has no `next`, so nothing may reject out of it: a failed
+    // settings read (Postgres restarting, the pool being recycled by a
+    // restore) would be an unhandled rejection that takes the process down.
+    // Fall back to the env/default URL instead.
     const baseUrl = (
-      (await readSingleSetting(db, OLLAMA_BASE_URL_KEY)) ??
+      (await readSingleSetting(db, OLLAMA_BASE_URL_KEY).catch(() => null)) ??
       process.env.OLLAMA_BASE_URL ??
       process.env.LLM_GATEWAY_URL ??
       DEFAULT_OLLAMA_BASE_URL
@@ -1103,7 +1156,24 @@ export const adminRouter = (): Router => {
       });
       res.setHeader('content-type', 'application/octet-stream');
       res.setHeader('content-disposition', `attachment; filename="${filename}"`);
-      createReadStream(path).pipe(res);
+      const rs = createReadStream(path);
+      // Without an 'error' listener a failed read crashes the process: the
+      // file can vanish between the stat above and this open (another
+      // admin's delete, the 03:45 retention sweep) or be unreadable. Before
+      // the first byte the error handler can still answer; after it, all
+      // that is left is to cut the connection.
+      rs.on('error', (err: Error & { code?: string }) => {
+        if (res.headersSent) {
+          res.destroy(err);
+          return;
+        }
+        res.removeHeader('content-type');
+        res.removeHeader('content-disposition');
+        next(err.code === 'ENOENT' ? new NotFoundError(`backup ${filename} not found`) : err);
+      });
+      // An aborted download must not leak the file descriptor.
+      res.on('close', () => rs.destroy());
+      rs.pipe(res);
     } catch (err) {
       next(err);
     }

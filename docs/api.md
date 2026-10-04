@@ -29,8 +29,8 @@ valid CSRF token from `GET /api/auth/csrf`.
 | GET                  | `/api/statements?accountId=`                  | session             |                                      |
 | GET                  | `/api/statements/:id`                         | session             | + transactions                       |
 | PATCH                | `/api/statements/transactions/:txId`          | session             | recomputes FITID                     |
-| POST                 | `/api/statements/:id/override-reconciliation` | session             | reason >= 5 chars                    |
-| POST                 | `/api/statements/:id/exports/:format`         | session             | streams export bytes                 |
+| POST                 | `/api/statements/:id/override-reconciliation` | session             | reason >= 30 chars; review/exported  |
+| POST                 | `/api/statements/:id/exports/:format`         | session             | export gate (below); file bytes      |
 | GET                  | `/api/fidir/search?q=`                        | session             | pg_trgm + ILIKE                      |
 | GET                  | `/api/fidir/by-bid/:bid`                      | session             |                                      |
 | GET                  | `/api/fidir/status`                           | session             |                                      |
@@ -40,6 +40,16 @@ valid CSRF token from `GET /api/auth/csrf`.
 | POST                 | `/api/admin/llm-provider/anthropic-model`     | admin               |                                      |
 | POST                 | `/api/admin/fidir/refresh`                    | admin               | re-imports vendored FIDIR            |
 | GET                  | `/api/admin/fidir/status`                     | admin               | entries + last-refreshed             |
+
+## Export gate
+
+`POST /api/statements/:id/exports/:format`,
+`POST /api/statements/:id/exports-bundle` and
+`GET /api/statements/:id/exports/:format/preview` share one gate and
+answer `409 CONFLICT` unless the statement is in `review` (or
+`exported`), its reconciliation is `verified` or `overridden` (via
+`override-reconciliation`), and any review hold is acknowledged. There is
+no per-request override parameter — an `?override=` query is ignored.
 
 ## Error shape
 

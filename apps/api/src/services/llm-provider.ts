@@ -359,22 +359,47 @@ export const buildProvider = async (db: Db): Promise<LlmProvider> => {
   return buildProviderForId(db, id);
 };
 
+// A per-process model override names a model of ONE provider family — a
+// claude-* id for Anthropic, an Ollama tag (e.g. qwen2.5:32b-instruct) for
+// local — but the process can run on either provider: local-first's
+// fallback, "Process via Anthropic", a policy changed after the model was
+// set. An Ollama tag sent to Anthropic 404s only after the statement text
+// was transmitted, and a claude-* id 404s on Ollama, so an override from
+// the other family is dropped and the target provider's own configured
+// model applies instead.
+export const modelMatchesProvider = (model: string, id: ProviderId): boolean =>
+  /^claude-/i.test(model) === (id === 'anthropic');
+
+// The per-process model override that applies on provider `id`: the
+// configured one when it belongs to that provider's family, else null
+// (= use the provider's default model).
+export const processModelForProvider = (
+  model: string | null | undefined,
+  id: ProviderId,
+): string | null => (model && modelMatchesProvider(model, id) ? model : null);
+
 // Build a provider for a specific process (extraction / cleanse / category /
 // check) honoring the per-process matrix: provider (default = global policy),
 // model, and tuning knobs. Constructed fresh (not cached) since each process can
 // differ. Returns the resolved providerId so callers can audit-log egress.
+// `id` is the provider the overrides are for; omitted for the router, which
+// picks its own model per task class and ignores modelId.
 const overridesFor = (
   cfg: Awaited<ReturnType<typeof resolveProcessConfig>>,
   proc: ProcessId,
-): ProviderOverrides => ({
-  ...(cfg.model ? { modelId: cfg.model } : {}),
-  ...(cfg.maxTokens != null ? { maxCompletionTokens: cfg.maxTokens } : {}),
-  ...(cfg.temperature != null ? { temperature: cfg.temperature } : {}),
-  ...(cfg.numCtx != null ? { numCtx: cfg.numCtx } : {}),
-  ...(cfg.promptBudget != null ? { maxPromptTokens: cfg.promptBudget } : {}),
-  // Only extraction drives the statement-model engine.
-  applyStatementEngine: proc === 'extraction',
-});
+  id?: ProviderId,
+): ProviderOverrides => {
+  const model = id ? processModelForProvider(cfg.model, id) : cfg.model;
+  return {
+    ...(model ? { modelId: model } : {}),
+    ...(cfg.maxTokens != null ? { maxCompletionTokens: cfg.maxTokens } : {}),
+    ...(cfg.temperature != null ? { temperature: cfg.temperature } : {}),
+    ...(cfg.numCtx != null ? { numCtx: cfg.numCtx } : {}),
+    ...(cfg.promptBudget != null ? { maxPromptTokens: cfg.promptBudget } : {}),
+    // Only extraction drives the statement-model engine.
+    applyStatementEngine: proc === 'extraction',
+  };
+};
 
 // Build a specific provider id with a process's tuning overrides applied. Used
 // by the extraction worker, which resolves its own primary/secondary order
@@ -385,18 +410,19 @@ export const buildProviderForProcessId = async (
   id: ProviderId,
 ): Promise<LlmProvider> => {
   const cfg = await resolveProcessConfig(db, proc);
-  const overrides = overridesFor(cfg, proc);
   // Router mode: whichever id the worker's fallback order asks for, the
   // router serves this process's task class — failover WITHIN router mode is
   // the router's own fallback-chain job.
   if ((await resolveAiMode(db)) === 'router')
-    return constructRouter(PROCESS_TASK_CLASS[proc], overrides);
+    return constructRouter(PROCESS_TASK_CLASS[proc], overridesFor(cfg, proc));
+  const overrides = overridesFor(cfg, proc, id);
   return id === 'local' ? constructLocal(db, overrides) : constructAnthropic(db, overrides);
 };
 
 // Resolve a process's effective provider + model label WITHOUT building the
 // provider — for UI/status badges. Reflects the per-process matrix (model
-// override, or the provider default), not the global model.
+// override, or the provider default), not the global model — and, like the
+// provider build, ignores a model override from the other provider family.
 export const resolveProcessLabel = async (
   db: Db,
   proc: ProcessId,
@@ -404,7 +430,9 @@ export const resolveProcessLabel = async (
   const cfg = await resolveProcessConfig(db, proc);
   const provider: ProviderId =
     cfg.provider === 'default' ? await resolveProviderId(db) : cfg.provider;
-  const model = cfg.model ?? (await resolveModelLabelForProvider(db, provider));
+  const model =
+    processModelForProvider(cfg.model, provider) ??
+    (await resolveModelLabelForProvider(db, provider));
   return { provider, model };
 };
 
@@ -423,9 +451,10 @@ export const buildProviderForProcess = async (
   }
   const providerId: ProviderId =
     cfg.provider === 'default' ? await resolveProviderId(db) : cfg.provider;
+  const overrides = overridesFor(cfg, proc, providerId);
   const provider =
     providerId === 'local'
-      ? await constructLocal(db, overridesFor(cfg, proc))
-      : await constructAnthropic(db, overridesFor(cfg, proc));
+      ? await constructLocal(db, overrides)
+      : await constructAnthropic(db, overrides);
   return { provider, providerId };
 };

@@ -29,9 +29,21 @@ export const db = new Proxy({} as ReturnType<typeof drizzle<typeof schema>>, {
   },
 });
 
+// Methods are bound to the real pool: pg-pool reassigns its own state from
+// inside them (`this._clients = this._clients.filter(...)` when a client is
+// removed, `this.ending = true` in end()). Called with `this` = the proxy,
+// those writes would land on the empty proxy target, leaving removed
+// clients counted against `max` until every query hangs and end() never
+// resolves. Plain property writes are forwarded for the same reason.
 export const pool = new Proxy({} as pg.Pool, {
-  get(_target, prop, receiver) {
-    return Reflect.get(getPool() as object, prop, receiver);
+  get(_target, prop) {
+    const real = getPool();
+    const value: unknown = Reflect.get(real, prop, real);
+    return typeof value === 'function' ? value.bind(real) : value;
+  },
+  set(_target, prop, value) {
+    const real = getPool();
+    return Reflect.set(real, prop, value, real);
   },
 });
 

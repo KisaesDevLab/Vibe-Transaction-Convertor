@@ -15,6 +15,17 @@ const xmlEscape = (s: string): string =>
 
 const tag = (name: string, content: string): string => `<${name}>${content}</${name}>`;
 
+// Length-limited fields (NAME A-32, MEMO A-255). Collapse newlines before
+// clipping so the limit counts what is actually emitted, clip by code point
+// so a surrogate pair (e.g. an emoji) is never split into invalid UTF-8, and
+// escape last so an entity is never cut in half.
+const clipped = (s: string, max: number): string =>
+  xmlEscape(
+    Array.from(s.replaceAll(/[\r\n]+/g, ' '))
+      .slice(0, max)
+      .join(''),
+  );
+
 export const renderStmtTrnXml = (trn: Stmt['transactions'][number]): string =>
   `      <STMTTRN>
         ${tag('TRNTYPE', trn.trntype)}
@@ -22,8 +33,8 @@ export const renderStmtTrnXml = (trn: Stmt['transactions'][number]): string =>
         ${tag('TRNAMT', centsToDecimal(trn.amountCents))}
         ${tag('FITID', xmlEscape(trn.fitid))}` +
   (trn.checkNumber ? `\n        ${tag('CHECKNUM', xmlEscape(trn.checkNumber))}` : '') +
-  `\n        ${tag('NAME', xmlEscape(trn.name.slice(0, 32)))}` +
-  (trn.memo ? `\n        ${tag('MEMO', xmlEscape(trn.memo.slice(0, 255)))}` : '') +
+  `\n        ${tag('NAME', clipped(trn.name, 32))}` +
+  (trn.memo ? `\n        ${tag('MEMO', clipped(trn.memo, 255))}` : '') +
   `\n      </STMTTRN>`;
 
 export interface OfxXmlOptions {
@@ -64,7 +75,7 @@ ${trnList}
     </BANKTRANLIST>
     <LEDGERBAL>
       ${tag('BALAMT', centsToDecimal(stmt.ledgerBalanceCents))}
-      ${tag('DTASOF', ofxDateTime(stmt.asOf))}
+      ${tag('DTASOF', ofxDate(stmt.endDate))}
     </LEDGERBAL>
   </CCSTMTRS>
 </CCSTMTTRNRS>`
@@ -81,7 +92,7 @@ ${trnList}
     </BANKTRANLIST>
     <LEDGERBAL>
       ${tag('BALAMT', centsToDecimal(stmt.ledgerBalanceCents))}
-      ${tag('DTASOF', ofxDateTime(stmt.asOf))}
+      ${tag('DTASOF', ofxDate(stmt.endDate))}
     </LEDGERBAL>
   </STMTRS>
 </STMTTRNRS>`;

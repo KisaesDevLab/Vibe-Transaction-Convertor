@@ -13,6 +13,32 @@ jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # The API's DB- and Redis-backed suites (routes, worker, backup/restore,
+    # SSO, …) skip themselves unless DATABASE_URL / REDIS_URL are set, so
+    # without these services CI silently ran only the pure unit tests.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: vibetc
+          POSTGRES_PASSWORD: vibetc
+          POSTGRES_DB: vibetc
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U vibetc"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
     steps:
       - uses: actions/checkout@v4
 
@@ -34,7 +60,16 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - run: pnpm typecheck
       - run: pnpm lint
+      # pg_dump / pg_restore / psql for the backup + restore suite; they must
+      # match the Postgres 16 service (an older pg_dump refuses to dump it).
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends postgresql-client-16
       # Root pnpm test is already `vitest run --passWithNoTests` so we
       # don't pass `--run` (which pnpm 9 swallows as an unknown option).
+      # typecheck (tsc -b) above has already rebuilt the workspace packages'
+      # dist, which the API tests import.
       - run: pnpm test
+        env:
+          DATABASE_URL: postgres://vibetc:vibetc@localhost:5432/vibetc?schema=vibetc
+          REDIS_URL: redis://localhost:6379
+          SESSION_SECRET: ci-only-session-secret-0123456789abcdef0123456789
       - run: pnpm build

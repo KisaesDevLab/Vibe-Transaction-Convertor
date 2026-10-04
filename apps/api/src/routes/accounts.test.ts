@@ -136,6 +136,109 @@ live('Accounts CRUD + masking + ABA validation (live Postgres)', () => {
     expect(res.body.routingNumberAbaValid).toBe(true);
   });
 
+  it('PATCH routingNumber null (or blank) clears it', async () => {
+    const cleared = await agent
+      .patch(`/api/accounts/${accountId}`)
+      .set('x-csrf-token', csrfToken)
+      .send({ routingNumber: null });
+    expect(cleared.status).toBe(200);
+    expect(cleared.body.routingNumber).toBeNull();
+    expect(cleared.body.routingNumberAbaValid).toBeNull();
+
+    const blank = await agent
+      .patch(`/api/accounts/${accountId}`)
+      .set('x-csrf-token', csrfToken)
+      .send({ routingNumber: '' });
+    expect(blank.status).toBe(200);
+    expect(blank.body.routingNumber).toBeNull();
+  });
+
+  const createAccount = async (overrides: Record<string, unknown>): Promise<string> => {
+    const res = await agent
+      .post(`/api/companies/${companyId}/accounts`)
+      .set('x-csrf-token', csrfToken)
+      .send({
+        nickname: 'Extra',
+        financialInstitution: 'Wells Fargo',
+        intuBid: '3000',
+        intuOrg: 'Wells Fargo',
+        accountType: 'CHECKING',
+        accountNumber: '1111222233',
+        ...overrides,
+      })
+      .expect(201);
+    return res.body.id as string;
+  };
+
+  it("the edit form's payload (routingNumber: null) saves a credit card", async () => {
+    const cardId = await createAccount({
+      nickname: 'Visa',
+      accountType: 'CREDITCARD',
+      accountNumber: '4111111111111111',
+    });
+    const res = await agent
+      .patch(`/api/accounts/${cardId}`)
+      .set('x-csrf-token', csrfToken)
+      .send({ nickname: 'Visa Biz', defaultCsvTemplate: 'qbo3', routingNumber: null });
+    expect(res.status).toBe(200);
+    expect(res.body.nickname).toBe('Visa Biz');
+
+    const routed = await agent
+      .patch(`/api/accounts/${cardId}`)
+      .set('x-csrf-token', csrfToken)
+      .send({ routingNumber: '021000021' });
+    expect(routed.status).toBe(400);
+    expect(routed.body.code).toBe('VALIDATION');
+  });
+
+  it('switching an account that has a routing number to CREDITCARD is a 400, not a 500', async () => {
+    const routedId = await createAccount({ routingNumber: '121000248' });
+    const res = await agent
+      .patch(`/api/accounts/${routedId}`)
+      .set('x-csrf-token', csrfToken)
+      .send({ accountType: 'CREDITCARD' });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('VALIDATION');
+
+    const ok = await agent
+      .patch(`/api/accounts/${routedId}`)
+      .set('x-csrf-token', csrfToken)
+      .send({ accountType: 'CREDITCARD', routingNumber: null });
+    expect(ok.status).toBe(200);
+    expect(ok.body.accountType).toBe('CREDITCARD');
+  });
+
+  it('PATCH rejects an account number without 4 digits', async () => {
+    const res = await agent
+      .patch(`/api/accounts/${accountId}`)
+      .set('x-csrf-token', csrfToken)
+      .send({ accountNumber: '----' });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('VALIDATION');
+  });
+
+  it('the account.update audit row never carries a full account or routing number', async () => {
+    const res = await agent
+      .patch(`/api/accounts/${accountId}`)
+      .set('x-csrf-token', csrfToken)
+      .send({ accountNumber: '5555666677778888', routingNumber: '121000248' });
+    expect(res.status).toBe(200);
+
+    const audit = await getPool().query(
+      `SELECT payload FROM vibetc.audit_log
+        WHERE action = 'account.update' AND entity_id = $1
+        ORDER BY id DESC LIMIT 1`,
+      [accountId],
+    );
+    const payload = audit.rows[0].payload as Record<string, unknown>;
+    expect(payload).toEqual({
+      accountNumberMasked: '••••8888',
+      routingNumberChanged: true,
+      routingNumberAbaValid: true,
+    });
+    expect(JSON.stringify(payload)).not.toMatch(/5555666677778888|121000248/);
+  });
+
   it('staff is forbidden from ?reveal=true', async () => {
     // Create a staff user via admin
     const r = await agent

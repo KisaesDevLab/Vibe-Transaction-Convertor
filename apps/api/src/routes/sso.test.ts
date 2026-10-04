@@ -93,8 +93,10 @@ live('Vibe Auth SSO (live Postgres, fake IdP)', () => {
   // A fixed Host: each request(app) listens on a fresh port, and without
   // VIBE_OIDC_PUBLIC_URL the engine derives redirect URIs from the request
   // origin, which must match between start and callback (as in a browser).
-  const ssoSignIn = async (app: Express, prefix = '') => {
-    const start = await request(app).get(`${prefix}/auth/oidc/start`).set('Host', 'tx.test');
+  const ssoSignIn = async (app: Express, prefix = '', startQuery = '') => {
+    const start = await request(app)
+      .get(`${prefix}/auth/oidc/start${startQuery}`)
+      .set('Host', 'tx.test');
     expect(start.status).toBe(302);
     const authorize = await fetch(start.headers.location as string, { redirect: 'manual' });
     expect(authorize.status).toBe(302);
@@ -251,6 +253,26 @@ live('Vibe Auth SSO (live Postgres, fake IdP)', () => {
       .set('Cookie', sessionCookie(adminCb))
       .send({ idpName: 'Firm SSO' });
     expect(noCsrf.status).toBe(403);
+  });
+
+  it('an unsafe return_to is dropped: sign-in ends on the default path, not off-site', async () => {
+    const { app } = await buildApp('both');
+    // The engine alone accepts this as `/\t/evil.example/x`; browsers strip
+    // the tab from Location and land on https://evil.example/x.
+    const cb = await ssoSignIn(app, '', '?return_to=/%09/evil.example/x');
+    expect(cb.status).toBe(302);
+    expect(cb.headers.location).toBe('/');
+    // The sign-in itself still succeeds.
+    expect((await request(app).get('/api/auth/me').set('Cookie', sessionCookie(cb))).status).toBe(
+      200,
+    );
+  });
+
+  it('a same-origin return_to is still honoured after sign-in', async () => {
+    const { app } = await buildApp('both');
+    const cb = await ssoSignIn(app, '', '?return_to=%2Fstatements%2Fabc%3Ftab%3Dreview');
+    expect(cb.status).toBe(302);
+    expect(cb.headers.location).toBe('/statements/abc?tab=review');
   });
 
   it('back-channel logout needs no CSRF token and ends the SSO session', async () => {

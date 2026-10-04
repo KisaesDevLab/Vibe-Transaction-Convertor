@@ -16,6 +16,34 @@ QBO Web Connect is OFX 1.0.2 SGML with Intuit-specific extensions
 - An always-present `<INTU.BID>` tag with the BANKID fallback ladder
   (commit `702449e`).
 - One `<STMTTRN>` per transaction with deterministic FITIDs (ADR-005).
+- `<LEDGERBAL><DTASOF>` set to the statement period end (not the upload
+  date).
+
+## Credit-card accounts: amount signs
+
+Credit-card statements are stored the way the issuer prints them —
+charges positive, payments negative, an owed balance positive — because
+that is what the Golden Rule reconciles. Every export flips them to the
+**account holder's perspective** that QuickBooks, Quicken and Xero expect
+(OFX spec §3.2.9.2):
+
+| Row                  | Stored (statement sign) | Exported                                |
+| -------------------- | ----------------------- | --------------------------------------- |
+| Purchase / charge    | `127.83`                | `<TRNAMT>-127.83` (Debit column in CSV) |
+| Payment / refund     | `-500.00`               | `<TRNAMT>500.00` (Credit column in CSV) |
+| Owed closing balance | `2890.45`               | `<BALAMT>-2890.45`                      |
+
+This applies to `.qbo`, `.qfx`, `.ofx` and all four CSV templates (the
+Generic CSV's RunningBalance column is flipped the same way). Bank and
+savings accounts are unaffected. The TRNTYPE is unchanged — a charge is
+still `DEBIT`, it now simply carries a negative amount.
+
+**Credit-card files exported before this fix had every sign inverted.**
+FITIDs did not change (they are derived from the stored amounts —
+ADR-005), so QuickBooks treats a corrected re-import as duplicates of the
+earlier, wrongly signed transactions and skips them. Delete the earlier
+import's transactions for that statement in QuickBooks first, then
+import the re-exported file.
 
 ## BANKID fallback ladder
 

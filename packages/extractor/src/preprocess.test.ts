@@ -1,6 +1,8 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { spawnSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { PDFDocument, StandardFonts } from 'pdf-lib';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
@@ -9,10 +11,14 @@ import {
   cleanupRasterTmp,
   extractTextLayerFromBuffer,
   rasterizePdf,
+  removeRasterDir,
   routePdf,
   tmpDirForHash,
   ensureTmpDirForHash,
 } from './preprocess.js';
+
+// Real-render tests need poppler's pdftoppm; skip them where it isn't installed.
+const hasPdftoppm = !spawnSync('pdftoppm', ['-v']).error;
 
 const buildDigitalPdf = async (lines: string[][]): Promise<Buffer> => {
   const doc = await PDFDocument.create();
@@ -145,21 +151,98 @@ describe('extractTextLayer', () => {
 });
 
 describe('rasterizePdf', () => {
-  it('errors helpfully when pdftoppm is missing from PATH', async () => {
-    // Force ENOENT by pointing PATH at empty. Note: we have to give
-    // rasterizePdf a path under a writable directory because it
-    // mkdir's <dirname>/pages BEFORE execing pdftoppm — using a
-    // non-writable parent (e.g. "/anywhere.pdf" resolving to "/pages"
-    // on Linux) fails with EACCES before pdftoppm is ever called.
-    const tmp = await mkdtemp(join(tmpdir(), 'rasterize-pathtest-'));
+  let dataDir: string;
+  const originalDataDir = process.env.DATA_DIR;
+  beforeAll(async () => {
+    // Renders land under DATA_DIR/tmp — point it at a throwaway dir.
+    dataDir = await mkdtemp(join(tmpdir(), 'vibetc-raster-'));
+    process.env.DATA_DIR = dataDir;
+  });
+  afterAll(async () => {
+    if (originalDataDir !== undefined) process.env.DATA_DIR = originalDataDir;
+    else delete process.env.DATA_DIR;
+    await rm(dataDir, { recursive: true, force: true });
+  });
+
+  it('errors helpfully when pdftoppm is missing from PATH (and leaves no temp dir)', async () => {
+    // Force ENOENT by pointing PATH at empty.
     const originalPath = process.env.PATH;
     process.env.PATH = '';
     try {
-      await expect(rasterizePdf(join(tmp, 'anywhere.pdf'))).rejects.toThrow(/pdftoppm not found/);
+      await expect(rasterizePdf(join(dataDir, 'anywhere.pdf'))).rejects.toThrow(
+        /pdftoppm not found/,
+      );
     } finally {
       process.env.PATH = originalPath;
-      await rm(tmp, { recursive: true, force: true });
     }
+    expect(await readdir(join(dataDir, 'tmp'))).toEqual([]);
+  });
+
+  it.skipIf(!hasPdftoppm)(
+    'renders into a private DATA_DIR/tmp dir (never beside the upload) that removeRasterDir deletes',
+    async () => {
+      const uploadDir = join(dataDir, 'uploads', '2026', '10');
+      await mkdir(uploadDir, { recursive: true });
+      const pdfPath = join(uploadDir, 'abc123.pdf');
+      await writeFile(pdfPath, await buildDigitalPdf([['page one'], ['page two']]));
+
+      const a = await rasterizePdf(pdfPath, { dpi: 20 });
+      const b = await rasterizePdf(pdfPath, { dpi: 20 }); // concurrent-style second run
+      expect(a).toHaveLength(2);
+      const dirA = dirname(a[0]!.path);
+      const dirB = dirname(b[0]!.path);
+      expect(dirname(dirA)).toBe(join(dataDir, 'tmp'));
+      expect(dirA).not.toBe(dirB); // runs never share (or rm) each other's output
+      expect(existsSync(join(uploadDir, 'pages'))).toBe(false); // nothing under uploads
+      expect(existsSync(a[1]!.path)).toBe(true); // a's pages survived b's run
+
+      await removeRasterDir(a);
+      expect(existsSync(dirA)).toBe(false);
+      expect(existsSync(dirB)).toBe(true);
+      await removeRasterDir(b);
+      expect(existsSync(dirB)).toBe(false);
+    },
+  );
+
+  it.skipIf(!hasPdftoppm)('kills a pdftoppm run that exceeds PDFTOPPM_TIMEOUT_MS', async () => {
+    const pdfPath = join(dataDir, 'slow.pdf');
+    await writeFile(
+      pdfPath,
+      await buildDigitalPdf(Array.from({ length: 20 }, (_, i) => [`page ${i + 1}`])),
+    );
+    const prev = process.env.PDFTOPPM_TIMEOUT_MS;
+    process.env.PDFTOPPM_TIMEOUT_MS = '1';
+    try {
+      await expect(rasterizePdf(pdfPath, { dpi: 150 })).rejects.toThrow(
+        /pdftoppm timed out after 1 ms/,
+      );
+    } finally {
+      if (prev === undefined) delete process.env.PDFTOPPM_TIMEOUT_MS;
+      else process.env.PDFTOPPM_TIMEOUT_MS = prev;
+    }
+  });
+});
+
+describe('removeRasterDir', () => {
+  it('is a no-op for an empty page list', async () => {
+    await expect(removeRasterDir([])).resolves.toBeUndefined();
+  });
+
+  it('never deletes a directory rasterizePdf did not create (no ownership marker)', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'not-a-raster-dir-'));
+    try {
+      await writeFile(join(dir, 'page-1.png'), 'x');
+      await removeRasterDir([{ path: join(dir, 'page-1.png') }]);
+      expect(existsSync(join(dir, 'page-1.png'))).toBe(true);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('swallows errors for a path that no longer exists', async () => {
+    await expect(
+      removeRasterDir([{ path: join(tmpdir(), 'vibetc-gone', 'page-1.png') }]),
+    ).resolves.toBeUndefined();
   });
 });
 

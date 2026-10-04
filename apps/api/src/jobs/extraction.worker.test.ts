@@ -50,14 +50,12 @@ const SAMPLE = {
 // reassign this before invoking processExtraction.
 let mockExtractedData: typeof SAMPLE = SAMPLE;
 // The worker resolves the provider policy, derives the primary/secondary
-// order, then builds providers by id. Mock all three: force a local-only
-// policy (no fallback) and hand back a stub provider whose extract()
-// returns the per-test mockExtractedData.
-vi.mock('../services/llm-provider.js', () => ({
-  resolveProviderPolicy: vi.fn(async () => 'local-only' as const),
-  providerOrderFor: vi.fn(() => ({ primary: 'local' as const, secondary: null })),
-  invalidateProviderCache: vi.fn(),
-  buildProviderForId: vi.fn(async () => ({
+// order, then builds providers by id (extraction attempts via the per-process
+// variant). Mock every export the worker uses: force a local-only policy (no
+// fallback), direct (non-router) AI mode, and hand back a stub provider whose
+// extract() returns the per-test mockExtractedData.
+vi.mock('../services/llm-provider.js', () => {
+  const stubProvider = () => ({
     id: 'local' as const,
     extract: vi.fn(async () => ({
       data: mockExtractedData,
@@ -71,8 +69,20 @@ vi.mock('../services/llm-provider.js', () => ({
       },
     })),
     health: vi.fn(async () => ({ ok: true })),
-  })),
-}));
+  });
+  return {
+    resolveProviderPolicy: vi.fn(async () => 'local-only' as const),
+    providerOrderFor: vi.fn(() => ({ primary: 'local' as const, secondary: null })),
+    invalidateProviderCache: vi.fn(),
+    resolveAiMode: vi.fn(async () => 'direct' as const),
+    resolveModelLabelForProvider: vi.fn(async () => 'qwen3-8b'),
+    // Pure family filter for the per-process model label (no override here).
+    processModelForProvider: vi.fn(() => null),
+    resolveVisionModelLabel: vi.fn(async () => 'glm-ocr'),
+    buildProviderForId: vi.fn(async () => stubProvider()),
+    buildProviderForProcessId: vi.fn(async () => stubProvider()),
+  };
+});
 
 const buildDigitalPdf = async (lines: string[]): Promise<Buffer> => {
   const doc = await PDFDocument.create();

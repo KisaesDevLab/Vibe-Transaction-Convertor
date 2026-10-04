@@ -1,11 +1,18 @@
 import argon2 from 'argon2';
-import { and, eq, gt, sql } from 'drizzle-orm';
+import { and, eq, gt, ne, sql } from 'drizzle-orm';
 import { randomBytes } from 'node:crypto';
 
 import type { Db } from '../db/client.js';
 import { sessions, users } from '../db/schema.js';
 import type { Session, User } from '../db/types.js';
-import { AuthError, ConflictError, ForbiddenError, ValidationError } from '../lib/errors.js';
+import { BREAKGLASS_EMAIL } from '../lib/breakglass.js';
+import {
+  AuthError,
+  ConflictError,
+  ForbiddenError,
+  NotFoundError,
+  ValidationError,
+} from '../lib/errors.js';
 import { writeAudit } from './audit.js';
 
 const ARGON2_OPTS: argon2.Options = {
@@ -69,6 +76,14 @@ const validatePassword = (pw: string): void => {
   }
 };
 
+const countUsers = async (db: Db): Promise<number> => {
+  const rows = await db.select({ c: sql<number>`count(*)::int` }).from(users);
+  return rows[0]?.c ?? 0;
+};
+
+const registrationClosed = (): ForbiddenError =>
+  new ForbiddenError('Registration is closed; ask an admin to add you');
+
 export const register = async (
   db: Db,
   input: RegisterInput,
@@ -82,46 +97,54 @@ export const register = async (
   if (input.displayName.trim().length === 0) {
     throw new ValidationError('displayName is required');
   }
+  const actorIsAdmin = opts.actor?.role === 'admin';
 
-  const userCount = await db.select({ c: sql<number>`count(*)::int` }).from(users);
-  const isFirstUser = (userCount[0]?.c ?? 0) === 0;
-
-  if (!isFirstUser) {
-    if (!opts.actor || opts.actor.role !== 'admin') {
-      throw new ForbiddenError('Registration is closed; ask an admin to add you');
-    }
-  }
-
-  const existing = await db.select().from(users).where(eq(users.email, email));
-  if (existing.length > 0) {
-    throw new ConflictError('email already registered');
-  }
+  // Cheap early refusal, so a closed registration never costs an argon2
+  // hash. The decision that counts is re-made under the lock below.
+  if (!actorIsAdmin && (await countUsers(db)) > 0) throw registrationClosed();
 
   const passwordHash = await hashPassword(input.password);
 
-  const [created] = await db
-    .insert(users)
-    .values({
-      email,
-      passwordHash,
-      displayName: input.displayName.trim(),
-      role: isFirstUser ? 'admin' : 'staff',
-    })
-    .returning();
+  // First-admin bootstrap: without the lock, two registrations racing on an
+  // empty database would both count zero users and both become admin.
+  return db.transaction(async (tx) => {
+    await tx.execute(sql`select pg_advisory_xact_lock(hashtext('vibetc.users.register'))`);
+    const isFirstUser = (await countUsers(tx)) === 0;
+    if (!isFirstUser && !actorIsAdmin) throw registrationClosed();
 
-  if (!created) {
-    throw new Error('user insert returned no row');
-  }
+    const existing = await tx
+      .select({ id: users.id })
+      .from(users)
+      .where(eq(users.email, email))
+      .limit(1);
+    if (existing.length > 0) {
+      throw new ConflictError('email already registered');
+    }
 
-  await writeAudit(db, {
-    actorUserId: opts.actor?.id ?? created.id,
-    entityType: 'user',
-    entityId: created.id,
-    action: 'user.register',
-    payload: { email, role: created.role, firstUser: isFirstUser },
+    const [created] = await tx
+      .insert(users)
+      .values({
+        email,
+        passwordHash,
+        displayName: input.displayName.trim(),
+        role: isFirstUser ? 'admin' : 'staff',
+      })
+      .returning();
+
+    if (!created) {
+      throw new Error('user insert returned no row');
+    }
+
+    await writeAudit(tx, {
+      actorUserId: opts.actor?.id ?? created.id,
+      entityType: 'user',
+      entityId: created.id,
+      action: 'user.register',
+      payload: { email, role: created.role, firstUser: isFirstUser },
+    });
+
+    return created;
   });
-
-  return created;
 };
 
 export interface LoginInput {
@@ -135,11 +158,24 @@ export interface LoginResult {
   expiresAt: Date;
 }
 
+// Hash of a random secret nobody holds. An unknown email is verified
+// against it, so it costs the same argon2 time as a known one and the
+// response time does not reveal which accounts exist.
+let dummyHash: Promise<string> | undefined;
+const getDummyHash = (): Promise<string> => {
+  dummyHash ??= hashPassword(randomBytes(32).toString('base64url')).catch((err: unknown) => {
+    dummyHash = undefined; // never cache a failure
+    throw err;
+  });
+  return dummyHash;
+};
+
 export const login = async (db: Db, input: LoginInput): Promise<LoginResult> => {
   const email = normalizeEmail(input.email);
   const rows = await db.select().from(users).where(eq(users.email, email));
   const user = rows[0];
   if (!user) {
+    await verifyPassword(await getDummyHash(), input.password);
     throw new AuthError('invalid email or password');
   }
   const ok = await verifyPassword(user.passwordHash, input.password);
@@ -205,11 +241,15 @@ export const maybeRollSession = async (db: Db, session: Session): Promise<Sessio
   return { ...session, expiresAt: newExpiry };
 };
 
+// currentSessionId: the session making the change, which stays signed in.
+// Every other session of the user ends — a stolen 30-day rolling cookie
+// must not outlive the password it was issued under.
 export const changePassword = async (
   db: Db,
   user: User,
   current: string,
   next: string,
+  currentSessionId?: string,
 ): Promise<void> => {
   validatePassword(next);
   const ok = await verifyPassword(user.passwordHash, current);
@@ -219,11 +259,19 @@ export const changePassword = async (
     .update(users)
     .set({ passwordHash, updatedAt: sql`now()` })
     .where(eq(users.id, user.id));
+  await db
+    .delete(sessions)
+    .where(
+      currentSessionId
+        ? and(eq(sessions.userId, user.id), ne(sessions.id, currentSessionId))
+        : eq(sessions.userId, user.id),
+    );
   await writeAudit(db, {
     actorUserId: user.id,
     entityType: 'user',
     entityId: user.id,
     action: 'user.change-password',
+    payload: { otherSessionsRevoked: true },
   });
 };
 
@@ -236,23 +284,42 @@ export const adminCreateStaff = async (
   return register(db, input, { actor });
 };
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 export const adminResetPassword = async (
   db: Db,
   actor: User,
   targetUserId: string,
 ): Promise<{ temporaryPassword: string }> => {
   if (actor.role !== 'admin') throw new ForbiddenError();
+  // Checked first: a non-uuid id would reach Postgres as an invalid uuid.
+  const [target] = UUID_RE.test(targetUserId)
+    ? await db.select().from(users).where(eq(users.id, targetUserId)).limit(1)
+    : [];
+  if (!target) throw new NotFoundError('user not found');
+  // The break-glass password lives with the Appliance. Minting one here
+  // would hand an admin a local credential that bypasses the IdP (even in
+  // oidc_only) and silently invalidate the stored one.
+  if (target.email === BREAKGLASS_EMAIL) {
+    throw new ForbiddenError(
+      'The break-glass account is managed with the vibe-auth breakglass CLI',
+    );
+  }
   const temp = randomBytes(12).toString('base64url');
   const passwordHash = await hashPassword(temp);
   await db
     .update(users)
     .set({ passwordHash, updatedAt: sql`now()` })
-    .where(eq(users.id, targetUserId));
+    .where(eq(users.id, target.id));
+  // A reset ends every session the user had (a stolen 30-day rolling
+  // cookie must not survive it).
+  await db.delete(sessions).where(eq(sessions.userId, target.id));
   await writeAudit(db, {
     actorUserId: actor.id,
     entityType: 'user',
-    entityId: targetUserId,
+    entityId: target.id,
     action: 'user.admin-reset-password',
+    payload: { sessionsRevoked: true },
   });
   return { temporaryPassword: temp };
 };

@@ -1,7 +1,7 @@
 // LLM provider abstraction (ADR-019, ADR-020). Two implementations,
 // shared contract — downstream code never branches on provider.
 
-import { schemas } from '@vibe-tx-converter/shared';
+import { formatUsd, schemas } from '@vibe-tx-converter/shared';
 import {
   IMAGE_SYSTEM_PROMPT,
   SYSTEM_PROMPT,
@@ -17,9 +17,14 @@ import { exemplarsAsMessages } from './exemplars.js';
 import { ocrPdfPages, type GlmOcrClientOptions } from './glm-ocr-client.js';
 import {
   STATEMENT_MODEL_FORMAT,
+  isValidIsoDate,
   mapStatementModelOutput,
   mergeStatementPages,
+  normalizeDeclaredDateFormat,
+  normalizeStatementDate,
   splitMarkdownPages,
+  statementDateOrderLine,
+  type DateOrder,
 } from './statement-model.js';
 
 // Phase 12 item 11: prompt budget. The Vibe Gateway hosts Qwen3-8B with a
@@ -192,12 +197,19 @@ export class ExtractionResponseError extends Error {
   // amount_cents. Providers consult this to do a one-shot amount-recovery
   // re-ask before salvaging (dropping) the still-unreadable rows.
   readonly nullAmountRows: number;
+  // true when re-running the same call may well succeed: an EMPTY completion
+  // (e.g. the model was evicted / reloaded mid-request). Every other
+  // ExtractionResponseError — schema mismatch, unparseable output, truncation
+  // (an empty completion at the token cap included) — is deterministic: unset
+  // or false. The worker keeps retrying only `transient === true`.
+  readonly transient?: boolean;
   constructor(opts: {
     summary: string;
     rawResponse: string;
     issues?: string;
     missingTopLevelFields?: string[];
     nullAmountRows?: number;
+    transient?: boolean;
   }) {
     super(opts.issues ? `${opts.summary} (${opts.issues})` : opts.summary);
     this.name = 'ExtractionResponseError';
@@ -206,13 +218,28 @@ export class ExtractionResponseError extends Error {
     if (opts.issues !== undefined) this.issues = opts.issues;
     this.missingTopLevelFields = opts.missingTopLevelFields ?? [];
     this.nullAmountRows = opts.nullAmountRows ?? 0;
+    if (opts.transient !== undefined) this.transient = opts.transient;
   }
 }
 
+// A JSON.parse failure, described WITHOUT V8's message: that message quotes a
+// snippet of the model output ('Unexpected token 'h', "here is th"... is not
+// valid JSON'), and `issues` lands in err.message, which is logged and stored
+// as the statement's error. Error name + offset only; the raw text stays in
+// rawResponse (audit-captured, redacted from logs).
+export const describeJsonParseError = (err: unknown): string => {
+  const name = err instanceof Error ? err.name : 'SyntaxError';
+  const msg = err instanceof Error ? err.message : '';
+  // "… in JSON at position N" / "… after JSON at position N"
+  const pos = /\bJSON at position (\d+)/.exec(msg)?.[1];
+  if (pos !== undefined) return `${name} at position ${pos}`;
+  return /^Unexpected end of JSON input/.test(msg) ? `${name}: unexpected end of JSON input` : name;
+};
+
 // Strip a single wrapping ```json … ``` (or bare ```) fence. Only strips
 // when the fence encloses the whole string after trim — a fence mid-prose is
-// left for the balanced scanner to find.
-const stripCodeFences = (s: string): string => {
+// left for the balanced scanner to find. Exported for the router provider.
+export const stripCodeFences = (s: string): string => {
   const m = s.match(/^```(?:json)?\s*\n?([\s\S]*?)\n?```\s*$/i);
   return m && m[1] != null ? m[1].trim() : s;
 };
@@ -251,8 +278,8 @@ const firstBalancedObjectSlice = (s: string): string | null => {
 
 // Recovers a JSON object when the model wraps it in prose or code fences.
 // A false positive is impossible: any extra text inside the slice makes
-// JSON.parse fail.
-const recoverProseWrappedJson = (raw: string): unknown | undefined => {
+// JSON.parse fail. Exported so every provider shares one recovery path.
+export const recoverProseWrappedJson = (raw: string): unknown | undefined => {
   const trimmed = stripCodeFences(raw.trim());
   const slice = firstBalancedObjectSlice(trimmed);
   if (!slice) return undefined;
@@ -268,18 +295,23 @@ const recoverProseWrappedJson = (raw: string): unknown | undefined => {
 // `description` and `amount_cents` are PARALLEL ARRAYS, e.g.
 //   { posted_date, description: ["A","B"], amount_cents: [100, 200], … }
 // Expand each such object back into one transaction per array element so a
-// model quirk doesn't fail the whole statement. Scalars are broadcast to the
-// array length (and a short array repeats its last element); the Golden Rule +
-// review grid are the safety net for any row the model genuinely mangled.
+// model quirk doesn't fail the whole statement. Every array-valued field of a
+// compressed row is read in parallel and scalars are broadcast. Past the end of
+// a SHORT array, a money field has no value for that row → null (an unreadable
+// amount is then re-asked / flagged by handleNullAmountRows; a missing running
+// balance just leaves the chain), while other fields (dates, descriptions)
+// repeat their last element. The Golden Rule + review grid are the safety net
+// for any row the model genuinely mangled.
+const MONEY_ROW_FIELDS: ReadonlySet<string> = new Set(['amount_cents', 'running_balance_cents']);
 export const expandArrayTransactions = (parsed: unknown): unknown => {
   if (typeof parsed !== 'object' || parsed === null) return parsed;
   const obj = parsed as Record<string, unknown>;
   if (!Array.isArray(obj.transactions)) return parsed;
-  const at = (v: unknown, isArr: boolean, i: number): unknown => {
-    if (!isArr) return v;
-    const arr = v as unknown[];
-    return arr[i] ?? arr[arr.length - 1];
-  };
+  // Index presence, not `??`: an explicit null element (an unreadable amount)
+  // stays null so the null-amount handling flags it — never borrow another
+  // element's value.
+  const at = (key: string, arr: unknown[], i: number): unknown =>
+    i < arr.length ? arr[i] : MONEY_ROW_FIELDS.has(key) ? null : arr[arr.length - 1];
   const out: unknown[] = [];
   for (const tx of obj.transactions) {
     if (typeof tx !== 'object' || tx === null) {
@@ -297,12 +329,11 @@ export const expandArrayTransactions = (parsed: unknown): unknown => {
       descArr ? (t.description as unknown[]).length : 1,
       amtArr ? (t.amount_cents as unknown[]).length : 1,
     );
+    const arrayKeys = Object.keys(t).filter((k) => Array.isArray(t[k]));
     for (let i = 0; i < len; i += 1) {
-      out.push({
-        ...t,
-        description: at(t.description, descArr, i),
-        amount_cents: at(t.amount_cents, amtArr, i),
-      });
+      const row: Record<string, unknown> = { ...t };
+      for (const k of arrayKeys) row[k] = at(k, t[k] as unknown[], i);
+      out.push(row);
     }
   }
   return { ...obj, transactions: out };
@@ -320,27 +351,6 @@ const isUsableAmount = (v: unknown): boolean =>
   (typeof v === 'number' && Number.isFinite(v)) ||
   (typeof v === 'string' && v.trim() !== '' && Number.isFinite(Number(v)));
 
-const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
-const isValidIsoDate = (s: unknown): s is string => {
-  if (typeof s !== 'string' || !ISO_DATE_RE.test(s)) return false;
-  const [y, m, d] = s.split('-').map(Number);
-  if (m! < 1 || m! > 12 || d! < 1 || d! > 31) return false;
-  const dt = new Date(Date.UTC(y!, m! - 1, d!));
-  return dt.getUTCFullYear() === y && dt.getUTCMonth() === m! - 1 && dt.getUTCDate() === d;
-};
-// Coerce a common non-ISO date (M/D/YYYY, MDY assumption — v1 is en-US) to ISO.
-const tryNormalizeDate = (s: unknown): string | null => {
-  if (isValidIsoDate(s)) return s;
-  if (typeof s !== 'string') return null;
-  const m = s.trim().match(/^(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{2,4})$/);
-  if (m) {
-    const [, mo, d, yRaw] = m;
-    const y = yRaw!.length === 2 ? `20${yRaw}` : yRaw!;
-    const iso = `${y}-${mo!.padStart(2, '0')}-${d!.padStart(2, '0')}`;
-    if (isValidIsoDate(iso)) return iso;
-  }
-  return null;
-};
 const intOrNull = (v: unknown): number | null =>
   typeof v === 'number' && Number.isFinite(v)
     ? Math.round(v)
@@ -348,48 +358,78 @@ const intOrNull = (v: unknown): number | null =>
       ? Math.round(Number(v))
       : null;
 
+type SourceDateFormat = schemas.extraction.SourceDateFormat;
+
 // Cross-row / top-level salvage so a missing-or-malformed date, period, balance,
 // or date-format never fails the WHOLE statement. Mirrors mapStatementModelOutput
 // (the statement-model engine), brought to the text + Anthropic paths. Always
 // runs (coerces); rows that remain undateable after every fallback are dropped
 // with a note (they can't be stored). Returns the salvaged object + a notes list.
-const salvageStructure = (parsed: unknown): { value: unknown; notes: string[] } => {
+// `dateFormatOverride` is the operator's confirmed order (after an AMBIGUOUS
+// halt): it decides how numeric dates are read and is forced into
+// source_date_format.
+const salvageStructure = (
+  parsed: unknown,
+  dateFormatOverride?: DateOrder,
+): { value: unknown; notes: string[] } => {
   const notes: string[] = [];
   if (parsed === null || typeof parsed !== 'object') return { value: parsed, notes };
   const obj = parsed as Record<string, unknown>;
   if (!Array.isArray(obj.transactions)) return { value: parsed, notes };
   const period = (obj.period ?? {}) as { start?: unknown; end?: unknown };
 
+  // The declared source_date_format — the { format, confidence } object or a
+  // bare string ("DMY"), in any case or common spelling ("MM/DD/YYYY", "ISO");
+  // null when missing/unrecognized.
+  const sdfRaw = obj.source_date_format;
+  const sdf = (sdfRaw && typeof sdfRaw === 'object' ? sdfRaw : {}) as {
+    format?: unknown;
+    confidence?: unknown;
+  };
+  const declared = normalizeDeclaredDateFormat(typeof sdfRaw === 'string' ? sdfRaw : sdf.format);
+  // Order used to read numeric dates: the operator's override, else the declared
+  // MDY/DMY/YMD; undefined (TEXTUAL / AMBIGUOUS / missing) = infer per date.
+  const order: DateOrder | undefined =
+    dateFormatOverride ??
+    (declared === 'MDY' || declared === 'DMY' || declared === 'YMD' ? declared : undefined);
+
   // Pass 1: normalize each row's date; carry the previous valid date for "ditto"
   // continuation rows.
   let prevDate: string | null = null;
-  let dateFixed = 0;
+  let dateFallback = 0;
+  let dateConverted = 0;
+  let dateAmbiguous = 0;
   const rows = obj.transactions.map((t) => {
     if (t === null || typeof t !== 'object') return t;
     const row = t as Record<string, unknown>;
-    const norm = tryNormalizeDate(row.posted_date);
-    if (norm) {
-      prevDate = norm;
-      if (norm !== row.posted_date) dateFixed += 1;
-      return { ...row, posted_date: norm };
+    const { iso, ambiguous } = normalizeStatementDate(row.posted_date, order);
+    if (iso) {
+      prevDate = iso;
+      if (iso !== row.posted_date) {
+        if (ambiguous) dateAmbiguous += 1;
+        else dateConverted += 1;
+      }
+      return { ...row, posted_date: iso };
     }
     // Unreadable date: ditto the previous valid row's date.
     if (prevDate) {
-      dateFixed += 1;
+      dateFallback += 1;
       return { ...row, posted_date: prevDate };
     }
     return row; // still undateable — resolved against the period below or dropped
   });
 
-  // Derive the period from the model's value (if valid) or the min/max row dates.
+  // Derive the period from the model's value (if readable) or the min/max row dates.
   const txDates = rows
     .map((t) => (t && typeof t === 'object' ? (t as Record<string, unknown>).posted_date : null))
     .filter(isValidIsoDate)
     .sort();
-  const periodStart = isValidIsoDate(period.start) ? period.start : (txDates[0] ?? null);
-  const periodEnd = isValidIsoDate(period.end) ? period.end : (txDates[txDates.length - 1] ?? null);
-  if (!isValidIsoDate(period.start) || !isValidIsoDate(period.end)) {
-    if (periodStart && periodEnd) notes.push('statement period derived from transaction dates');
+  const statedStart = normalizeStatementDate(period.start, order).iso;
+  const statedEnd = normalizeStatementDate(period.end, order).iso;
+  const periodStart = statedStart ?? txDates[0] ?? null;
+  const periodEnd = statedEnd ?? txDates[txDates.length - 1] ?? null;
+  if ((statedStart === null || statedEnd === null) && periodStart && periodEnd) {
+    notes.push('statement period derived from transaction dates');
   }
 
   // Pass 2: any still-undateable row → period start; if even that is unknown,
@@ -401,7 +441,7 @@ const salvageStructure = (parsed: unknown): { value: unknown; notes: string[] } 
         const row = t as Record<string, unknown>;
         if (!isValidIsoDate(row.posted_date)) {
           if (periodStart) {
-            dateFixed += 1;
+            dateFallback += 1;
             return { ...row, posted_date: periodStart };
           }
           dropped += 1;
@@ -411,13 +451,22 @@ const salvageStructure = (parsed: unknown): { value: unknown; notes: string[] } 
       return t;
     })
     .filter((t) => t !== null);
-  if (dateFixed > 0)
+  if (dateFallback > 0)
     notes.push(
-      `${dateFixed} row(s) had an unreadable date — set to a fallback; verify before exporting`,
+      `${dateFallback} row(s) had an unreadable date — set to a fallback; verify before exporting`,
+    );
+  if (dateConverted > 0)
+    notes.push(
+      `${dateConverted} row date(s) were not in ISO format and were converted${order ? ` using the ${order} order` : ''}; verify before exporting`,
+    );
+  if (dateAmbiguous > 0)
+    notes.push(
+      `${dateAmbiguous} row date(s) used an ambiguous day/month order and were read as month/day; verify`,
     );
   if (dropped > 0) notes.push(`${dropped} row(s) dropped: no readable date`);
 
-  // Balances: derive from the running-balance chain, else default to 0.
+  // Balances: the printed values win; the running-balance chain only fills a
+  // missing one (else 0).
   const bal = (obj.balances ?? {}) as { opening_cents?: unknown; closing_cents?: unknown };
   const firstRb = finalRows.find(
     (t) =>
@@ -435,29 +484,41 @@ const salvageStructure = (parsed: unknown): { value: unknown; notes: string[] } 
     ) as Record<string, unknown> | undefined;
   const openCoerced = intOrNull(bal.opening_cents);
   const closeCoerced = intOrNull(bal.closing_cents);
+  const firstRbCents = firstRb ? intOrNull(firstRb.running_balance_cents) : null;
   const derivedOpen =
-    firstRb && typeof firstRb.running_balance_cents === 'number'
-      ? (firstRb.running_balance_cents as number) - (intOrNull(firstRb.amount_cents) ?? 0)
-      : null;
-  const derivedClose =
-    lastRb && typeof lastRb.running_balance_cents === 'number'
-      ? (lastRb.running_balance_cents as number)
-      : null;
+    firstRb && firstRbCents !== null ? firstRbCents - (intOrNull(firstRb.amount_cents) ?? 0) : null;
+  const derivedClose = lastRb ? intOrNull(lastRb.running_balance_cents) : null;
   const opening = openCoerced ?? derivedOpen ?? 0;
-  const closing = derivedClose ?? closeCoerced ?? 0;
+  // The model-read PRINTED closing wins over the last row's running balance: if
+  // the model dropped trailing rows (or the statement lists newest-first), the
+  // derived value would reconcile the rows against themselves and falsely verify.
+  const closing = closeCoerced ?? derivedClose ?? 0;
   if (openCoerced === null || closeCoerced === null) {
     notes.push(
       'opening/closing balance was missing — derived or defaulted; reconciliation may not tie',
     );
   }
+  if (closeCoerced !== null && derivedClose !== null && closeCoerced !== derivedClose) {
+    notes.push(
+      `printed closing balance (${formatUsd(BigInt(closeCoerced))}) differs from the last running balance (${formatUsd(BigInt(derivedClose))}) — rows may be missing or out of order; verify before exporting`,
+    );
+  }
 
-  // source_date_format: default a missing/invalid one to MDY (v1 is en-US).
-  const sdf = (obj.source_date_format ?? {}) as { format?: unknown; confidence?: unknown };
-  const validFormats = ['MDY', 'DMY', 'YMD', 'TEXTUAL', 'AMBIGUOUS'];
-  const fmt =
-    typeof sdf.format === 'string' && validFormats.includes(sdf.format) ? sdf.format : 'MDY';
-  const sdfConf =
-    typeof sdf.confidence === 'number' && sdf.confidence >= 0 && sdf.confidence <= 1
+  // source_date_format: the operator's override is authoritative; else the
+  // declared format; a missing/unrecognized one is AMBIGUOUS (never a silent
+  // MDY guess) so the worker halts for locale confirmation.
+  let fmt: SourceDateFormat;
+  if (dateFormatOverride) fmt = dateFormatOverride;
+  else if (declared) fmt = declared;
+  else {
+    fmt = 'AMBIGUOUS';
+    notes.push(
+      'source date format was missing or unrecognized — treated as AMBIGUOUS until the date order is confirmed',
+    );
+  }
+  const sdfConf = dateFormatOverride
+    ? 1
+    : typeof sdf.confidence === 'number' && sdf.confidence >= 0 && sdf.confidence <= 1
       ? sdf.confidence
       : 0.5;
 
@@ -476,9 +537,7 @@ const salvageStructure = (parsed: unknown): { value: unknown; notes: string[] } 
         closing_cents: closing,
       },
       source_date_format: {
-        ...(typeof obj.source_date_format === 'object' && obj.source_date_format
-          ? obj.source_date_format
-          : {}),
+        ...sdf,
         format: fmt,
         confidence: sdfConf,
       },
@@ -487,21 +546,54 @@ const salvageStructure = (parsed: unknown): { value: unknown; notes: string[] } 
   };
 };
 
+// ExtractionResult.notes cap (the schema's max).
+const NOTES_MAX = 2000;
+
+// The model's own `notes` as text. The schema wants a string, but a
+// json_object / router / Anthropic response can carry an array or object —
+// mirror the schema's coerceNotes (string arrays joined with '; ', anything
+// else JSON-stringified, capped) so merging our notes never drops the model's.
+const notesText = (v: unknown): string => {
+  if (v == null) return '';
+  const s =
+    typeof v === 'string'
+      ? v
+      : Array.isArray(v)
+        ? v.map((x) => (typeof x === 'string' ? x : JSON.stringify(x))).join('; ')
+        : typeof v === 'object'
+          ? JSON.stringify(v)
+          : String(v);
+  return s.slice(0, NOTES_MAX);
+};
+
+// Append one of our salvage notes after the model's own (coerced) notes, within
+// the cap — the model's text is trimmed first, so our flag is never what's cut.
+const appendNote = (prior: unknown, note: string): string => {
+  const p = notesText(prior);
+  const room = NOTES_MAX - note.length - 1;
+  return p.length > 0 && room > 0 ? `${p.slice(0, room)} ${note}` : note.slice(0, NOTES_MAX);
+};
+
 // Either signal a re-ask (salvage=false → throw with the count) or COERCE the
 // unreadable-amount rows to 0 and KEEP them (salvage=true) — the operator would
 // rather see a transaction with a 0/missing amount (flagged for review) than
 // lose the whole statement. Pass-through when the shape isn't { transactions }.
-const handleNullAmountRows = (parsed: unknown, rawResponse: string, salvage: boolean): unknown => {
-  if (parsed === null || typeof parsed !== 'object') return parsed;
-  const obj = parsed as { transactions?: unknown; notes?: unknown };
-  if (!Array.isArray(obj.transactions)) return parsed;
+// Returns the review note separately; the caller merges it into `notes`.
+const handleNullAmountRows = (
+  parsed: unknown,
+  rawResponse: string,
+  salvage: boolean,
+): { value: unknown; note: string | null } => {
+  if (parsed === null || typeof parsed !== 'object') return { value: parsed, note: null };
+  const obj = parsed as { transactions?: unknown };
+  if (!Array.isArray(obj.transactions)) return { value: parsed, note: null };
   const bad = obj.transactions.filter(
     (t) =>
       t !== null &&
       typeof t === 'object' &&
       !isUsableAmount((t as { amount_cents?: unknown }).amount_cents),
   );
-  if (bad.length === 0) return parsed;
+  if (bad.length === 0) return { value: parsed, note: null };
   if (!salvage) {
     // Give the LLM one focused re-ask to fill the amounts before we coerce.
     throw new ExtractionResponseError({
@@ -517,15 +609,23 @@ const handleNullAmountRows = (parsed: unknown, rawResponse: string, salvage: boo
       ? { ...(t as object), amount_cents: 0 }
       : t,
   );
-  const note = `${bad.length} transaction(s) had an unreadable amount — set to 0 and flagged for review; verify and correct each before exporting.`;
-  const existingNote = typeof obj.notes === 'string' && obj.notes.length > 0 ? `${obj.notes} ` : '';
-  return { ...obj, transactions: coerced, notes: `${existingNote}${note}`.slice(0, 2000) };
+  return {
+    value: { ...obj, transactions: coerced },
+    note: `${bad.length} transaction(s) had an unreadable amount — set to 0 and flagged for review; verify and correct each before exporting.`,
+  };
 };
 
 export const parseExtractionResponse = (
   rawResponse: string,
   alreadyParsed?: unknown,
-  opts: { salvageAmounts?: boolean } = {},
+  opts: {
+    salvageAmounts?: boolean;
+    // Operator-confirmed date order (ExtractOptions.dateFormatOverride, set
+    // after an AMBIGUOUS halt). Numeric non-ISO dates are read in this order
+    // and source_date_format is forced to it. Unset → the response's declared
+    // format decides (missing/unrecognized → AMBIGUOUS).
+    dateFormat?: DateOrder | undefined;
+  } = {},
 ): ExtractionResult => {
   // Default: salvage rows the LLM returned with a null/unreadable amount rather
   // than failing the whole statement (the DB can't store null/zero amounts).
@@ -544,7 +644,7 @@ export const parseExtractionResponse = (
         throw new ExtractionResponseError({
           summary: 'LLM response was not valid JSON',
           rawResponse,
-          issues: `${(err as Error).message}; prose-recovery attempt also failed`,
+          issues: `${describeJsonParseError(err)}; prose-recovery attempt also failed`,
         });
       }
     }
@@ -554,19 +654,21 @@ export const parseExtractionResponse = (
   // Cross-row / top-level salvage: coerce unreadable dates, derive a missing
   // period / balances, default a missing date-format — so none of these fails
   // the whole statement. Always runs.
-  const structural = salvageStructure(parsed);
+  const structural = salvageStructure(parsed, opts.dateFormat);
   parsed = structural.value;
   // Handle rows with a null / non-numeric amount_cents. Either re-ask the LLM
   // (signal) or coerce them to 0 + flag — never let them fail the extraction.
-  parsed = handleNullAmountRows(parsed, rawResponse, salvageAmounts);
-  // Merge any structural-salvage notes into the result's notes for review.
-  if (structural.notes.length > 0 && parsed && typeof parsed === 'object') {
+  const amounts = handleNullAmountRows(parsed, rawResponse, salvageAmounts);
+  parsed = amounts.value;
+  // Merge our salvage notes (amounts, then structural) after the model's own
+  // notes for review — in ONE append, so the cap only ever trims the model's text.
+  const ours = [
+    ...(amounts.note ? [amounts.note] : []),
+    ...(structural.notes.length > 0 ? [`${structural.notes.join('; ')}.`] : []),
+  ];
+  if (ours.length > 0 && parsed && typeof parsed === 'object') {
     const o = parsed as { notes?: unknown };
-    const existing = typeof o.notes === 'string' && o.notes.length > 0 ? `${o.notes} ` : '';
-    parsed = {
-      ...(parsed as object),
-      notes: `${existing}${structural.notes.join('; ')}.`.slice(0, 2000),
-    };
+    parsed = { ...(parsed as object), notes: appendNote(o.notes, ours.join(' ')) };
   }
   const result = ExtractionResult.safeParse(parsed);
   if (!result.success) {
@@ -954,14 +1056,19 @@ export class LocalGatewayProvider implements LlmProvider {
       }
       const body = (await res.json()) as {
         message?: { content?: string };
+        done_reason?: string;
         prompt_eval_count?: number;
         eval_count?: number;
       };
       const content = body.message?.content ?? '';
       if (!content) {
+        // Transient (model evicted / reloaded mid-request) unless the token cap
+        // was hit — e.g. spent on thinking — which re-running repeats exactly.
         throw new ExtractionResponseError({
           summary: 'ollama vision returned an empty completion',
           rawResponse: JSON.stringify(body).slice(0, 8_000),
+          ...(body.done_reason ? { issues: `done_reason=${body.done_reason}` } : {}),
+          transient: body.done_reason !== 'length',
         });
       }
       return {
@@ -982,8 +1089,12 @@ export class LocalGatewayProvider implements LlmProvider {
   }
 
   // One /api/chat round-trip for a SINGLE page. No system prompt (the model
-  // bakes its own); returns the model's native parsed JSON + token counts.
-  private async callStatementModelRaw(text: string): Promise<{
+  // bakes its own); returns the model's native parsed JSON + token counts. An
+  // operator-confirmed date order rides along as a line ahead of the OCR block.
+  private async callStatementModelRaw(
+    text: string,
+    dateFormat?: DateOrder,
+  ): Promise<{
     raw: Record<string, unknown>;
     content: string;
     inputTokens: number;
@@ -1004,7 +1115,12 @@ export class LocalGatewayProvider implements LlmProvider {
             ...(this.numCtx ? { num_ctx: this.numCtx } : {}),
           },
           ...(this.keepAlive ? { keep_alive: this.keepAlive } : {}),
-          messages: [{ role: 'user', content: `<statement_ocr>\n${text}\n</statement_ocr>` }],
+          messages: [
+            {
+              role: 'user',
+              content: `${dateFormat ? `${statementDateOrderLine(dateFormat)}\n` : ''}<statement_ocr>\n${text}\n</statement_ocr>`,
+            },
+          ],
         }),
         signal: ctl.signal,
       });
@@ -1016,14 +1132,19 @@ export class LocalGatewayProvider implements LlmProvider {
       }
       const body = (await res.json()) as {
         message?: { content?: string };
+        done_reason?: string;
         prompt_eval_count?: number;
         eval_count?: number;
       };
       const content = body.message?.content ?? '';
       if (!content) {
+        // Transient (model evicted / reloaded mid-request) unless the token cap
+        // was hit, which re-running repeats exactly.
         throw new ExtractionResponseError({
           summary: 'statement model returned an empty completion',
           rawResponse: JSON.stringify(body).slice(0, 8_000),
+          ...(body.done_reason ? { issues: `done_reason=${body.done_reason}` } : {}),
+          transient: body.done_reason !== 'length',
         });
       }
       let rawParsed: unknown;
@@ -1033,7 +1154,7 @@ export class LocalGatewayProvider implements LlmProvider {
         throw new ExtractionResponseError({
           summary: 'statement model response was not valid JSON',
           rawResponse: content,
-          issues: (err as Error).message,
+          issues: describeJsonParseError(err),
         });
       }
       return {
@@ -1056,8 +1177,13 @@ export class LocalGatewayProvider implements LlmProvider {
   // model ONE page per call (whole-statement output truncates at 25k+ tokens),
   // then merges the native per-page outputs (source_page stamped from the page
   // index) and maps to ExtractionResult. The rest of the pipeline (Zod,
-  // reconciler, exporters) is unchanged.
-  private async callStatementModel(markdown: string): Promise<ExtractResult> {
+  // reconciler, exporters) is unchanged. `dateFormat` is the operator's
+  // confirmed order after an AMBIGUOUS halt — told to the model on every page
+  // and forced onto the mapped result.
+  private async callStatementModel(
+    markdown: string,
+    dateFormat?: DateOrder,
+  ): Promise<ExtractResult> {
     const start = Date.now();
     const pages = splitMarkdownPages(markdown);
     const results: Array<{ pageNum: number; raw: Record<string, unknown> }> = [];
@@ -1075,7 +1201,7 @@ export class LocalGatewayProvider implements LlmProvider {
       // backoff before failing. A 4xx is a real client error — don't retry.
       for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
         try {
-          r = await this.callStatementModelRaw(page.text);
+          r = await this.callStatementModelRaw(page.text, dateFormat);
           lastErr = undefined;
           break;
         } catch (err) {
@@ -1100,6 +1226,8 @@ export class LocalGatewayProvider implements LlmProvider {
             summary: `statement model failed on page ${page.pageNum} of ${pages.length} after ${maxAttempts} attempts: ${err.summary}`,
             rawResponse: err.rawResponse,
             ...(err.issues !== undefined ? { issues: err.issues } : {}),
+            // Still an empty completion → still worth a job-level retry.
+            ...(err.transient !== undefined ? { transient: err.transient } : {}),
           });
         }
         throw new Error(
@@ -1114,11 +1242,11 @@ export class LocalGatewayProvider implements LlmProvider {
     // Always merge (stamps source_page from the page index; single page is a
     // no-op merge of one page).
     const merged = mergeStatementPages(results);
-    const mapped = mapStatementModelOutput(merged as never);
+    const mapped = mapStatementModelOutput(merged as never, { dateFormatOverride: dateFormat });
     // Audit = the raw per-page model completions (what the model actually
     // returned), not the synthesized merge.
     const rawJson = contents.length === 1 ? contents[0]! : contents.join('\n--- page break ---\n');
-    const data = parseExtractionResponse(rawJson, mapped);
+    const data = parseExtractionResponse(rawJson, mapped, { dateFormat });
     return {
       data,
       telemetry: {
@@ -1201,12 +1329,15 @@ export class LocalGatewayProvider implements LlmProvider {
           // statement) or the gateway swallowed the response. Surface
           // as ExtractionResponseError so the audit log captures the
           // raw body and the operator sees a useful summary instead of
-          // "Unexpected end of JSON input".
+          // "Unexpected end of JSON input". Transient (model evicted /
+          // reloaded mid-request) unless it stopped at the token cap,
+          // which re-running repeats exactly.
           const finish = body.choices?.[0]?.finish_reason;
           throw new ExtractionResponseError({
             summary: 'local gateway returned an empty completion',
             rawResponse: JSON.stringify(body).slice(0, 8_000),
             ...(finish ? { issues: `finish_reason=${finish}` } : {}),
+            transient: finish !== 'length',
           });
         }
         // Non-empty BUT truncated: the model hit max_tokens mid-JSON
@@ -1284,7 +1415,9 @@ export class LocalGatewayProvider implements LlmProvider {
         totalOutputTokens += call.outputTokens;
         totalMs += call.ms;
         try {
-          const data = parseExtractionResponse(call.content);
+          const data = parseExtractionResponse(call.content, undefined, {
+            dateFormat: opts.dateFormatOverride,
+          });
           return {
             data,
             rawJson: call.content,
@@ -1321,7 +1454,7 @@ export class LocalGatewayProvider implements LlmProvider {
     // whole-statement prompt budget here: head/tail-truncating before the page
     // split would silently drop middle pages, defeating the per-page design.
     if (this.statementModelMode) {
-      return this.callStatementModel(markdown);
+      return this.callStatementModel(markdown, opts.dateFormatOverride);
     }
 
     const { text } = prepareMarkdown(markdown, this.maxPromptTokens);
@@ -1351,6 +1484,7 @@ export class LocalGatewayProvider implements LlmProvider {
         // attempts signal so we can re-ask the LLM first.
         const data = parseExtractionResponse(call.content, undefined, {
           salvageAmounts: attempt === 2,
+          dateFormat: opts.dateFormatOverride,
         });
         return {
           data,
@@ -1398,6 +1532,10 @@ export class LocalGatewayProvider implements LlmProvider {
       { role: 'system', content: opts.systemPrompt },
       { role: 'user', content: opts.userPrompt },
     ];
+    // Same output cap as extract(): the admin / per-process "Max output tokens"
+    // (constructor → LLM_MAX_COMPLETION_TOKENS → 16000). The old hard 6000 ignored
+    // it and truncated large enrichment batches mid-JSON.
+    const maxTokens = opts.maxOutputTokens ?? this.maxCompletionTokens;
     const ctl = new AbortController();
     const t = setTimeout(() => ctl.abort(), this.timeoutMs);
     const start = Date.now();
@@ -1416,7 +1554,7 @@ export class LocalGatewayProvider implements LlmProvider {
             },
           },
           temperature: this.temperature,
-          max_tokens: opts.maxOutputTokens ?? Number(process.env.LLM_MAX_COMPLETION_TOKENS ?? 6000),
+          max_tokens: maxTokens,
         }),
         signal: ctl.signal,
       });
@@ -1424,18 +1562,31 @@ export class LocalGatewayProvider implements LlmProvider {
         throw new Error(`local gateway HTTP ${res.status}${await readErrorBodySuffix(res)}`);
       }
       const body = (await res.json()) as {
-        choices?: Array<{ message?: { content?: string } }>;
+        choices?: Array<{ message?: { content?: string }; finish_reason?: string }>;
         usage?: { prompt_tokens?: number; completion_tokens?: number };
       };
       const content = body.choices?.[0]?.message?.content ?? '';
+      const finish = body.choices?.[0]?.finish_reason;
       // Mirror the extract/vision paths: guard an empty completion and recover
       // prose-wrapped JSON, surfacing failures as a diagnosable
       // ExtractionResponseError (with the raw response) instead of a bare
       // SyntaxError. An empty 200 (e.g. finish_reason='length') is common.
+      // Transient unless it stopped at the token cap (re-running repeats it).
       if (content.trim().length === 0) {
         throw new ExtractionResponseError({
           summary: 'ollama complete() returned an empty completion',
           rawResponse: '',
+          ...(finish ? { issues: `finish_reason=${finish}` } : {}),
+          transient: finish !== 'length',
+        });
+      }
+      // Non-empty but cut off at the cap: name the cause instead of letting it
+      // surface as a cryptic "not valid JSON" (mirrors callGateway).
+      if (finish === 'length') {
+        throw new ExtractionResponseError({
+          summary: `ollama complete() output truncated at max_tokens (${maxTokens})`,
+          rawResponse: content.slice(0, 8_000),
+          issues: 'finish_reason=length; raise the process Max output tokens',
         });
       }
       let data: unknown;
@@ -1910,6 +2061,7 @@ export class AnthropicProvider implements LlmProvider {
         // attempts signal so we can re-ask Anthropic first.
         const data = parseExtractionResponse(call.rawJson, call.toolInput, {
           salvageAmounts: attempt === 2,
+          dateFormat: opts.dateFormatOverride,
         });
         return {
           data,

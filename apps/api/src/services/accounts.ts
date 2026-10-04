@@ -5,7 +5,7 @@ import { isValidAbaRouting, maskAccountNumber } from '@vibe-tx-converter/shared'
 import type { Db } from '../db/client.js';
 import { accounts, statements } from '../db/schema.js';
 import type { Account, User } from '../db/types.js';
-import { ConflictError, NotFoundError } from '../lib/errors.js';
+import { ConflictError, NotFoundError, ValidationError } from '../lib/errors.js';
 import { writeAudit } from './audit.js';
 
 export type SafeAccount = Omit<Account, 'accountNumber'> & {
@@ -98,7 +98,8 @@ export interface UpdateAccountInput {
   intuOrg?: string | undefined;
   accountType?: Account['accountType'] | undefined;
   accountNumber?: string | undefined;
-  routingNumber?: string | undefined;
+  // null (or blank) clears the routing number.
+  routingNumber?: string | null | undefined;
   defaultCsvTemplate?: Account['defaultCsvTemplate'] | undefined;
 }
 
@@ -108,6 +109,9 @@ export const updateAccount = async (
   id: string,
   input: UpdateAccountInput,
 ): Promise<SafeAccount> => {
+  const [current] = await db.select().from(accounts).where(eq(accounts.id, id));
+  if (!current) throw new NotFoundError(`account ${id} not found`);
+
   const patch: Record<string, unknown> = { updatedAt: sql`now()` };
   if (input.nickname !== undefined) patch.nickname = input.nickname.trim();
   if (input.financialInstitution !== undefined)
@@ -116,21 +120,46 @@ export const updateAccount = async (
   if (input.intuOrg !== undefined) patch.intuOrg = input.intuOrg.trim();
   if (input.accountType !== undefined) patch.accountType = input.accountType;
   if (input.accountNumber !== undefined) patch.accountNumber = input.accountNumber.trim();
+
+  let nextRouting = current.routingNumber;
+  let routingValid: boolean | null = null;
   if (input.routingNumber !== undefined) {
-    patch.routingNumber = input.routingNumber.trim();
-    patch.routingNumberAbaValid = isValidAbaRouting(input.routingNumber);
+    nextRouting = input.routingNumber?.trim() || null;
+    routingValid = nextRouting === null ? null : isValidAbaRouting(nextRouting);
+    patch.routingNumber = nextRouting;
+    patch.routingNumberAbaValid = routingValid;
   }
+  const routingChanged = nextRouting !== current.routingNumber;
   if (input.defaultCsvTemplate !== undefined) patch.defaultCsvTemplate = input.defaultCsvTemplate;
+
+  // Either half may come from the stored row; refuse the combination as the
+  // validation error it is rather than letting the DB CHECK
+  // accounts_credit_card_no_routing turn it into a 500.
+  const nextType = input.accountType ?? current.accountType;
+  if (nextType === 'CREDITCARD' && nextRouting !== null) {
+    throw new ValidationError('credit-card accounts must not carry a routing number');
+  }
 
   const [updated] = await db.update(accounts).set(patch).where(eq(accounts.id, id)).returning();
   if (!updated) throw new NotFoundError(`account ${id} not found`);
 
+  // audit_log is append-only: never write a full account or routing number
+  // into it (createAccount leaves both out too).
+  const { accountNumber, routingNumber: _routingNumber, ...rest } = input;
   await writeAudit(db, {
     actorUserId: actor.id,
     entityType: 'account',
     entityId: id,
     action: 'account.update',
-    payload: { ...input },
+    payload: {
+      ...rest,
+      ...(accountNumber === undefined
+        ? {}
+        : { accountNumberMasked: maskAccountNumber(accountNumber) }),
+      ...(routingChanged
+        ? { routingNumberChanged: true, routingNumberAbaValid: routingValid }
+        : {}),
+    },
   });
   return toSafe(updated);
 };

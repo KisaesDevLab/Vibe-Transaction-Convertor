@@ -126,13 +126,22 @@ export function AuditLogPage() {
       const blob = await res.blob();
       const cd = res.headers.get('content-disposition') ?? '';
       const filename = /filename="([^"]+)"/.exec(cd)?.[1] ?? `audit.${kind}`;
+      const objectUrl = URL.createObjectURL(blob);
       const a = document.createElement('a');
-      a.href = URL.createObjectURL(blob);
+      a.href = objectUrl;
       a.download = filename;
       document.body.appendChild(a);
       a.click();
       a.remove();
-      toast.success(`Downloaded ${filename}`);
+      // Release the blob once the browser has started the download.
+      setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000);
+      if (res.headers.get('x-audit-export-truncated') === 'true') {
+        toast.info(
+          `Downloaded ${filename} — truncated to the newest rows the export allows; narrow the filters (e.g. a date range) to get the rest.`,
+        );
+      } else {
+        toast.success(`Downloaded ${filename}`);
+      }
     } catch (err) {
       toast.error(err instanceof ApiError ? err.message : 'download failed');
     }

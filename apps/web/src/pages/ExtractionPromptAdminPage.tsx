@@ -35,6 +35,25 @@ interface PromptUpdate {
   fullSystemPrompt?: string | null;
 }
 
+type FieldKey = 'extraInstructions' | 'fullSystemPrompt';
+
+// What Save sends for one prompt field: undefined = leave it alone, null =
+// clear the saved override, string = store it as the override. Text equal to
+// the built-in default is never stored: the server would keep a verbatim
+// copy as an "override" and later default-prompt updates would never apply.
+// An override that already equals the default is only cleared after an
+// explicit "Reset to default" (resetRequested).
+export const fieldPatch = (
+  value: string,
+  field: PromptField,
+  resetRequested: boolean,
+): string | null | undefined => {
+  if (value === field.defaultValue) {
+    return field.isOverride && (value !== field.current || resetRequested) ? null : undefined;
+  }
+  return value === field.current ? undefined : value;
+};
+
 export function ExtractionPromptAdminPage() {
   const status = useQuery({
     queryKey: ['admin', 'extraction-prompt'],
@@ -67,19 +86,36 @@ function Editor({ initial }: { initial: PromptStatus }) {
   const [mode, setMode] = useState<PromptMode>(initial.mode);
   const [extra, setExtra] = useState<string>(initial.extraInstructions.current);
   const [full, setFull] = useState<string>(initial.fullSystemPrompt.current);
+  const [resetRequested, setResetRequested] = useState<Partial<Record<FieldKey, boolean>>>({});
+
+  const patches: Record<FieldKey, string | null | undefined> = {
+    extraInstructions: fieldPatch(
+      extra,
+      initial.extraInstructions,
+      resetRequested.extraInstructions === true,
+    ),
+    fullSystemPrompt: fieldPatch(
+      full,
+      initial.fullSystemPrompt,
+      resetRequested.fullSystemPrompt === true,
+    ),
+  };
 
   const dirty =
-    mode !== initial.mode ||
-    extra !== initial.extraInstructions.current ||
-    full !== initial.fullSystemPrompt.current;
+    mode !== initial.mode || Object.values(patches).some((patch) => patch !== undefined);
 
   const onSave = async (): Promise<void> => {
     try {
       const update: PromptUpdate = {};
       if (mode !== initial.mode) update.mode = mode;
-      if (extra !== initial.extraInstructions.current) update.extraInstructions = extra;
-      if (full !== initial.fullSystemPrompt.current) update.fullSystemPrompt = full;
+      if (patches.extraInstructions !== undefined) {
+        update.extraInstructions = patches.extraInstructions;
+      }
+      if (patches.fullSystemPrompt !== undefined) {
+        update.fullSystemPrompt = patches.fullSystemPrompt;
+      }
       await save.mutateAsync(update);
+      setResetRequested({});
       toast.success('Extraction prompt saved.');
     } catch (err) {
       toast.error(err instanceof ApiError ? err.message : 'save failed');
@@ -90,6 +126,12 @@ function Editor({ initial }: { initial: PromptStatus }) {
     setMode(initial.mode);
     setExtra(initial.extraInstructions.current);
     setFull(initial.fullSystemPrompt.current);
+    setResetRequested({});
+  };
+
+  const resetTo = (key: FieldKey, set: (v: string) => void) => (): void => {
+    set(initial[key].defaultValue);
+    setResetRequested((prev) => ({ ...prev, [key]: true }));
   };
 
   return (
@@ -142,6 +184,8 @@ function Editor({ initial }: { initial: PromptStatus }) {
           description="Appended to the built-in prompt under an 'ADDITIONAL OPERATOR INSTRUCTIONS' header. Leave blank to use the default prompt unchanged."
           value={extra}
           onChange={setExtra}
+          onReset={resetTo('extraInstructions', setExtra)}
+          pendingClear={patches.extraInstructions === null}
           isOverride={initial.extraInstructions.isOverride}
           defaultValue={initial.extraInstructions.defaultValue}
           placeholder="e.g. This bank prints the running balance in the rightmost column; treat amounts in parentheses as debits."
@@ -152,6 +196,8 @@ function Editor({ initial }: { initial: PromptStatus }) {
           description="Replaces the entire system prompt. Must keep the integer-cents rule and the required top-level fields, or extraction will fail / reconcile wrong."
           value={full}
           onChange={setFull}
+          onReset={resetTo('fullSystemPrompt', setFull)}
+          pendingClear={patches.fullSystemPrompt === null}
           isOverride={initial.fullSystemPrompt.isOverride}
           defaultValue={initial.fullSystemPrompt.defaultValue}
           rows={24}
@@ -216,6 +262,8 @@ function PromptBlock({
   description,
   value,
   onChange,
+  onReset,
+  pendingClear,
   isOverride,
   defaultValue,
   rows = 14,
@@ -225,6 +273,9 @@ function PromptBlock({
   description: React.ReactNode;
   value: string;
   onChange: (v: string) => void;
+  onReset: () => void;
+  // Save will clear the saved override (the text is back to the default).
+  pendingClear: boolean;
   isOverride: boolean;
   defaultValue: string;
   rows?: number;
@@ -243,12 +294,18 @@ function PromptBlock({
               : 'rounded-full bg-surface-subtle px-2 py-0.5 text-ink-muted'
           }
         >
-          {isOverride ? 'Saved override active' : 'Using built-in default'}
+          {pendingClear
+            ? 'Override will be cleared on save'
+            : isOverride
+              ? 'Saved override active'
+              : 'Using built-in default'}
         </span>
         <button
           type="button"
-          onClick={() => onChange(defaultValue)}
-          disabled={isDefault}
+          onClick={onReset}
+          // Stays enabled while an override is active even if its text
+          // already equals the default, so that override can be cleared.
+          disabled={isDefault && (!isOverride || pendingClear)}
           className="rounded-md border border-surface-muted px-2 py-1 text-xs hover:bg-surface-subtle disabled:opacity-50"
         >
           Reset to default

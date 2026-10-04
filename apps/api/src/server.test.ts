@@ -1,5 +1,6 @@
+import pg from 'pg';
 import request from 'supertest';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { createApp } from './server.js';
 
@@ -52,6 +53,30 @@ describe('createApp() — health, version, errors', () => {
     expect(res.status).toBe(503);
     expect(res.body.status).toBe('degraded');
     expect(res.body.dependencies.postgres.status).toBe('fail');
+    // The failure text (host:port, DB user) is not shown to anonymous callers.
+    expect(res.body.dependencies.postgres).not.toHaveProperty('detail');
+  }, 10_000);
+
+  it('GET /api/health/ready shares one probe between concurrent callers', async () => {
+    process.env.DATABASE_URL = 'postgres://nope:nope@127.0.0.1:1/nope';
+    // vitest's spy cannot `new` a class itself; construct the real one.
+    const RealPool = pg.Pool;
+    const poolSpy = vi
+      .spyOn(pg, 'Pool')
+      .mockImplementation((config?: pg.PoolConfig) => new RealPool(config));
+    try {
+      const app = createApp();
+      const results = await Promise.all([1, 2, 3].map(() => request(app).get('/api/health/ready')));
+      expect(results.map((r) => r.status)).toEqual([503, 503, 503]);
+      // The readiness probe's own pool is the max: 1 one (the app's shared
+      // pool may also be built on first use).
+      const probePools = poolSpy.mock.calls.filter(
+        ([cfg]) => (cfg as pg.PoolConfig | undefined)?.max === 1,
+      );
+      expect(probePools).toHaveLength(1);
+    } finally {
+      poolSpy.mockRestore();
+    }
   }, 10_000);
 
   it('GET /api/version reports name, version, buildSha, node', async () => {
@@ -83,6 +108,13 @@ describe('createApp() — health, version, errors', () => {
       expect(res.body.code).toBe('FORBIDDEN');
     }
   });
+
+  it('POST /api/internal/appliance/health (orchestrator handshake) needs no CSRF token', async () => {
+    const app = createApp();
+    const res = await request(app).post('/api/internal/appliance/health').send({});
+    expect(res.status).toBe(200);
+    expect(res.body.dbSchema).toBe('vibetc');
+  }, 10_000);
 
   it('GET /api/auth/csrf issues a token cookie', async () => {
     const app = createApp();

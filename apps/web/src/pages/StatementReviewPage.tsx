@@ -8,7 +8,7 @@ import { ReExtractDialog } from '../components/ReExtractDialog';
 import { ReconciliationBadge, StatusBadge } from '../components/StatusBadge';
 import { ProcessingStepper, isInFlight } from '../components/ProcessingStepper';
 import { ReconciliationWidget } from '../components/ReconciliationWidget';
-import { TransactionGrid } from '../components/TransactionGrid';
+import { DEFAULT_SUSPECT_THRESHOLD, TransactionGrid } from '../components/TransactionGrid';
 import { PdfViewer } from '../components/PdfViewer';
 import { useToast } from '../components/Toast';
 import {
@@ -28,9 +28,11 @@ import {
   useStatement,
   useBulkUpdateTransactions,
   useUpdateTransaction,
+  exportBlockReason,
+  recomputeToast,
   type TransactionRow,
 } from '../hooks/useStatementsList';
-import { useCategories, useEnrichmentToggles } from '../hooks/useCategories';
+import { useReviewCategories, useReviewEnrichmentToggles } from '../hooks/useCategories';
 import { useAccount } from '../hooks/useStatements';
 import { useAccounts } from '../hooks/useAccounts';
 import { useCompany } from '../hooks/useCompanies';
@@ -81,8 +83,10 @@ export function StatementReviewPage() {
   const splitStmt = useSplitStatement(statementId);
   const enrich = useEnrichStatement(statementId);
   const resolveChecks = useResolveCheckPayees(statementId);
-  const enrichmentToggles = useEnrichmentToggles();
-  const categoriesQuery = useCategories();
+  // Review-meta endpoints (not the admin ones) so staff reviewers get the
+  // Category/Cleansed columns and the enrichment toolbar too.
+  const enrichmentToggles = useReviewEnrichmentToggles();
+  const categoriesQuery = useReviewCategories();
   const me = useMe();
   const isAdmin = me.data?.role === 'admin';
   const canReextract = hasFeature(me.data?.features, FEATURE.reextract);
@@ -127,6 +131,18 @@ export function StatementReviewPage() {
     return { sum: deposits + withdrawals, deposits, withdrawals, depositCount, withdrawalCount };
   }, [stmt.data]);
 
+  // PDF highlight for the selected row. sourcePage is always known, the bbox
+  // usually isn't — the viewer still jumps to the page and outlines only when
+  // a bbox exists. Memoized on the row's primitives so unrelated re-renders
+  // hand the viewer the same highlight.
+  const selId = selectedTx?.id ?? null;
+  const selPage = selectedTx?.sourcePage ?? null;
+  const selBbox = selectedTx?.sourceBboxJson ?? null;
+  const highlight = useMemo(
+    () => (selId !== null && selPage !== null ? { id: selId, page: selPage, bbox: selBbox } : null),
+    [selId, selPage, selBbox],
+  );
+
   if (stmt.isPending) {
     return (
       <div className="space-y-3">
@@ -139,12 +155,21 @@ export function StatementReviewPage() {
 
   const s = stmt.data.statement;
   const txs = stmt.data.transactions;
-  const exportable =
-    s.reconciliationStatus === 'verified' || s.reconciliationStatus === 'overridden';
-  // A Shield 'unknown'-page review hold blocks export until acknowledged —
-  // the server enforces this too (exports.ts assertNotHeldForReview).
-  const heldForReview = !!s.reviewHoldReason && !s.reviewHoldAcknowledged;
-  const exportBlocked = !exportable || s.status === 'awaiting-locale-confirmation' || heldForReview;
+  // Mirrors the server gate: status must be review/exported (a stale
+  // 'verified' on a re-extracting / failed / awaiting-locale statement must
+  // not enable export), reconciliation verified or overridden, and no
+  // unacknowledged review hold (exports.ts assertNotHeldForReview).
+  const exportBlockedReason = exportBlockReason(s);
+  const exportBlocked = exportBlockedReason !== null;
+  // Show the Resolve-check-payees action on its own gate, independent of the
+  // enrichment toggles.
+  const showResolveChecks =
+    isAdmin &&
+    canCheckResolve &&
+    txs.some((t) => t.checkNumber !== null && t.checkNumber.length > 0);
+  const enrichmentOn = !!(
+    enrichmentToggles.data?.cleanseEnabled || enrichmentToggles.data?.categoryEnabled
+  );
 
   const onExport = async (format: string): Promise<void> => {
     try {
@@ -289,11 +314,7 @@ export function StatementReviewPage() {
               <button
                 type="button"
                 disabled={exportBlocked}
-                title={
-                  exportBlocked
-                    ? 'Reconciliation is not verified — fix discrepancies or override before export'
-                    : 'Download all 7 formats as a single zip'
-                }
+                title={exportBlockedReason ?? 'Download all 7 formats as a single zip'}
                 onClick={async () => {
                   try {
                     await downloadBundle(statementId, s.reconciliationStatus === 'overridden');
@@ -311,11 +332,7 @@ export function StatementReviewPage() {
                   key={f.value}
                   type="button"
                   disabled={exportBlocked}
-                  title={
-                    exportBlocked
-                      ? 'Reconciliation is not verified — fix discrepancies or override before export'
-                      : ''
-                  }
+                  title={exportBlockedReason ?? ''}
                   onClick={() => void onExport(f.value)}
                   className="rounded-md border border-surface-muted px-3 py-1.5 text-sm hover:bg-surface-subtle disabled:cursor-not-allowed disabled:opacity-50"
                 >
@@ -514,28 +531,34 @@ export function StatementReviewPage() {
               one per transform; each is hidden when its admin toggle is
               off and disabled while a call is in flight. The mutation
               invalidates the statement query so the new cleansed /
-              category cells appear without a manual refresh. */}
-          {(enrichmentToggles.data?.cleanseEnabled || enrichmentToggles.data?.categoryEnabled) && (
+              category cells appear without a manual refresh. The admin
+              "Resolve check payees" action shares the toolbar but has its
+              own gate, so it stays available with both toggles off. */}
+          {enrichmentOn || showResolveChecks ? (
             <div className="flex flex-wrap items-center gap-2 rounded-lg border border-surface-muted bg-white p-3 text-sm">
-              <span className="text-ink-muted">AI enrichment:</span>
-              <span className="text-xs text-ink-subtle">
-                {enrichmentToggles.data?.cleanseEnabled && enrichmentToggles.data?.cleanse ? (
-                  <span>
-                    cleanse: {enrichmentToggles.data.cleanse.provider} ·{' '}
-                    {enrichmentToggles.data.cleanse.model}
+              {enrichmentOn ? (
+                <>
+                  <span className="text-ink-muted">AI enrichment:</span>
+                  <span className="text-xs text-ink-subtle">
+                    {enrichmentToggles.data?.cleanseEnabled && enrichmentToggles.data?.cleanse ? (
+                      <span>
+                        cleanse: {enrichmentToggles.data.cleanse.provider} ·{' '}
+                        {enrichmentToggles.data.cleanse.model}
+                      </span>
+                    ) : null}
+                    {enrichmentToggles.data?.cleanseEnabled &&
+                    enrichmentToggles.data?.categoryEnabled ? (
+                      <span className="mx-1 text-surface-muted">|</span>
+                    ) : null}
+                    {enrichmentToggles.data?.categoryEnabled && enrichmentToggles.data?.category ? (
+                      <span>
+                        category: {enrichmentToggles.data.category.provider} ·{' '}
+                        {enrichmentToggles.data.category.model}
+                      </span>
+                    ) : null}
                   </span>
-                ) : null}
-                {enrichmentToggles.data?.cleanseEnabled &&
-                enrichmentToggles.data?.categoryEnabled ? (
-                  <span className="mx-1 text-surface-muted">|</span>
-                ) : null}
-                {enrichmentToggles.data?.categoryEnabled && enrichmentToggles.data?.category ? (
-                  <span>
-                    category: {enrichmentToggles.data.category.provider} ·{' '}
-                    {enrichmentToggles.data.category.model}
-                  </span>
-                ) : null}
-              </span>
+                </>
+              ) : null}
               {enrichmentToggles.data?.cleanseEnabled && canEnrich ? (
                 <button
                   type="button"
@@ -590,9 +613,7 @@ export function StatementReviewPage() {
                   Assign categories
                 </button>
               ) : null}
-              {isAdmin &&
-              canCheckResolve &&
-              txs.some((t) => t.checkNumber !== null && t.checkNumber.length > 0) ? (
+              {showResolveChecks ? (
                 <button
                   type="button"
                   disabled={resolveChecks.isPending || s.sourcePdfDeleted}
@@ -627,7 +648,7 @@ export function StatementReviewPage() {
                 <span className="text-xs text-ink-subtle">running…</span>
               ) : null}
             </div>
-          )}
+          ) : null}
           <TransactionGrid
             txs={txs}
             periodStart={s.periodStart}
@@ -635,6 +656,8 @@ export function StatementReviewPage() {
             selectedId={selectedTx?.id ?? null}
             isAdmin={isAdmin}
             categories={categoriesQuery.data}
+            // Same cutoff as the server's review hold (admin-tunable).
+            suspectThreshold={stmt.data.reviewConfidenceThreshold ?? DEFAULT_SUSPECT_THRESHOLD}
             onSelect={(t) => setSelectedTx(t)}
             onSave={async (id, patch) => {
               try {
@@ -661,8 +684,10 @@ export function StatementReviewPage() {
             }}
             onRecompute={async () => {
               try {
-                const result = await recompute.mutateAsync();
-                toast.success(`Reconciliation: ${result.status} (Δ ${result.deltaCents}¢)`);
+                // An override or a statement without balances comes back
+                // not recomputed: that gets an info toast, not a verdict.
+                const t = recomputeToast(await recompute.mutateAsync());
+                toast.push(t.kind, t.message);
               } catch (err) {
                 toast.error(err instanceof ApiError ? err.message : 'recompute failed');
                 throw err;
@@ -709,23 +734,18 @@ export function StatementReviewPage() {
                   Re-extract is unavailable; re-upload the same PDF to start over.
                 </p>
               </div>
+            ) : !isAdmin ? (
+              // The raw-PDF endpoint (GET /api/uploads/:hash/raw) is admin-only,
+              // so for staff the viewer could only ever show "HTTP 403".
+              <div className="rounded-lg border border-surface-muted bg-surface-subtle p-6 text-sm text-ink-muted">
+                Source PDF preview is available to admins.
+              </div>
             ) : (
               <PdfViewer
                 pdfHash={s.sourcePdfHash}
-                {...(isAdmin
-                  ? {
-                      onDeletePdf: () => setDeletePdfOpen(true),
-                      deletePdfBusy: deletePdf.isPending,
-                    }
-                  : {})}
-                highlight={
-                  selectedTx?.sourceBboxJson
-                    ? {
-                        page: selectedTx.sourcePage,
-                        bbox: selectedTx.sourceBboxJson,
-                      }
-                    : null
-                }
+                onDeletePdf={() => setDeletePdfOpen(true)}
+                deletePdfBusy={deletePdf.isPending}
+                highlight={highlight}
                 onPdfClick={(loc) => {
                   // Phase 19 #7: PDF→txn click selection. Find the row whose
                   // source_page matches and whose bbox contains the click;

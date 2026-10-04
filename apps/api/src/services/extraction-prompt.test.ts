@@ -46,7 +46,7 @@ live('extraction-prompt (live Postgres)', () => {
     expect(s.mode).toBe('rules');
     expect(s.extraInstructions).toMatchObject({ isOverride: false, current: '' });
     expect(s.fullSystemPrompt.isOverride).toBe(false);
-    expect(s.effectivePreview).toContain('bank-statement extractor');
+    expect(s.effectivePreview).toContain('bank-statement transcription engine');
     expect(await resolveExtractionSystemPrompt(getDb())).toBe(s.fullSystemPrompt.defaultValue);
   });
 

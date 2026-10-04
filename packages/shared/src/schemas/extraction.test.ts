@@ -87,6 +87,52 @@ describe('ExtractionResult (nested)', () => {
     expect(out.transactions[0]?.trntype).toBe('DEP');
   });
 
+  describe('non-essential metadata never fails the statement (C10)', () => {
+    const parseWith = (overrides: Record<string, unknown>) =>
+      ExtractionResult.parse({ ...sampleNested, ...overrides });
+
+    it('notes: null → absent; non-strings stringified; long notes clipped', () => {
+      expect(parseWith({ notes: null }).notes).toBeUndefined();
+      expect(parseWith({ notes: 42 }).notes).toBe('42');
+      expect(parseWith({ notes: ['row 3 illegible', 'sum off'] }).notes).toBe(
+        'row 3 illegible; sum off',
+      );
+      expect(parseWith({ notes: 'x'.repeat(2500) }).notes).toHaveLength(2000);
+    });
+
+    it('account: numeric masked_number → string; type_hint mapped case-insensitively', () => {
+      const r = parseWith({ account: { masked_number: 1234, type_hint: 'checking' } });
+      expect(r.account).toEqual({ masked_number: '1234', type_hint: 'CHECKING' });
+      expect(parseWith({ account: { type_hint: 'credit_card' } }).account.type_hint).toBe(
+        'CREDITCARD',
+      );
+      expect(parseWith({ account: { type_hint: 'Money Market' } }).account.type_hint).toBe(
+        'MONEYMRKT',
+      );
+      expect(parseWith({ account: { type_hint: 'BANK' } }).account.type_hint).toBeNull();
+      expect(parseWith({ account: { type_hint: 7 } }).account.type_hint).toBeNull();
+    });
+
+    it('account / institution given as a non-object → default {}', () => {
+      const r = parseWith({ account: '****1234', institution: ['Acme'] });
+      expect(r.account).toEqual({});
+      expect(r.institution).toEqual({});
+    });
+
+    it('institution: numeric name / org hint → string; object → null', () => {
+      const r = parseWith({ institution: { name: 1867, intu_org_hint: { x: 1 } } });
+      expect(r.institution).toEqual({ name: '1867', intu_org_hint: null });
+    });
+
+    it('source_date_format evidence / sample: non-string → null', () => {
+      const r = parseWith({
+        source_date_format: { format: 'MDY', confidence: 0.9, sample: 20260305, evidence: {} },
+      });
+      expect(r.source_date_format.sample).toBeNull();
+      expect(r.source_date_format.evidence).toBeNull();
+    });
+  });
+
   it('JSON Schema marks trntype nullable so the model may defer to inference', () => {
     expect(ExtractionJsonSchema.properties.transactions.items.properties.trntype.type).toContain(
       'null',

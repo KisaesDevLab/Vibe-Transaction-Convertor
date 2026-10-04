@@ -1,4 +1,4 @@
-import { and, eq, isNull, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, isNull, sql } from 'drizzle-orm';
 import { createReadStream } from 'node:fs';
 
 import type { Db } from '../db/client.js';
@@ -86,12 +86,73 @@ export const ingestUpload = async (
         isNull(statements.pageRange),
       ),
     );
-  if (!existing[0]) throw new Error('statement insert lost the race AND row not found');
-  return { statement: existing[0], deduplicated: true };
+  const row = existing[0];
+  if (!row) throw new Error('statement insert lost the race AND row not found');
+  if (row.sourcePdfDeleted) {
+    // The caller has just stored these bytes again — the existing statement
+    // gets its PDF back instead of staying flagged "PDF gone".
+    await restoreDeletedSourcePdf(db, actor, input.hash, input.storedPath);
+    return {
+      statement: { ...row, sourcePdfPath: input.storedPath, sourcePdfDeleted: false },
+      deduplicated: true,
+    };
+  }
+  return { statement: row, deduplicated: true };
 };
 
+// Re-uploading a PDF whose stored file was deleted (admin Delete-PDF or the
+// retention sweep) is the documented way to get it back ("re-upload to enable
+// re-extraction"). Point every statement of that content that lost its file at
+// the freshly stored copy and clear the flag, audit-logged per statement.
+// Returns the ids of the restored statements.
+export const restoreDeletedSourcePdf = async (
+  db: Db,
+  actor: User,
+  hash: string,
+  storedPath: string,
+): Promise<string[]> => {
+  const restored = await db
+    .update(statements)
+    .set({ sourcePdfPath: storedPath, sourcePdfDeleted: false, updatedAt: sql`now()` })
+    .where(and(eq(statements.sourcePdfHash, hash), eq(statements.sourcePdfDeleted, true)))
+    .returning({ id: statements.id });
+  for (const r of restored) {
+    await writeAudit(db, {
+      actorUserId: actor.id,
+      entityType: 'statement',
+      entityId: r.id,
+      action: 'statement.restore-pdf',
+      payload: { hash },
+    });
+  }
+  return restored.map((r) => r.id);
+};
+
+// Oldest statement with this content hash, any account. Deterministic.
 export const findByHash = async (db: Db, hash: string): Promise<Statement | null> => {
-  const rows = await db.select().from(statements).where(eq(statements.sourcePdfHash, hash));
+  const rows = await db
+    .select()
+    .from(statements)
+    .where(eq(statements.sourcePdfHash, hash))
+    .orderBy(asc(statements.createdAt), asc(statements.id))
+    .limit(1);
+  return rows[0] ?? null;
+};
+
+// The statement an upload of this content to `accountId` deduplicates to:
+// the account's whole-PDF (un-split) row when there is one, else its oldest
+// split slice of that PDF. Null when the account has never had it.
+export const findByAccountAndHash = async (
+  db: Db,
+  accountId: string,
+  hash: string,
+): Promise<Statement | null> => {
+  const rows = await db
+    .select()
+    .from(statements)
+    .where(and(eq(statements.accountId, accountId), eq(statements.sourcePdfHash, hash)))
+    .orderBy(desc(isNull(statements.pageRange)), asc(statements.createdAt), asc(statements.id))
+    .limit(1);
   return rows[0] ?? null;
 };
 

@@ -80,11 +80,10 @@ export const authRouter = (vibeAuth?: VibeAuth): Router => {
       ) {
         throw new ValidationError('email, password, displayName are required');
       }
-      const created = await register(
-        db,
-        { email, password, displayName },
-        { actor: req.user ?? null },
-      );
+      // First-admin bootstrap only. Admins add users through POST
+      // /api/users, which carries the admin.users feature gate this public
+      // route does not.
+      const created = await register(db, { email, password, displayName }, { actor: null });
       res.status(201).json(safeUser(created));
     } catch (err) {
       next(err);
@@ -147,7 +146,8 @@ export const authRouter = (vibeAuth?: VibeAuth): Router => {
       if (typeof currentPassword !== 'string' || typeof newPassword !== 'string') {
         throw new ValidationError('currentPassword and newPassword are required');
       }
-      await changePassword(db, req.user!, currentPassword, newPassword);
+      // Ends the user's other sessions; this one stays signed in.
+      await changePassword(db, req.user!, currentPassword, newPassword, req.session?.id);
       res.json({ ok: true });
     } catch (err) {
       next(err);

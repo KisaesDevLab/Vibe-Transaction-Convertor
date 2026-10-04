@@ -79,6 +79,16 @@ describe('OFX 2.x XML', () => {
     expect(out).toContain('<NAME>PAYROLL DEPOSIT</NAME>');
     expect(out).toContain('<MEMO>line1 line2</MEMO>');
   });
+
+  it('clips NAME by code point so a surrogate pair is never split', () => {
+    const out = renderOfxXml({
+      ...STMT,
+      transactions: [{ ...STMT.transactions[0]!, name: `${'X'.repeat(31)}😀Z` }],
+    });
+    expect(out).toContain(`<NAME>${'X'.repeat(31)}😀</NAME>`);
+    // No lone surrogate survived the clip (it would round-trip as U+FFFD).
+    expect(Buffer.from(out, 'utf8').toString('utf8')).toBe(out);
+  });
 });
 
 describe('OFX 1.x SGML — QBO/QFX', () => {
@@ -188,6 +198,31 @@ describe('SGML transliteration (Phase 22 #8 — CHARSET 1252)', () => {
     // eslint-disable-next-line no-control-regex
     const hasNonAscii = /[^\x00-\x7F]/.test(out);
     expect(hasNonAscii).toBe(false);
+  });
+
+  it('clips NAME to 32 chars AFTER transliteration (… → ..., ™ → (TM))', () => {
+    const nameOf = (name: string): string => {
+      const out = renderQbo({
+        ...STMT,
+        transactions: [{ ...STMT.transactions[0]!, name }],
+      });
+      return /<NAME>([^\r\n]*)\r\n/.exec(out)![1]!;
+    };
+    // 31 + '…' would be 34 chars once '…' becomes '...'.
+    expect(nameOf(`${'A'.repeat(31)}…`)).toBe(`${'A'.repeat(31)}.`);
+    // 30 + '™' would be 34 chars once '™' becomes '(TM)'.
+    expect(nameOf(`${'B'.repeat(30)}™`)).toBe(`${'B'.repeat(30)}(T`);
+    // An entity is never cut in half and counts as the one char it encodes.
+    expect(nameOf(`${'C'.repeat(31)}&D`)).toBe(`${'C'.repeat(31)}&amp;`);
+  });
+
+  it('clips MEMO to 255 chars after transliteration', () => {
+    const out = renderQbo({
+      ...STMT,
+      transactions: [{ ...STMT.transactions[0]!, memo: `${'M'.repeat(254)}—…` }],
+    });
+    const memo = /<MEMO>([^\r\n]*)\r\n/.exec(out)![1]!;
+    expect(memo).toBe(`${'M'.repeat(254)}-`);
   });
 
   it('drops fully non-ASCII codepoints to ? rather than shipping raw UTF-8', () => {

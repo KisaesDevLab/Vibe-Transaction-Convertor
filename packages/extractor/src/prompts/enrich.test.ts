@@ -100,6 +100,17 @@ describe('enrichmentSystemPromptFor', () => {
       expect(out).not.toContain('{{categories}}');
     });
 
+    it("inserts category text literally — `$&` / `$'` / `$$` are not replace() patterns (X1)", () => {
+      const out = enrichmentSystemPromptFor({
+        cleanse: false,
+        categorize: true,
+        categories: [{ name: 'Fees', description: "costs $$5 or $& more, or $' less" }],
+        mode: 'full',
+        fullSystemPromptOverride: 'Pick one:\n{{categories}}\nEND',
+      });
+      expect(out).toBe("Pick one:\n  - Fees: costs $$5 or $& more, or $' less\nEND");
+    });
+
     it('still appends account-context after the operator prompt in full mode', () => {
       const out = enrichmentSystemPromptFor({
         cleanse: true,

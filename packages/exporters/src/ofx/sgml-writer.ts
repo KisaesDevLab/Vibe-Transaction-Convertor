@@ -86,15 +86,21 @@ const transliterate = (s: string): string => {
 
 // SGML record separation is `\r\n`. Any embedded newline inside a text
 // value (often present after OCR of multi-line descriptions) would split
-// the record and break parsers — collapse to single spaces first. Then
-// transliterate to ASCII so non-Latin1 characters don't ship as raw
-// UTF-8 bytes (which Quicken/QuickBooks corrupt under CHARSET 1252).
-const sgmlEscape = (s: string): string =>
-  transliterate(s)
-    .replaceAll(/[\r\n]+/g, ' ')
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;');
+// the record and break parsers — collapse to single spaces. Transliterate
+// to ASCII so non-Latin1 characters don't ship as raw UTF-8 bytes (which
+// Quicken/QuickBooks corrupt under CHARSET 1252).
+const sgmlText = (s: string): string => transliterate(s).replaceAll(/[\r\n]+/g, ' ');
+
+const sgmlEntities = (s: string): string =>
+  s.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
+
+const sgmlEscape = (s: string): string => sgmlEntities(sgmlText(s));
+
+// Length-limited fields (NAME A-32, MEMO A-255). Clip AFTER transliterating —
+// '…' → '...' and '™' → '(TM)' grow the string, so clipping the raw value
+// first could still emit 34-35 chars — and BEFORE entity-escaping, so an
+// entity is never cut in half and counts as the one character it encodes.
+const sgmlClipped = (s: string, max: number): string => sgmlEntities(sgmlText(s).slice(0, max));
 
 const renderStmtTrnSgml = (trn: Stmt['transactions'][number]): string => {
   const lines: string[] = [
@@ -105,8 +111,8 @@ const renderStmtTrnSgml = (trn: Stmt['transactions'][number]): string => {
     stag('FITID', sgmlEscape(trn.fitid)),
   ];
   if (trn.checkNumber) lines.push(stag('CHECKNUM', sgmlEscape(trn.checkNumber)));
-  lines.push(stag('NAME', sgmlEscape(trn.name.slice(0, 32))));
-  if (trn.memo) lines.push(stag('MEMO', sgmlEscape(trn.memo.slice(0, 255))));
+  lines.push(stag('NAME', sgmlClipped(trn.name, 32)));
+  if (trn.memo) lines.push(stag('MEMO', sgmlClipped(trn.memo, 255)));
   lines.push('</STMTTRN>');
   return lines.join('\r\n');
 };
@@ -189,7 +195,7 @@ export const renderOfxSgml = (stmt: Stmt, opts: SgmlWriterOptions = {}): string 
         '</BANKTRANLIST>',
         '<LEDGERBAL>',
         stag('BALAMT', centsToDecimal(stmt.ledgerBalanceCents)),
-        stag('DTASOF', ofxDateTime(stmt.asOf)),
+        stag('DTASOF', ofxDate(stmt.endDate)),
         '</LEDGERBAL>',
         '</CCSTMTRS>',
         '</CCSTMTTRNRS>',
@@ -211,7 +217,7 @@ export const renderOfxSgml = (stmt: Stmt, opts: SgmlWriterOptions = {}): string 
         '</BANKTRANLIST>',
         '<LEDGERBAL>',
         stag('BALAMT', centsToDecimal(stmt.ledgerBalanceCents)),
-        stag('DTASOF', ofxDateTime(stmt.asOf)),
+        stag('DTASOF', ofxDate(stmt.endDate)),
         '</LEDGERBAL>',
         '</STMTRS>',
         '</STMTTRNRS>',

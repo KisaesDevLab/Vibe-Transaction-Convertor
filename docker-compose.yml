@@ -4,7 +4,7 @@
 # + a Qwen-VL vision model); page images never leave the host (ADR-023).
 # Operators run
 #   docker compose --profile standalone up -d
-# then pull the models:  docker compose exec ollama ollama pull qwen3.5:35b-a3b
+# then pull the models:  docker compose exec ollama ollama pull qwen2.5:32b-instruct
 
 x-api-env: &api-env
   NODE_ENV: production
@@ -14,7 +14,8 @@ x-api-env: &api-env
   # Local Ollama model server — OCR (vision) + text extraction. No egress.
   OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
   LLM_PROVIDER: local
-  LLM_MODEL_ID: ${LLM_MODEL_ID:-qwen3.5:35b-a3b}
+  # Non-thinking instruct model (ADR-024) — must match the tag pulled above.
+  LLM_MODEL_ID: ${LLM_MODEL_ID:-qwen2.5:32b-instruct}
   # Vision model = the CHECK-PAYEE FALLBACK only (ADR-025). Scanned-page OCR
   # runs on GLM-OCR (below), not Ollama. Defaults to qwen3-vl:30b when unset;
   # pull it on the Ollama host: `docker compose exec ollama ollama pull qwen3-vl:30b`.
@@ -49,8 +50,14 @@ services:
       POSTGRES_USER: vibetc
       POSTGRES_PASSWORD: vibetc
       POSTGRES_DB: vibetc
+    # Loopback-only host port: lets the dev-guide workflow
+    # (`docker compose up -d postgres redis` + `pnpm dev`) reach the DB at
+    # localhost:5432 without publishing the well-known vibetc/vibetc
+    # superuser login on every host interface (Docker-published ports
+    # bypass host firewalls such as ufw). The api/worker containers use the
+    # in-network `postgres:5432` and never need this mapping.
     ports:
-      - '5432:5432'
+      - '127.0.0.1:5432:5432'
     volumes:
       - vibetc-pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -160,8 +167,9 @@ services:
     # under restart cascades and would push the api into restart-loop
     # territory before migrations finish. Caddy still waits for this
     # service to be `healthy` via depends_on, just on liveness now.
+    # curl is installed in the runtime image (Dockerfile); wget is not.
     healthcheck:
-      test: ['CMD-SHELL', 'wget -q -O - http://localhost:4000/api/health/live || exit 1']
+      test: ['CMD', 'curl', '-fsS', 'http://localhost:4000/api/health/live']
       interval: 5s
       timeout: 5s
       retries: 30
@@ -187,11 +195,10 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    healthcheck:
-      test: ['CMD-SHELL', 'pgrep -f run-worker || exit 1']
-      interval: 10s
-      timeout: 5s
-      retries: 6
+    # No healthcheck: the worker is the container's PID 1, so the container
+    # exits when the worker process dies, and nothing depends on its health.
+    # (The previous `pgrep` probe always failed — procps is not in the
+    # bookworm-slim runtime image — so the worker showed as unhealthy.)
 
   # Phase 28 #5: Caddy fronts the API with HTTPS. Operators set the
   # public hostname in VIBETC_DOMAIN; Caddy auto-provisions a Let's

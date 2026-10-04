@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { assignSeqInDay, computeFitid } from './fitid.js';
-import { inferTrntype, normalizeDescription } from './trntype-rules.js';
+import { getTrntypeReason, inferTrntype, normalizeDescription } from './trntype-rules.js';
 
 describe('computeFitid', () => {
   it('produces a 20-char "VTC-" prefixed FITID', () => {
@@ -212,5 +212,76 @@ describe('inferTrntype', () => {
         checkNumber: '1234',
       }),
     ).toBe('CHECK');
+  });
+
+  // Word boundaries bind to EVERY alternative, not just the first and last.
+  it('does not match rule keywords inside other words', () => {
+    // 'adp' inside LEADPAGES / HEADPHONES, 'gusto' inside AUGUSTO'S.
+    for (const desc of ['LEADPAGES.NET', 'HEADPHONES PLUS', "AUGUSTO'S PIZZA"]) {
+      expect(getTrntypeReason({ description: desc, amountCents: -4_999n })).toBe(
+        'sign-fallback:negative',
+      );
+    }
+    // 'int paid' inside SPRINT PAID; 'interest' prefix of INTERESTING.
+    expect(inferTrntype({ description: 'SPRINT PAID', amountCents: -8_000n })).toBe('DEBIT');
+    expect(inferTrntype({ description: 'INTERESTING FINDS', amountCents: -2_500n })).toBe('DEBIT');
+    // 'to acct' inside AUTO ACCT.
+    expect(inferTrntype({ description: 'GEICO AUTO ACCT', amountCents: -12_000n })).toBe('DEBIT');
+  });
+  it('routes ATM W/D to ATM (normalization turns "/" into a space)', () => {
+    expect(normalizeDescription('ATM W/D 0423')).toBe('atm w d 0423');
+    expect(inferTrntype({ description: 'ATM W/D 0423', amountCents: -6_000n })).toBe('ATM');
+  });
+  it('keeps the common BILL PAYMENT / DIVIDENDS / SERVICE CHARGES forms', () => {
+    expect(inferTrntype({ description: 'ONLINE BILL PAYMENT', amountCents: -10_000n })).toBe(
+      'PAYMENT',
+    );
+    expect(inferTrntype({ description: 'DIVIDENDS EARNED', amountCents: 1_500n })).toBe('DIV');
+    expect(inferTrntype({ description: 'SERVICE CHARGES', amountCents: -1_200n })).toBe('SRVCHG');
+  });
+  it('DIRECTDEP only for money in (holder perspective)', () => {
+    // A business paying its own payroll is a debit, not a direct deposit.
+    expect(inferTrntype({ description: 'GUSTO PAYROLL', amountCents: -250_000n })).toBe('DEBIT');
+    expect(inferTrntype({ description: 'ADP WAGE PAY', amountCents: -250_000n })).toBe('DEBIT');
+    // Credit cards store amounts inverted: a positive amount is a charge
+    // (money out), a negative one is money in.
+    expect(
+      inferTrntype({ description: 'GUSTO PAYROLL', amountCents: 5_000n, isCreditCard: true }),
+    ).toBe('DEBIT');
+    expect(
+      inferTrntype({ description: 'GUSTO PAYROLL', amountCents: -5_000n, isCreditCard: true }),
+    ).toBe('DIRECTDEP');
+  });
+  it('plain DEPOSIT is money in only too', () => {
+    // Skipped by the direct-deposit rule (money out) — must not fall through
+    // to the plain-deposit rule and come out as a money-in DEP.
+    expect(
+      getTrntypeReason({ description: 'DIRECT DEPOSIT REVERSAL', amountCents: -320_000n }),
+    ).toBe('sign-fallback:negative');
+    expect(inferTrntype({ description: 'DEPOSIT RETURNED', amountCents: -50_000n })).toBe('DEBIT');
+    expect(inferTrntype({ description: 'MOBILE DEPOSIT', amountCents: 50_000n })).toBe('DEP');
+    expect(inferTrntype({ description: 'BRANCH DEPOSITS', amountCents: 50_000n })).toBe('DEP');
+    // Credit card: a positive amount is a charge (money out), not a DEP.
+    expect(inferTrntype({ description: 'DEPOSIT', amountCents: 5_000n, isCreditCard: true })).toBe(
+      'DEBIT',
+    );
+  });
+  // The word boundaries must not cost the plural / inflected / abbreviated
+  // forms banks print.
+  it.each([
+    ['TRANSFERRED TO SAVINGS', 'XFER', -50_000n],
+    ['ONLINE TRANSFERS', 'XFER', -50_000n],
+    ['ONLINE BILL PAYMT', 'PAYMENT', -10_000n],
+    ['BILL PAYMENTS', 'PAYMENT', -10_000n],
+    ['ONLINE PAYMENTS', 'PAYMENT', -10_000n],
+    ['OVERDRAFT FEES', 'FEE', -3_500n],
+    ['CASH WITHDRAWALS', 'CASH', -10_000n],
+    ['ATM WITHDRAWALS', 'ATM', -6_000n],
+    ['POS PURCHASES', 'POS', -2_500n],
+    ['ACH DEBITS', 'DIRECTDEBIT', -7_500n],
+    ['DIRECT DEPOSITS', 'DIRECTDEP', 320_000n],
+    ['MONTHLY FEES', 'SRVCHG', -1_500n],
+  ] as const)('routes %j to %s', (description, expected, amountCents) => {
+    expect(inferTrntype({ description, amountCents })).toBe(expected);
   });
 });

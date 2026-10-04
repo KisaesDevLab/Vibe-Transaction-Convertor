@@ -19,6 +19,11 @@ export default defineConfig(({ command }) => ({
         target: 'http://localhost:4000',
         changeOrigin: true,
       },
+      // Vibe Auth SSO routes (ADR-027) are mounted at /auth/*, outside /api.
+      '/auth': {
+        target: 'http://localhost:4000',
+        changeOrigin: true,
+      },
     },
   },
   build: {

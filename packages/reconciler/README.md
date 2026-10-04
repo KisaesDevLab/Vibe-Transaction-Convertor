@@ -20,9 +20,14 @@ it answers: do these tie, exactly, in cents?
   with prior-row + amount. Used both by the LLM repair-pass prompt
   (give the model a precise hint) and by the review UI (per-row
   "off by $X" badge).
-- **Heuristic repair candidates**: small set of corrections (single
-  sign-flip, drop-one-row) that often resolve a single-cent or
-  single-row error without an LLM round-trip.
+- **Heuristic repair candidates**: small set of corrections that often
+  resolve a single-row error without an LLM round-trip — a sign flip
+  only when exactly one row's flip closes the gap, and a drop only of an
+  exact duplicate row (same amount, description and date). Anything
+  ambiguous returns no candidate; the worker puts any applied
+  heuristic repair behind a review hold.
+- **Verified gate**: `verified` requires the balance to tie AND zero
+  out-of-period rows (BuildPlan Phase 16 #2).
 
 ## Public API
 

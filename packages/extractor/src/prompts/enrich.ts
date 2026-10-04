@@ -191,7 +191,10 @@ export const enrichmentSystemPromptFor = (ctx: PromptContext): string => {
   // account-context.
   if (ctx.mode === 'full' && isNonEmpty(ctx.fullSystemPromptOverride)) {
     const categoriesText = renderCategoriesList(ctx.categories);
-    let prompt = ctx.fullSystemPromptOverride.replace(/\{\{categories\}\}/g, categoriesText);
+    // Replacer FUNCTION, not a replacement string: admin-entered category text
+    // containing `$&`, `$'`, `` $` `` or `$$` must be inserted literally, not
+    // interpreted as String.prototype.replace substitution patterns.
+    let prompt = ctx.fullSystemPromptOverride.replace(/\{\{categories\}\}/g, () => categoriesText);
     if (ctx.accountType) {
       prompt += `\n\n${accountContextSection(ctx.accountType)}`;
     }

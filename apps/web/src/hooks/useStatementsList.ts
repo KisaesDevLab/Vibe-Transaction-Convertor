@@ -41,8 +41,9 @@ export interface StatementSummary {
   // the Re-extract dialog can pre-fill the strategy picker.
   processingStrategyOverride: PdfProcessingStrategy | null;
   // true when the source PDF has been removed from disk (admin Delete-
-  // PDF, statement delete on a sibling, or retention sweep). The row
-  // and its transactions remain; the viewer and re-extract are blocked.
+  // PDF on a statement sharing the same stored file, or the retention
+  // sweep). The row and its transactions remain; the viewer and
+  // re-extract are blocked until the same PDF is re-uploaded.
   sourcePdfDeleted: boolean;
   errorMessage: string | null;
   createdAt: string;
@@ -119,25 +120,61 @@ export const useStatementsByAccount = (accountId: string) =>
 
 const TERMINAL_STATUSES = new Set(['review', 'exported', 'failed', 'awaiting-locale-confirmation']);
 
+export interface StatementDetail {
+  statement: StatementSummary;
+  transactions: TransactionRow[];
+  // Admin-tunable review.confidence_threshold (0–1; 0 disables the hold). The
+  // review grid flags rows below it as "suspect" so its count matches the
+  // server's review hold. Optional for back-compat with older API responses.
+  reviewConfidenceThreshold?: number;
+}
+
 export const useStatement = (statementId: string) =>
   useQuery({
     queryKey: ['statement', statementId],
-    queryFn: () =>
-      api.get<{ statement: StatementSummary; transactions: TransactionRow[] }>(
-        `/api/statements/${statementId}`,
-      ),
+    queryFn: () => api.get<StatementDetail>(`/api/statements/${statementId}`),
     enabled: statementId.length > 0,
     // Poll while the extraction pipeline is running so the operator sees
     // status transitions (uploaded → preprocessing → ocr → extracting →
     // reconciling → review) without manual refresh.
     refetchInterval: (q) => {
-      const data = q.state.data as
-        | { statement: StatementSummary; transactions: TransactionRow[] }
-        | undefined;
+      const data = q.state.data as StatementDetail | undefined;
       if (!data) return 2_000; // initial load — try again soon
       return TERMINAL_STATUSES.has(data.statement.status) ? false : 3_000;
     },
   });
+
+// Client mirror of the server's export gate (services/exports.ts: Golden Rule +
+// review hold, plus the review/exported status gate). Returns why export is
+// blocked, or null when the statement can be exported. Status comes first: a
+// stale 'verified' reconciliation on a statement that is re-extracting, failed,
+// or awaiting the date-format confirmation must not enable the export buttons.
+export const exportBlockReason = (
+  s: Pick<
+    StatementSummary,
+    'status' | 'reconciliationStatus' | 'reviewHoldReason' | 'reviewHoldAcknowledged'
+  >,
+): string | null => {
+  if (s.status !== 'review' && s.status !== 'exported') {
+    if (s.status === 'awaiting-locale-confirmation') {
+      return 'Confirm the source date format before exporting.';
+    }
+    if (s.status === 'failed') {
+      return 'Extraction failed — re-extract the statement before exporting.';
+    }
+    return `Statement is still processing (${s.status}) — export unlocks once it reaches review.`;
+  }
+  if (s.reconciliationStatus === 'discrepancy') {
+    return 'Reconciliation is in discrepancy — fix the rows or override the reconciliation before exporting.';
+  }
+  if (s.reconciliationStatus !== 'verified' && s.reconciliationStatus !== 'overridden') {
+    return 'Reconciliation is not verified — fix discrepancies or override before export.';
+  }
+  if (s.reviewHoldReason && !s.reviewHoldAcknowledged) {
+    return 'Review hold — acknowledge the flagged page(s) before exporting.';
+  }
+  return null;
+};
 
 export interface TransactionPatch {
   description?: string;
@@ -308,11 +345,11 @@ export interface DeleteStatementResult {
 }
 
 // Admin-only delete of just the source PDF, leaving the statement row
-// and transactions intact. Cascades the sourcePdfDeleted flag to every
-// sibling statement that shared the same source_pdf_hash so the UI on
-// those rows stops promising a viewable PDF. Idempotent — calling it
-// twice returns { fileRemoved: false, alreadyDeleted: true } the
-// second time.
+// and transactions intact. Flags sourcePdfDeleted on every statement
+// that points at the same stored file (split children / same-month
+// re-uploads share it) so their UI stops promising a viewable PDF.
+// Idempotent — calling it twice returns { fileRemoved: false,
+// alreadyDeleted: true } the second time.
 export interface DeletePdfResult {
   ok: boolean;
   fileRemoved: boolean;
@@ -336,9 +373,9 @@ export const useDeleteStatementPdf = () => {
 };
 
 // Admin-only hard delete of a statement. Cascades transactions +
-// export_jobs at the DB level, unconditionally unlinks the source PDF,
-// and flips sourcePdfDeleted=true on every sibling statement sharing
-// the same content hash so dedupe siblings don't hold a stale path.
+// export_jobs at the DB level. The source PDF is unlinked only when no
+// other statement still uses the same stored file (split children and
+// same-month re-uploads share one); sibling rows are left untouched.
 //
 // Takes the id at mutation time so the same hook instance can be shared
 // across a list view (one hook, N rows). Both the review page and the
@@ -355,11 +392,38 @@ export const useDeleteStatement = () => {
   });
 };
 
+export interface RecomputeReconciliationResult {
+  status: string;
+  deltaCents: string;
+  // false when the server left the verdict alone — a sticky operator override,
+  // or no balances extracted yet — and `status` is the unchanged one. Absent
+  // when the reconciliation was recomputed.
+  recomputed?: boolean;
+}
+
+// The toast for a recompute. A not-recomputed answer must not read as a fresh
+// verdict (e.g. 'pending (Δ 0¢)' looking balanced), so it gets an info toast
+// saying why nothing ran.
+export const recomputeToast = (
+  r: RecomputeReconciliationResult,
+): { kind: 'success' | 'info'; message: string } => {
+  if (r.recomputed === false) {
+    return {
+      kind: 'info',
+      message:
+        r.status === 'overridden'
+          ? 'Override is sticky — not recomputed'
+          : 'No balances extracted yet — nothing to recompute',
+    };
+  }
+  return { kind: 'success', message: `Reconciliation: ${r.status} (Δ ${r.deltaCents}¢)` };
+};
+
 export const useRecomputeReconciliation = (statementId: string) => {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: () =>
-      api.post<{ status: string; deltaCents: string }>(
+      api.post<RecomputeReconciliationResult>(
         `/api/statements/${statementId}/recompute-reconciliation`,
       ),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['statement', statementId] }),

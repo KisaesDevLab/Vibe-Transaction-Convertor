@@ -87,6 +87,32 @@ const baseSelect = () =>
     .from(auditLog)
     .leftJoin(users, eq(auditLog.actorUserId, users.id));
 
+// Row cap for the download endpoints (the paged list endpoint is capped at
+// 500 per page). Extraction-step rows carry payloads of up to ~64 KB and an
+// export is materialised and serialised in memory, so the cap bounds the
+// worst case (~128 MB of payload). A download that hits it is flagged as
+// truncated — narrow the date range to fetch the rest.
+export const AUDIT_EXPORT_MAX_ROWS = 2000;
+
+// Newest AUDIT_EXPORT_MAX_ROWS events matching the request's filters (paging
+// params ignored), plus whether more matched than were returned.
+const exportRows = async (rawQuery: Record<string, unknown>) => {
+  const q = parseQuery(rawQuery);
+  const { limit: _limit, offset: _offset, ...filters } = q;
+  const where = buildWhere(q);
+  // One row past the cap detects truncation without a second COUNT query.
+  const fetched = await baseSelect()
+    .where(where)
+    .orderBy(desc(auditLog.at))
+    .limit(AUDIT_EXPORT_MAX_ROWS + 1);
+  const truncated = fetched.length > AUDIT_EXPORT_MAX_ROWS;
+  return {
+    rows: truncated ? fetched.slice(0, AUDIT_EXPORT_MAX_ROWS) : fetched,
+    truncated,
+    filters,
+  };
+};
+
 export const auditRouter = (): Router => {
   const router = Router();
   router.use(requireAdmin);
@@ -154,20 +180,24 @@ export const auditRouter = (): Router => {
   });
 
   // Phase 25 #8/#9: download a filtered audit set. JSON for forensic
-  // tooling, CSV for spreadsheet review.
+  // tooling, CSV for spreadsheet review. Both carry the
+  // x-audit-export-truncated header; JSON also has `truncated` in the body.
   router.get('/export.json', async (req, res, next) => {
     try {
-      const q = parseQuery({ ...req.query, limit: '5000' });
-      const where = buildWhere(q);
-      const rows = await (where
-        ? baseSelect().where(where).orderBy(desc(auditLog.at)).limit(q.limit)
-        : baseSelect().orderBy(desc(auditLog.at)).limit(q.limit));
+      const { rows, truncated, filters } = await exportRows(req.query as Record<string, unknown>);
       res.setHeader('content-type', 'application/json; charset=utf-8');
       res.setHeader(
         'content-disposition',
         `attachment; filename="audit-${new Date().toISOString().slice(0, 10)}.json"`,
       );
-      res.json({ rows, exportedAt: new Date().toISOString(), filters: q });
+      res.setHeader('x-audit-export-truncated', String(truncated));
+      res.json({
+        rows,
+        exportedAt: new Date().toISOString(),
+        filters,
+        truncated,
+        maxRows: AUDIT_EXPORT_MAX_ROWS,
+      });
     } catch (err) {
       next(err);
     }
@@ -175,11 +205,7 @@ export const auditRouter = (): Router => {
 
   router.get('/export.csv', async (req, res, next) => {
     try {
-      const q = parseQuery({ ...req.query, limit: '5000' });
-      const where = buildWhere(q);
-      const rows = await (where
-        ? baseSelect().where(where).orderBy(desc(auditLog.at)).limit(q.limit)
-        : baseSelect().orderBy(desc(auditLog.at)).limit(q.limit));
+      const { rows, truncated } = await exportRows(req.query as Record<string, unknown>);
       const escape = (v: unknown): string => {
         if (v === null || v === undefined) return '';
         const s = typeof v === 'string' ? v : JSON.stringify(v);
@@ -220,6 +246,7 @@ export const auditRouter = (): Router => {
         'content-disposition',
         `attachment; filename="audit-${new Date().toISOString().slice(0, 10)}.csv"`,
       );
+      res.setHeader('x-audit-export-truncated', String(truncated));
       res.send(csv);
     } catch (err) {
       next(err);

@@ -1,6 +1,6 @@
 # Reviewing transactions
 
-The review page (`/statements/<id>`) is where you spend most of your time: a transaction grid on the left, the source PDF on the right, and a sticky reconciliation widget showing whether the math balances.
+The review page (`/statements/<id>`) is where you spend most of your time: a transaction grid with the source PDF viewer beneath it (admins), and a reconciliation widget showing whether the math balances.
 
 ## The grid
 
@@ -11,9 +11,9 @@ Each row is one transaction the LLM extracted. Columns:
 - **Type** — TRNTYPE (DEBIT, CREDIT, XFER, CHECK, etc.). Inline dropdown when editing.
 - **Check #** — when the LLM saw a check number.
 - **Amount** — color-coded red for debits, emerald for credits.
-- **Running** — running balance the LLM read from the PDF. When the per-row running balance doesn't match `prior + amount`, the row gets a red dot in the **Conf** column.
-- **Pg** — source page number; click any cell to highlight that location in the PDF viewer.
-- **Conf** — confidence dot. Yellow at < 0.7 (LLM was unsure); red on running-balance mismatch.
+- **Running** — running balance the LLM read from the PDF. When the per-row running balance doesn't match `prior + amount`, the cell shows an amber "off by $X" badge.
+- **Pg** — source page number; click the row to show that page in the PDF viewer.
+- **Conf** — confidence dot. Amber when the LLM's confidence is below the review confidence threshold (admin setting, default 0.7 — the same cutoff that puts a statement on review hold); pale amber below 0.95; green otherwise.
 
 ## Editing
 
@@ -38,6 +38,8 @@ If **Auto-save** is on (toolbar checkbox, persisted in localStorage), edits comm
 | `?`   | Open the keyboard-shortcuts overlay |
 | `/`   | Focus the search/filter field       |
 
+Hot-keys are bare keys: with Ctrl, Cmd or Alt held the browser's own shortcut runs instead (Ctrl+R still reloads), and keys typed into a field are ignored.
+
 ## Filters
 
 The toolbar has:
@@ -45,7 +47,7 @@ The toolbar has:
 - **Description filter** — substring match.
 - **Type filter** — single TRNTYPE.
 - **Edited only** — rows the user has touched.
-- **Suspect only** — rows where the LLM confidence < 0.7.
+- **Suspect only** — rows whose LLM confidence is below the review confidence threshold (default 0.7).
 - **Amount range** — min/max in dollars (parsed leniently; bad input is ignored, not erroring).
 
 ## Bulk operations
@@ -54,7 +56,7 @@ The toolbar has:
 
 ## PDF viewer
 
-Right-side panel. Selecting a row scrolls the PDF to that page and draws a yellow box over the LLM's reported `source_bbox`. Clicking on the PDF picks the closest matching transaction. Use `+` / `-` to zoom, arrow keys to page, the toolbar selector to switch between fit-width / fit-page / manual zoom.
+Below the grid, for admins only — the source PDF is admin-restricted, so other users see a notice instead. Selecting a row jumps the PDF to that row's source page. When the extraction recorded a location (`source_bbox`) for the row, a yellow box also outlines it and clicking on the PDF picks the closest such transaction; most extractions don't record locations yet, so expect page-level navigation only. Use `+` / `-` to zoom, arrow keys to page, the toolbar selector to switch between fit-width / fit-page / manual zoom (fit-page fits the whole page within the window height).
 
 ## Re-extract
 

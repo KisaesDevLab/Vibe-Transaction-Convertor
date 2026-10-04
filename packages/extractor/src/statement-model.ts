@@ -13,6 +13,114 @@ import { schemas } from '@vibe-tx-converter/shared';
 
 type ExtractionResult = schemas.extraction.ExtractionResult;
 type Trntype = schemas.extraction.Trntype;
+type SourceDateFormat = schemas.extraction.SourceDateFormat;
+
+// Day/month order of a statement's numeric dates: the model's declared
+// source_date_format (when MDY/DMY/YMD) or the operator's confirmation after an
+// AMBIGUOUS halt (dateFormatOverride).
+export type DateOrder = 'MDY' | 'DMY' | 'YMD';
+
+// Common spellings of a declared source_date_format, keyed by their upper-cased
+// letters only ("MM/DD/YYYY" → MMDDYYYY, "yyyy-mm-dd" → YYYYMMDD, "ISO 8601" →
+// ISO). Keys are upper-case only, so no Object.prototype member can collide.
+const DATE_FORMAT_ALIASES: Readonly<Record<string, SourceDateFormat>> = {
+  MDY: 'MDY',
+  MMDDYYYY: 'MDY',
+  MMDDYY: 'MDY',
+  MMDD: 'MDY',
+  MDYYYY: 'MDY',
+  MDYY: 'MDY',
+  MD: 'MDY',
+  DMY: 'DMY',
+  DDMMYYYY: 'DMY',
+  DDMMYY: 'DMY',
+  DDMM: 'DMY',
+  DMYYYY: 'DMY',
+  DMYY: 'DMY',
+  DM: 'DMY',
+  YMD: 'YMD',
+  YYYYMMDD: 'YMD',
+  YYMMDD: 'YMD',
+  YYYYMD: 'YMD',
+  ISO: 'YMD',
+  TEXTUAL: 'TEXTUAL',
+  AMBIGUOUS: 'AMBIGUOUS',
+};
+
+// The model's declared source_date_format (any common spelling, any case) → the
+// enum; null when missing or unrecognized (callers treat that as AMBIGUOUS, so
+// the statement halts for locale confirmation rather than guessing).
+export const normalizeDeclaredDateFormat = (v: unknown): SourceDateFormat | null =>
+  typeof v === 'string'
+    ? (DATE_FORMAT_ALIASES[v.toUpperCase().replace(/[^A-Z]/g, '')] ?? null)
+    : null;
+
+const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+// A real calendar date in ISO form (rejects 2026-02-30 / 2026-13-01).
+export const isValidIsoDate = (s: unknown): s is string => {
+  if (typeof s !== 'string' || !ISO_DATE_RE.test(s)) return false;
+  const [y, m, d] = s.split('-').map(Number);
+  if (m! < 1 || m! > 12 || d! < 1 || d! > 31) return false;
+  const dt = new Date(Date.UTC(y!, m! - 1, d!));
+  return dt.getUTCFullYear() === y && dt.getUTCMonth() === m! - 1 && dt.getUTCDate() === d;
+};
+
+// Normalize one emitted/printed date to ISO (YYYY-MM-DD), honoring the
+// statement's date order. Valid ISO passes through; a four-digit-year-first
+// date (2025/3/5) is year-month-day in every convention. For D/M vs M/D:
+//   - order DMY / MDY → read strictly that way (an impossible reading → null);
+//   - order YMD → YY/MM/DD when the last group is a 2-digit year;
+//   - order unknown (TEXTUAL / AMBIGUOUS / undeclared) → a component > 12
+//     fixes the reading; when both are <= 12 (and differ) it is read as
+//     month/day (v1 is en-US) and flagged `ambiguous` so the caller can surface
+//     it for review instead of silently guessing.
+// iso=null when unreadable.
+export const normalizeStatementDate = (
+  s: unknown,
+  order?: DateOrder,
+): { iso: string | null; ambiguous: boolean } => {
+  if (isValidIsoDate(s)) return { iso: s, ambiguous: false };
+  if (typeof s !== 'string') return { iso: null, ambiguous: false };
+  const t = s.trim();
+  const build = (y: string, mo: string, d: string): string | null => {
+    const iso = `${y}-${mo.padStart(2, '0')}-${d.padStart(2, '0')}`;
+    return isValidIsoDate(iso) ? iso : null;
+  };
+  const ymd = t.match(/^(\d{4})[/\-.](\d{1,2})[/\-.](\d{1,2})$/);
+  if (ymd) return { iso: build(ymd[1]!, ymd[2]!, ymd[3]!), ambiguous: false };
+  const m = t.match(/^(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{2}|\d{4})$/);
+  if (!m) return { iso: null, ambiguous: false };
+  const a = m[1]!;
+  const b = m[2]!;
+  const c = m[3]!;
+  if (order === 'YMD' && c.length === 2) {
+    return { iso: build(`20${a.padStart(2, '0')}`, b, c), ambiguous: false };
+  }
+  const year = c.length === 2 ? `20${c}` : c;
+  const na = Number(a);
+  const nb = Number(b);
+  let monthFirst = true;
+  let ambiguous = false;
+  if (order === 'DMY') monthFirst = false;
+  else if (order !== 'MDY') {
+    // Unknown order (or YMD contradicted by a trailing 4-digit year).
+    if (na > 12 && nb <= 12) monthFirst = false;
+    else if (!(nb > 12 && na <= 12)) ambiguous = na !== nb && na <= 12 && nb <= 12;
+  }
+  const iso = monthFirst ? build(year, a, b) : build(year, b, a);
+  return { iso, ambiguous: iso !== null && ambiguous };
+};
+
+const ORDER_WORDS: Record<DateOrder, string> = {
+  MDY: 'month/day/year',
+  DMY: 'day/month/year',
+  YMD: 'year/month/day',
+};
+
+// The per-page user-message line that carries an operator-confirmed date order
+// to the statement model (which has no system prompt of ours to put it in).
+export const statementDateOrderLine = (order: DateOrder): string =>
+  `Dates on this statement are written in ${order} order (${ORDER_WORDS[order]}).`;
 
 // The `format` we send on /api/chat — the model's native shape. Sent as
 // reinforcement; the model emits this shape with or without it.
@@ -88,7 +196,6 @@ const TRNTYPE_MAP: Record<string, Trntype> = {
   OTHER: 'OTHER',
 };
 
-const DATE_FORMATS = new Set(['MDY', 'DMY', 'YMD', 'TEXTUAL', 'AMBIGUOUS']);
 const ISO = /^\d{4}-\d{2}-\d{2}$/;
 
 interface StatementModelRaw {
@@ -185,22 +292,36 @@ const str = (v: unknown): string | null => (typeof v === 'string' && v.length > 
 const intOrNull = (v: unknown): number | null =>
   typeof v === 'number' && Number.isFinite(v) ? Math.round(v) : null;
 
+export interface MapStatementModelOptions {
+  // Operator-confirmed date order (after an AMBIGUOUS halt). Drives how numeric
+  // row dates are read and forces source_date_format to { override, 1 }.
+  dateFormatOverride?: DateOrder | undefined;
+}
+
 // Map the statement model's native output to our internal ExtractionResult shape.
 // Returns a plain object; the caller runs ExtractionResult.parse() on it so Zod
 // validation, defaults, and the trntype/date normalization still apply. Rows
 // without a numeric amount are dropped (and noted) rather than failing the batch.
-export const mapStatementModelOutput = (raw: StatementModelRaw): Record<string, unknown> => {
+export const mapStatementModelOutput = (
+  raw: StatementModelRaw,
+  opts: MapStatementModelOptions = {},
+): Record<string, unknown> => {
   const docConfidence = (() => {
     const c = raw.confidence;
     return typeof c === 'number' && c >= 0 && c <= 1 ? c : 0.8;
   })();
-  const fmt =
-    typeof raw.source_date_format === 'string' && DATE_FORMATS.has(raw.source_date_format)
-      ? raw.source_date_format
-      : 'AMBIGUOUS';
+  const fmt = normalizeDeclaredDateFormat(raw.source_date_format) ?? 'AMBIGUOUS';
+  // How numeric dates are read: the operator's confirmed order, else the
+  // model's declared one; undefined (TEXTUAL / AMBIGUOUS) = infer per date.
+  const order: DateOrder | undefined =
+    opts.dateFormatOverride ??
+    (fmt === 'MDY' || fmt === 'DMY' || fmt === 'YMD' ? (fmt as DateOrder) : undefined);
   const acctNum = str(raw.account?.account_number);
   const acctType = raw.account?.account_type;
-  const periodStart = str(raw.period?.start_date);
+  // period.start/end are required ISO dates; normalized with the same order as
+  // the rows (null when absent/unreadable → derived from the row dates below).
+  const isoStart = normalizeStatementDate(raw.period?.start_date, order).iso;
+  const isoEnd = normalizeStatementDate(raw.period?.end_date, order).iso;
 
   // Balance-marker rows ("Beginning/Opening/Previous Balance") are not
   // transactions — some models emit them with the opening figure in the amount
@@ -211,6 +332,8 @@ export const mapStatementModelOutput = (raw: StatementModelRaw): Record<string, 
 
   let amountDropped = 0;
   let dateDropped = 0;
+  let dateDefaulted = 0;
+  let dateAmbiguous = 0;
   const transactions = (raw.transactions ?? [])
     .map((t) => {
       const amount = intOrNull(t.amount_cents);
@@ -220,9 +343,16 @@ export const mapStatementModelOutput = (raw: StatementModelRaw): Record<string, 
       }
       const descText = str(t.source_text) ?? str(t.payee) ?? '';
       if (BALANCE_MARKER.test(descText)) return null; // not a transaction
-      const date = str(t.date);
-      const postedDate =
-        date && ISO.test(date) ? date : periodStart && ISO.test(periodStart) ? periodStart : null;
+      // Format-aware read of the row date (honors the override / declared
+      // order). A row with no readable date falls back to the statement start
+      // date — counted and surfaced in notes so it holds for review, never silent.
+      const norm = normalizeStatementDate(t.date, order);
+      if (norm.ambiguous) dateAmbiguous += 1;
+      let postedDate = norm.iso;
+      if (postedDate === null && isoStart !== null) {
+        postedDate = isoStart;
+        dateDefaulted += 1;
+      }
       const trntypeRaw =
         typeof t.trntype === 'string' ? TRNTYPE_MAP[t.trntype.toUpperCase()] : undefined;
       const description = (descText || '[unreadable]').slice(0, 500);
@@ -253,17 +383,15 @@ export const mapStatementModelOutput = (raw: StatementModelRaw): Record<string, 
       return true;
     });
 
-  // period.start/end are required ISO dates. A whole-statement call may not
-  // surface the header prose (the header-crop read does, in the full pipeline),
-  // so derive the bounds from the transaction dates when the model omits them.
-  const isoStart = str(raw.period?.start_date);
-  const isoEnd = str(raw.period?.end_date);
+  // A whole-statement call may not surface the header prose (the header-crop
+  // read does, in the full pipeline), so the period bounds are derived from the
+  // transaction dates below when the model omits them.
 
   // Cross-page year drift: per-page calls past page 1 don't see the period
   // header, so the model guesses the year (e.g. 2023 instead of 2026). When the
   // statement period is known, snap each transaction's year to whichever
   // period-boundary year places the MM-DD inside the period.
-  if (isoStart && ISO.test(isoStart) && isoEnd && ISO.test(isoEnd)) {
+  if (isoStart && isoEnd) {
     const yStart = isoStart.slice(0, 4);
     const yEnd = isoEnd.slice(0, 4);
     const years = yStart === yEnd ? [yStart] : [yStart, yEnd];
@@ -284,8 +412,8 @@ export const mapStatementModelOutput = (raw: StatementModelRaw): Record<string, 
     .map((t) => t.posted_date)
     .filter((d): d is string => typeof d === 'string' && ISO.test(d))
     .sort();
-  const periodStartOut = isoStart && ISO.test(isoStart) ? isoStart : (txDates[0] ?? null);
-  const periodEndOut = isoEnd && ISO.test(isoEnd) ? isoEnd : (txDates[txDates.length - 1] ?? null);
+  const periodStartOut = isoStart ?? txDates[0] ?? null;
+  const periodEndOut = isoEnd ?? txDates[txDates.length - 1] ?? null;
 
   // Deterministic reconciliation: the per-page model can't see the whole
   // statement's balances, so derive them from the running-balance chain when
@@ -319,12 +447,30 @@ export const mapStatementModelOutput = (raw: StatementModelRaw): Record<string, 
       opening_cents: modelOpening ?? derivedOpening ?? 0,
       closing_cents: derivedClosing ?? modelClosing ?? 0,
     },
-    source_date_format: { format: fmt, confidence: docConfidence },
+    // The operator's confirmed order is authoritative (the model was told it).
+    source_date_format: opts.dateFormatOverride
+      ? { format: opts.dateFormatOverride, confidence: 1 }
+      : { format: fmt, confidence: docConfidence },
     transactions,
   };
   const noteParts: string[] = [];
   if (amountDropped > 0) noteParts.push(`${amountDropped} row(s) dropped: no readable amount`);
   if (dateDropped > 0) noteParts.push(`${dateDropped} row(s) dropped: no readable date`);
+  if (dateDefaulted > 0) {
+    noteParts.push(
+      `${dateDefaulted} row(s) had no readable date — set to the statement start date; verify before exporting`,
+    );
+  }
+  if (dateAmbiguous > 0) {
+    noteParts.push(
+      `${dateAmbiguous} row date(s) used an ambiguous day/month order and were read as month/day; verify`,
+    );
+  }
+  // No note when the derived closing disagrees with modelClosing: the merged
+  // value is just the last page that printed one (a per-page call often reports
+  // its own page's last running balance), which the integration doc (§4 step 7,
+  // §5) says not to trust — flagging it would hold complete, reconciling
+  // statements. The chain-derived closing above is authoritative here.
   if (noteParts.length > 0) out.notes = `${noteParts.join('; ')}.`;
   return out;
 };

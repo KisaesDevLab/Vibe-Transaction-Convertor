@@ -1,38 +1,91 @@
-// PDF lifecycle helpers. Centralises the "unlink the file + cascade the
-// source_pdf_deleted flag across every statement that referenced its
-// hash" logic so the standalone Delete-PDF endpoint, the cascade inside
-// statement-delete, and the retention sweep all behave identically.
+// PDF lifecycle helpers for the admin Delete-PDF endpoint and the retention
+// sweep (statement delete has its own reference check in routes/statements).
 //
-// Why a single helper: getting the cascade wrong (e.g. only flipping
-// the flag on the targeted row) leaves sibling rows pointing at a
-// vanished file — the PDF viewer 404s and re-extract dies opaquely.
+// Everything here works per stored FILE, not per content hash. storePdf files
+// PDFs under uploads/yyyy/mm/<hash>.pdf, so statements with the same hash do
+// not necessarily share a file: split children (and a same-month upload of the
+// identical PDF to another account) share the parent's path, while a re-upload
+// in a later month gets its own copy. A file is unlinked only when it is meant
+// to go, and source_pdf_deleted is flipped only on the statements whose file
+// was actually removed — never on a statement whose own copy is still on disk
+// (its viewer and re-extract would be disabled for nothing, and the file would
+// never be purged).
 
-import { and, eq, lt, sql } from 'drizzle-orm';
-import { unlink } from 'node:fs/promises';
+import { and, eq, gte, inArray, lt, or, sql } from 'drizzle-orm';
+import { stat, unlink } from 'node:fs/promises';
 
 import type { Db } from '../db/client.js';
 import { statements } from '../db/schema.js';
+import { InternalError } from '../lib/errors.js';
+import { logger } from '../lib/logger.js';
 
 import { readSettingPlain, upsertSetting } from './system-settings.js';
 
 const RETENTION_DAYS_KEY = 'pdf.retention.days';
 const LAST_SWEEP_KEY = 'pdf.retention.last_sweep_at';
 
+// Statuses in which an extraction is queued or running and will read the
+// source PDF. The sweep never pulls a file out from under one.
+const IN_FLIGHT_STATUSES: Array<(typeof statements.$inferSelect)['status']> = [
+  'uploaded',
+  'preprocessing',
+  'ocr',
+  'extracting',
+  'reconciling',
+];
+
 export interface PdfDeleteResult {
-  // Whether the file at sourcePdfPath was successfully unlinked. False
-  // when the file was already gone (best-effort delete) or when the
-  // statement was already marked deleted on entry.
+  // Whether the file at sourcePdfPath was unlinked by this call. False when
+  // it was already missing on disk, or when the statement was already marked
+  // deleted on entry.
   fileRemoved: boolean;
-  // Sibling statements (same source_pdf_hash, different id) whose flag
-  // was flipped to true in this call. Zero when no siblings exist or
-  // when they were all already marked deleted.
+  // Other statements sharing the same stored file (same sourcePdfPath) whose
+  // flag was flipped in this call. Statements holding their own copy of the
+  // same content are left alone.
   cascadedSiblings: number;
 }
 
-// Unlink the file and mark every statement that referenced its hash
-// (including the row identified by `targetId`) as source_pdf_deleted.
-// Idempotent: re-running on an already-deleted row is a no-op that
-// returns fileRemoved=false and cascadedSiblings=0.
+type UnlinkOutcome = 'removed' | 'missing' | 'failed';
+
+// 'missing' (ENOENT) counts as gone; any other error means the file is still
+// on disk and nothing may be flagged.
+const unlinkStoredPdf = async (path: string): Promise<UnlinkOutcome> => {
+  try {
+    await unlink(path);
+    return 'removed';
+  } catch (err) {
+    if ((err as { code?: string }).code === 'ENOENT') return 'missing';
+    logger.warn({ err }, 'could not unlink source PDF');
+    return 'failed';
+  }
+};
+
+// Whether the file at `path` was written at or after `since` (by mtime). A
+// missing or unreadable file is not "recent": unlinkStoredPdf then reports it
+// missing (flag it) or failed (leave it for the next sweep).
+const storedSince = async (path: string, since: Date): Promise<boolean> => {
+  try {
+    return (await stat(path)).mtimeMs >= since.getTime();
+  } catch {
+    return false;
+  }
+};
+
+// Flag every not-yet-flagged statement that points at `path`. Returns the
+// flipped statement ids.
+const flagStatementsUsingPath = async (db: Db, path: string): Promise<string[]> => {
+  const flipped = await db
+    .update(statements)
+    .set({ sourcePdfDeleted: true, updatedAt: sql`now()` })
+    .where(and(eq(statements.sourcePdfPath, path), eq(statements.sourcePdfDeleted, false)))
+    .returning({ id: statements.id });
+  return flipped.map((r) => r.id);
+};
+
+// Admin Delete-PDF: unlink the targeted statement's file and flag every
+// statement that uses that same file. Idempotent: an already-deleted row is a
+// no-op (fileRemoved=false, cascadedSiblings=0) — its old path may by now hold
+// a newer upload of the same content, which must keep its file.
 export const deletePdfForStatement = async (
   db: Db,
   targetId: string,
@@ -42,34 +95,21 @@ export const deletePdfForStatement = async (
     sourcePdfDeleted: boolean;
   },
 ): Promise<PdfDeleteResult> => {
-  let fileRemoved = false;
-  if (!stmt.sourcePdfDeleted) {
-    try {
-      await unlink(stmt.sourcePdfPath);
-      fileRemoved = true;
-    } catch {
-      // Already gone / missing — non-fatal. Still flip the flag below
-      // so the UI stops promising the operator a viewable PDF.
-    }
+  if (stmt.sourcePdfDeleted) return { fileRemoved: false, cascadedSiblings: 0 };
+  const outcome = await unlinkStoredPdf(stmt.sourcePdfPath);
+  if (outcome === 'failed') {
+    // Still on disk: flagging it would tell the operator the PDF is gone.
+    throw new InternalError(
+      'could not remove the source PDF from disk — nothing was changed; try again',
+    );
   }
-  // Update *every* row sharing the hash (including the target) so the
-  // call is single-statement and the cascade can't half-apply. The
-  // `eq(sourcePdfDeleted, false)` guard makes the count meaningful
-  // (only rows that actually changed are returned).
-  const flipped = await db
-    .update(statements)
-    .set({ sourcePdfDeleted: true, updatedAt: sql`now()` })
-    .where(
-      and(eq(statements.sourcePdfHash, stmt.sourcePdfHash), eq(statements.sourcePdfDeleted, false)),
-    )
-    .returning({ id: statements.id });
-  // Siblings = flipped rows minus the target row (the target counts as
-  // 1 of N flips when it wasn't already marked).
-  const cascadedSiblings = Math.max(
-    0,
-    flipped.length - (flipped.some((r) => r.id === targetId) ? 1 : 0),
-  );
-  return { fileRemoved, cascadedSiblings };
+  // An already-missing file is still flagged so the UI stops promising a
+  // viewable PDF.
+  const flipped = await flagStatementsUsingPath(db, stmt.sourcePdfPath);
+  return {
+    fileRemoved: outcome === 'removed',
+    cascadedSiblings: flipped.filter((id) => id !== targetId).length,
+  };
 };
 
 // Retention setting: integer ≥ 1 (days). null / 0 / NaN → disabled.
@@ -93,17 +133,20 @@ export const getLastSweepAt = async (db: Db): Promise<string | null> => {
   return v ?? null;
 };
 
+// actorUserId null = the nightly cron (system write; updated_by_user_id stays
+// NULL — it's a uuid FK, so no sentinel string).
 const recordLastSweepAt = async (db: Db, actorUserId: string | null): Promise<void> => {
-  await upsertSetting(db, LAST_SWEEP_KEY, new Date().toISOString(), actorUserId ?? 'system');
+  await upsertSetting(db, LAST_SWEEP_KEY, new Date().toISOString(), actorUserId);
 };
 
 export interface RetentionSweepResult {
   ranAt: string;
   retentionDays: number | null;
-  // Statements considered = rows older than cutoff with PDF still on
-  // disk. Files removed counts successful unlinks.
+  // Statements past the retention window whose PDF was still on disk.
   candidates: number;
+  // Files actually unlinked by this run.
   filesRemoved: number;
+  // Statements flagged source_pdf_deleted by this run.
   rowsFlipped: number;
   // When retention is disabled, we return immediately without scanning.
   skipped: 'disabled' | null;
@@ -129,36 +172,41 @@ export const runRetentionSweep = async (
     };
   }
   const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
-  // One row per unique (hash, path) so we don't try to unlink the same
-  // file twice. Picking MIN(id) per hash is arbitrary — the file is
-  // shared; any row's path works.
   const candidates = await db
-    .select({
-      id: statements.id,
-      sourcePdfHash: statements.sourcePdfHash,
-      sourcePdfPath: statements.sourcePdfPath,
-      sourcePdfDeleted: statements.sourcePdfDeleted,
-    })
+    .select({ sourcePdfPath: statements.sourcePdfPath })
     .from(statements)
     .where(and(lt(statements.createdAt, cutoff), eq(statements.sourcePdfDeleted, false)));
 
-  // Deduplicate by hash — pick the first occurrence; the helper will
-  // cascade the flag to the rest. Avoids double-unlink + redundant SQL.
-  const seenHashes = new Set<string>();
-  const byHash: typeof candidates = [];
-  for (const c of candidates) {
-    if (seenHashes.has(c.sourcePdfHash)) continue;
-    seenHashes.add(c.sourcePdfHash);
-    byHash.push(c);
-  }
+  // A file is purged only once EVERY statement still using it is past the
+  // window — a recent split child or same-month re-upload keeps it alive —
+  // and none of them is mid-extraction (e.g. the re-extract a re-upload
+  // enabled is reading it).
+  const inUse = await db
+    .selectDistinct({ sourcePdfPath: statements.sourcePdfPath })
+    .from(statements)
+    .where(
+      and(
+        eq(statements.sourcePdfDeleted, false),
+        or(gte(statements.createdAt, cutoff), inArray(statements.status, IN_FLIGHT_STATUSES)),
+      ),
+    );
+  const pathsInUse = new Set(inUse.map((r) => r.sourcePdfPath));
 
   let filesRemoved = 0;
   let rowsFlipped = 0;
-  for (const c of byHash) {
-    const r = await deletePdfForStatement(db, c.id, c);
-    if (r.fileRemoved) filesRemoved += 1;
-    // Each call flips this row + N siblings. Count both.
-    rowsFlipped += 1 + r.cascadedSiblings;
+  // One pass per stored file (several statements can share one).
+  for (const path of new Set(candidates.map((c) => c.sourcePdfPath))) {
+    if (pathsInUse.has(path)) continue;
+    // A file stored within the window is not past retention, however old its
+    // statements are: re-uploading a purged PDF restores it onto the ORIGINAL
+    // rows (restoreDeletedSourcePdf keeps their createdAt), and without this
+    // the next nightly run would delete the fresh copy again.
+    if (await storedSince(path, cutoff)) continue;
+    const outcome = await unlinkStoredPdf(path);
+    // Still on disk — leave its statements unflagged; the next sweep retries.
+    if (outcome === 'failed') continue;
+    if (outcome === 'removed') filesRemoved += 1;
+    rowsFlipped += (await flagStatementsUsingPath(db, path)).length;
   }
 
   await recordLastSweepAt(db, actorUserId);

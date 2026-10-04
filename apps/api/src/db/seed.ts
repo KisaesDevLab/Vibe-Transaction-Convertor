@@ -1,5 +1,5 @@
 import { eq } from 'drizzle-orm';
-import { db, pool } from './client.js';
+import { closeDb, db } from './client.js';
 import { systemSettings } from './schema.js';
 
 async function main() {
@@ -18,7 +18,7 @@ async function main() {
 
   // Real seeding (FIDIR, sample firm) lands in Phase 5 / dev fixtures.
 
-  await pool.end();
+  await closeDb();
   // eslint-disable-next-line no-console
   console.log('seed complete');
 }

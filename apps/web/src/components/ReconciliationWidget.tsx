@@ -44,7 +44,11 @@ export function ReconciliationWidget({
   const closing = toCents(stmt.closingBalanceCents);
   const expected = opening + txSumCents;
   const delta = closing - expected;
-  const inFlight = ['preprocessing', 'ocr', 'extracting', 'reconciling'].includes(stmt.status);
+  // 'uploaded' counts as in flight: a queued (re-)extraction has wiped the
+  // transactions, so the delta and the Override control would be stale.
+  const inFlight = ['uploaded', 'preprocessing', 'ocr', 'extracting', 'reconciling'].includes(
+    stmt.status,
+  );
 
   // Discrepancy analysis (only meaningful when delta ≠ 0 and not still running).
   const dtxs: DiscrepancyTx[] = txs.map((t) => ({
@@ -125,7 +129,9 @@ export function ReconciliationWidget({
         </strong>
       </p>
 
-      {stmt.reconciliationStatus === 'discrepancy' && canOverride ? (
+      {stmt.reconciliationStatus === 'discrepancy' &&
+      canOverride &&
+      (stmt.status === 'review' || stmt.status === 'exported') ? (
         <button
           type="button"
           onClick={() => setOpen(true)}

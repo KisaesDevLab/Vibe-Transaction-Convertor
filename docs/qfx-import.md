@@ -16,6 +16,25 @@ Quicken-specific differences vs. QBO:
   This makes the value stable per account across re-exports.
 - `<INTU.BID>` is always emitted, falling back to `3000` when the
   account has no BID on file.
+- `<LEDGERBAL><DTASOF>` is the statement period end (not the upload
+  date).
+
+## Credit-card accounts: amount signs
+
+Credit-card statements are stored in the issuer's sign (charges
+positive, payments negative, owed balance positive) because that is what
+the Golden Rule reconciles. The `.qfx` export — like every other format —
+flips them to the account holder's perspective Quicken expects (OFX spec
+§3.2.9.2): a purchase is `<TRNAMT>-127.83`, a payment `<TRNAMT>500.00`,
+and an owed balance `<BALAMT>-2890.45`. Bank and savings accounts are
+unaffected. See `docs/qbo-import.md` for the full table.
+
+**Credit-card `.qfx` files exported before this fix had every sign
+inverted.** FITIDs did not change (they are derived from the stored
+amounts — ADR-005), so Quicken treats a corrected re-import as duplicates
+of the earlier, wrongly signed transactions and skips them. Delete the
+earlier import's transactions for that statement from the Quicken
+register first, then import the re-exported file.
 
 ## Import steps
 

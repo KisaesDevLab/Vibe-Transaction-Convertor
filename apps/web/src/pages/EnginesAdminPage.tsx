@@ -10,15 +10,12 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 
 import { useToast } from '../components/Toast';
-import { ApiError, api } from '../lib/api';
+import { ApiError, api, fetchReady, type ReadyDependency } from '../lib/api';
 
-interface ReadyCheck {
-  status: 'ok' | 'degraded';
-  dependencies: Record<
-    string,
-    { status: 'ok' | 'fail' | 'unconfigured'; latencyMs?: number; detail?: string }
-  >;
-}
+// Whether the readiness probe produced a usable body. Without one the
+// per-engine pills must not fall back to 'unconfigured' — that would read as
+// "nothing to check" while the real state is unknown.
+type ProbeState = 'loading' | 'unreachable' | 'ok';
 
 interface EngineConfig {
   url: string | null;
@@ -76,9 +73,11 @@ const sourceLabel = (s: EngineConfig['source']): string =>
         : 'unset';
 
 export function EnginesAdminPage() {
+  // fetchReady resolves with the dependency body on 503 too, so a degraded
+  // dependency shows as 'fail' instead of erroring the whole query.
   const ready = useQuery({
     queryKey: ['health', 'ready'],
-    queryFn: () => api.get<ReadyCheck>('/api/health/ready'),
+    queryFn: fetchReady,
     refetchInterval: 5_000,
   });
   const engines = useQuery({
@@ -92,7 +91,11 @@ export function EnginesAdminPage() {
     refetchInterval: 60_000,
   });
 
-  const deps = ready.data?.dependencies ?? {};
+  // isError wins over data: after a failed refetch TanStack keeps the last
+  // good body, which would otherwise keep showing stale green.
+  const probe: ProbeState = ready.isError ? 'unreachable' : ready.data ? 'ok' : 'loading';
+  const deps: Record<string, ReadyDependency> =
+    probe === 'ok' && ready.data ? ready.data.dependencies : {};
   const cfgs = engines.data?.configs;
 
   return (
@@ -109,15 +112,27 @@ export function EnginesAdminPage() {
         </p>
       </header>
 
+      {ready.isError ? (
+        <p
+          role="alert"
+          className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800"
+        >
+          Readiness probe unreachable ({ready.error.message}). Live status for the engines below is
+          unknown until /api/health/ready answers again.
+        </p>
+      ) : null}
+
       <ReadOnlyEngine
         name="PostgreSQL 16"
         envVar="DATABASE_URL"
+        probe={probe}
         status={deps.postgres}
         notes="Persistence layer. Schema 'vibetc'; audit_log is append-only. Set via boot env only — runtime changes would require reconnecting BullMQ + Drizzle pools."
       />
       <ReadOnlyEngine
         name="Redis 7"
         envVar="REDIS_URL"
+        probe={probe}
         status={deps.redis}
         notes="BullMQ queue + login rate-limit + enrichment cache. Set via boot env only."
       />
@@ -126,9 +141,10 @@ export function EnginesAdminPage() {
         engine="llm-gateway"
         name="LLM Gateway (Ollama)"
         envVar="OLLAMA_BASE_URL"
+        probe={probe}
         status={deps.llmGateway}
         config={cfgs?.['llm-gateway'] ?? null}
-        notes="Local Ollama model server — handles BOTH OCR (scanned pages, via a Qwen-VL vision model) and text extraction. Page images are processed locally and never egress (ADR-023). The text + vision model tags are set on /admin/llm-provider (defaults qwen3.5:35b-a3b for text). Only used when provider=local (the default); the optional Anthropic provider is text-only. 'Test connection' hits Ollama's /api/tags."
+        notes="Local Ollama model server — handles BOTH OCR (scanned pages, via a Qwen-VL vision model) and text extraction. Page images are processed locally and never egress (ADR-023). The text + vision model tags are set on /admin/llm-provider (defaults qwen2.5:32b-instruct for text). Only used when provider=local (the default); the optional Anthropic provider is text-only. 'Test connection' hits Ollama's /api/tags."
       />
 
       <section className="rounded-lg border border-surface-muted bg-white p-4">
@@ -192,12 +208,21 @@ function CostCard({
 }
 
 function StatusPill({
+  probe,
   status,
 }: {
-  status?:
-    | { status: 'ok' | 'fail' | 'unconfigured'; latencyMs?: number; detail?: string }
-    | undefined;
+  probe: ProbeState;
+  status?: ReadyDependency | undefined;
 }) {
+  if (probe !== 'ok') {
+    return (
+      <span
+        className={`rounded px-1.5 py-0.5 text-xs ${palette(probe === 'unreachable' ? 'fail' : 'unconfigured')}`}
+      >
+        {probe === 'unreachable' ? 'unknown · probe unreachable' : 'checking…'}
+      </span>
+    );
+  }
   const s = status?.status ?? 'unconfigured';
   return (
     <span className={`rounded px-1.5 py-0.5 text-xs ${palette(s)}`}>
@@ -210,21 +235,21 @@ function StatusPill({
 function ReadOnlyEngine({
   name,
   envVar,
+  probe,
   status,
   notes,
 }: {
   name: string;
   envVar: string;
-  status?:
-    | { status: 'ok' | 'fail' | 'unconfigured'; latencyMs?: number; detail?: string }
-    | undefined;
+  probe: ProbeState;
+  status?: ReadyDependency | undefined;
   notes?: string | undefined;
 }) {
   return (
     <section className="rounded-lg border border-surface-muted bg-white p-4">
       <header className="flex items-center justify-between">
         <h2 className="text-base font-medium">{name}</h2>
-        <StatusPill status={status} />
+        <StatusPill probe={probe} status={status} />
       </header>
       <p className="mt-1 text-xs text-ink-subtle">
         env <code className="rounded bg-surface-subtle px-1">{envVar}</code>
@@ -239,6 +264,7 @@ function EditableEngine({
   engine,
   name,
   envVar,
+  probe,
   status,
   config,
   notes,
@@ -249,9 +275,8 @@ function EditableEngine({
   engine: EngineKey;
   name: string;
   envVar: string;
-  status?:
-    | { status: 'ok' | 'fail' | 'unconfigured'; latencyMs?: number; detail?: string }
-    | undefined;
+  probe: ProbeState;
+  status?: ReadyDependency | undefined;
   config: EngineConfig | null;
   notes?: string | undefined;
   showAdvanced?: boolean | undefined;
@@ -388,7 +413,7 @@ function EditableEngine({
     <section className="rounded-lg border border-surface-muted bg-white p-4">
       <header className="flex items-center justify-between">
         <h2 className="text-base font-medium">{name}</h2>
-        <StatusPill status={status} />
+        <StatusPill probe={probe} status={status} />
       </header>
       <p className="mt-1 text-xs text-ink-subtle">
         env <code className="rounded bg-surface-subtle px-1">{envVar}</code>

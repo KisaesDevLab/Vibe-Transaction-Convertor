@@ -6,12 +6,29 @@ import multer from 'multer';
 import pdfParse from 'pdf-parse/lib/pdf-parse.js';
 
 import { db } from '../db/client.js';
-import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from '../lib/errors.js';
+import {
+  AppError,
+  ConflictError,
+  ForbiddenError,
+  NotFoundError,
+  ValidationError,
+} from '../lib/errors.js';
 import { logger } from '../lib/logger.js';
-import { findByHash, ingestUpload, streamSourcePdf } from '../services/statements.js';
+import {
+  findByAccountAndHash,
+  ingestUpload,
+  restoreDeletedSourcePdf,
+  streamSourcePdf,
+} from '../services/statements.js';
 import { writeAudit } from '../services/audit.js';
 import { isPdfProcessingStrategy, type PdfProcessingStrategy } from '../services/pdf-strategy.js';
-import { checkFreeSpace, isPdfMagicBytes, sha256Of, storePdf } from '../services/upload-storage.js';
+import {
+  MIN_FREE_MB,
+  checkFreeSpace,
+  isPdfMagicBytes,
+  sha256Of,
+  storePdf,
+} from '../services/upload-storage.js';
 import { eq } from 'drizzle-orm';
 import { accounts, statements } from '../db/schema.js';
 import { enqueueExtraction } from '../jobs/queues.js';
@@ -41,7 +58,8 @@ const upload = multer({
       file.mimetype === 'application/octet-stream' ||
       file.mimetype === 'binary/octet-stream';
     if (!ok) {
-      cb(new Error(`unsupported MIME type: ${file.mimetype}`));
+      // A ValidationError so the client gets a 400, not a 500.
+      cb(new ValidationError(`unsupported MIME type: ${file.mimetype}`));
       return;
     }
     cb(null, true);
@@ -73,7 +91,16 @@ export const uploadsByAccountRouter = (): Router => {
       const account = await db.select().from(accounts).where(eq(accounts.id, accountId));
       if (!account[0]) throw new NotFoundError(`account ${accountId} not found`);
 
+      // Phase 9 #12: refuse below 500 MB free, warn below 2 GB.
       const free = await checkFreeSpace();
+      if (free.refuse) {
+        throw new AppError({
+          name: 'InsufficientStorage',
+          status: 507,
+          code: 'INTERNAL',
+          message: `Upload refused: only ${free.freeMb} MB free (minimum ${MIN_FREE_MB} MB)`,
+        });
+      }
       if (free.warn) {
         logger.warn({ freeMb: free.freeMb }, 'low disk space — uploads continuing');
       }
@@ -145,55 +172,57 @@ export const uploadsByAccountRouter = (): Router => {
             continue;
           }
 
-          // Hash + dedup pre-check (cheap path before disk write).
+          // Hash + dedup pre-check (cheap path before disk write) against
+          // this account's own copy of the PDF.
           const hash = sha256Of(f.buffer);
-          const dup = await findByHash(db, hash);
-          if (dup && dup.accountId === accountId) {
-            ingested.push({
+          let statement = await findByAccountAndHash(db, accountId, hash);
+          let deduplicated = true;
+          if (statement?.sourcePdfDeleted) {
+            // The statement survives but its file was removed (Delete PDF /
+            // retention sweep). Store the bytes again so the viewer and
+            // re-extract work — "re-upload to enable re-extraction".
+            const stored = await storePdf(f.buffer);
+            await restoreDeletedSourcePdf(db, req.user!, hash, stored.path);
+            statement = { ...statement, sourcePdfPath: stored.path, sourcePdfDeleted: false };
+          } else if (!statement) {
+            const stored = await storePdf(f.buffer);
+            const result = await ingestUpload(db, req.user!, {
+              accountId,
+              hash: stored.hash,
+              storedPath: stored.path,
               filename: f.originalname,
-              hash,
+              bytes: stored.bytes,
               pages,
-              bytes: f.size,
-              storedPath: dup.sourcePdfPath,
-              statementId: dup.id,
-              deduplicated: true,
-              status: dup.status,
+              processingStrategyOverride,
             });
-            continue;
+            statement = result.statement;
+            deduplicated = result.deduplicated;
           }
-
-          const stored = await storePdf(f.buffer);
-          const result = await ingestUpload(db, req.user!, {
-            accountId,
-            hash: stored.hash,
-            storedPath: stored.path,
-            filename: f.originalname,
-            bytes: stored.bytes,
-            pages,
-            processingStrategyOverride,
-          });
 
           // OCR + extraction run locally on Ollama (ADR-023); no per-
           // conversion session to open at upload.
 
           ingested.push({
             filename: f.originalname,
-            hash: stored.hash,
+            hash,
             pages,
-            bytes: stored.bytes,
-            storedPath: stored.path,
-            statementId: result.statement.id,
-            deduplicated: result.deduplicated,
-            status: result.statement.status,
+            bytes: f.size,
+            storedPath: statement.sourcePdfPath,
+            statementId: statement.id,
+            deduplicated,
+            status: statement.status,
           });
 
-          if (process.env.REDIS_URL) {
+          // A deduplicated statement already had its extraction run; only
+          // (re-)queue one that never left 'uploaded' (e.g. its first enqueue
+          // failed). BullMQ no-ops the add when its job is still queued.
+          if (process.env.REDIS_URL && (!deduplicated || statement.status === 'uploaded')) {
             try {
               await enqueueExtraction({
-                statementId: result.statement.id,
+                statementId: statement.id,
                 accountId,
-                sourcePdfHash: stored.hash,
-                sourcePdfPath: stored.path,
+                sourcePdfHash: hash,
+                sourcePdfPath: statement.sourcePdfPath,
               });
             } catch (err) {
               logger.warn({ err }, 'failed to enqueue extraction (continuing)');
@@ -266,9 +295,12 @@ export const uploadsRawRouter = (): Router => {
       });
       res.setHeader('content-type', 'application/pdf');
       res.setHeader('content-disposition', `inline; filename="${hash}.pdf"`);
-      streamSourcePdf(row.sourcePdfPath)
-        .on('error', (err) => next(err))
-        .pipe(res);
+      const stream = streamSourcePdf(row.sourcePdfPath);
+      // pipe() doesn't destroy its source when the client goes away
+      // mid-download; release the file descriptor ourselves (a no-op once
+      // the stream has ended normally).
+      res.on('close', () => stream.destroy());
+      stream.on('error', (err) => next(err)).pipe(res);
     } catch (err) {
       next(err);
     }

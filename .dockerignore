@@ -1,0 +1,36 @@
+# Keep the Docker build context to source + the FIDIR mirror.
+#
+# The Dockerfile copies whole trees (apps/, packages/, data/), so without
+# these exclusions a local `docker compose build` / `pnpm release:dry-run`
+# from a checkout that has been used with `pnpm dev` would bake client
+# statement PDFs, exports and backups (DATA_DIR=./data) into an image
+# layer, plus host node_modules / stale build output.
+
+# VCS + secrets
+.git
+.env
+.env.*
+!.env.example
+
+# Host dependencies and build output (the builder stage regenerates them)
+**/node_modules
+**/dist
+**/*.tsbuildinfo
+coverage
+.turbo
+
+# Runtime data written by dev runs — never ship it. The image only needs
+# data/fidir (the mirrored FIDIR list).
+data/uploads
+data/exports
+data/backups
+data/tmp
+tmp
+apps/api/.tmp-backup-test
+
+# Test / tooling artifacts
+test-results
+playwright-report
+apps/web/e2e/.reachability.json
+**/*.log
+.claude

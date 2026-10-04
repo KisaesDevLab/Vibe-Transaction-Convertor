@@ -1,9 +1,18 @@
 import { execFile } from 'node:child_process';
-import { mkdir, readdir, readFile, rm } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 
 const execFileP = promisify(execFile);
+
+// Hard ceiling on one pdftoppm run. BullMQ keeps renewing the job lock, so a
+// pathological PDF could otherwise render for hours and block the worker.
+// PDFTOPPM_TIMEOUT_MS overrides (default 10 min — generous for 300 DPI scans).
+const DEFAULT_PDFTOPPM_TIMEOUT_MS = 600_000;
+const pdftoppmTimeoutMs = (): number => {
+  const n = Number(process.env.PDFTOPPM_TIMEOUT_MS ?? DEFAULT_PDFTOPPM_TIMEOUT_MS);
+  return Number.isFinite(n) && n > 0 ? n : DEFAULT_PDFTOPPM_TIMEOUT_MS;
+};
 
 // pdfjs-dist's legacy build is the right one for Node — no DOM, no
 // canvas required for text-only paths.
@@ -176,6 +185,8 @@ export const extractTextLayerFromBuffer = async (buffer: Buffer): Promise<PageTe
 
 export interface RasterizeOptions {
   dpi?: number;
+  // Render into this directory instead of a fresh private DATA_DIR/tmp dir. It
+  // is WIPED first and owned by rasterizePdf (removeRasterDir deletes it).
   outDir?: string;
   // Output codec. JPEG is dramatically smaller than PNG for scanned pages,
   // which matters for vision extraction through Shield: the gateway's
@@ -206,10 +217,26 @@ export interface RasterizedPage {
   height: number;
 }
 
+// DATA_DIR/tmp — scratch space swept by the maintenance worker (entries older
+// than 6 h are removed).
+const tmpRoot = (): string => join(process.env.DATA_DIR ?? './data', 'tmp');
+
+// Written into every directory rasterizePdf renders into. removeRasterDir only
+// ever deletes a directory carrying it, so a stray/mocked page path can never
+// turn into an rm -rf of an unrelated parent directory.
+const RASTER_DIR_MARKER = '.vibetc-raster';
+
 // Shells out to `pdftoppm` from poppler-utils. The standalone Dockerfile
 // installs poppler; on host machines the operator needs `brew install
 // poppler` (or apt/choco equivalent). One invocation produces one PNG per
 // page named `<prefix>-NNNN.png` at the given DPI.
+//
+// Output location: by default a FRESH private directory per call under
+// DATA_DIR/tmp (never the uploads tree) — rendered pages (check images,
+// signatures, account numbers) must not outlive Delete-PDF or the retention
+// sweep, and two concurrent runs on the same PDF must not share (and rm) each
+// other's output. Callers delete it with removeRasterDir(pages) once the images
+// are consumed; anything a crashed run leaves behind is swept after 6 h.
 export const rasterizePdf = async (
   path: string,
   opts: RasterizeOptions = {},
@@ -217,19 +244,20 @@ export const rasterizePdf = async (
   const dpi = opts.dpi ?? 300;
   const format = opts.format ?? 'png';
   const jpegQuality = Math.min(100, Math.max(1, Math.floor(opts.jpegQuality ?? 80)));
-  // Per-PDF outDir keyed on the source file's basename (which the
-  // upload-storage layer derives from the content sha256, so it's
-  // collision-free across statements). Previous behavior used
-  // `dirname(path)/pages` for EVERY PDF in the same yyyy/mm bucket,
-  // so two consecutive rasterizations stomped on each other's PNGs
-  // and the trailing readdir picked up stale pages from earlier
-  // statements — silently OCR'ing pages from a different PDF.
   const pdfBase = basename(path, '.pdf');
-  const outDir = opts.outDir ?? join(dirname(path), 'pages', pdfBase);
-  // Wipe any leftovers from an aborted prior run on the same content
-  // hash before glob-matching the fresh output.
-  await rm(outDir, { recursive: true, force: true });
-  await mkdir(outDir, { recursive: true });
+  const ownsDir = !opts.outDir;
+  let outDir: string;
+  if (opts.outDir) {
+    outDir = opts.outDir;
+    // Caller-chosen dir: wipe any leftovers from an aborted prior run before
+    // glob-matching the fresh output.
+    await rm(outDir, { recursive: true, force: true });
+    await mkdir(outDir, { recursive: true });
+  } else {
+    await mkdir(tmpRoot(), { recursive: true });
+    outDir = await mkdtemp(join(tmpRoot(), `raster-${pdfBase.slice(0, 16)}-`));
+  }
+  await writeFile(join(outDir, RASTER_DIR_MARKER), '');
   const prefix = join(outDir, 'page');
   const codecArgs = format === 'jpeg' ? ['-jpeg', '-jpegopt', `quality=${jpegQuality}`] : ['-png'];
   const rangeArgs = [
@@ -239,16 +267,27 @@ export const rasterizePdf = async (
       ? ['-H', String(Math.floor(opts.cropHeightPx))]
       : []),
   ];
+  const timeoutMs = pdftoppmTimeoutMs();
   try {
     await execFileP('pdftoppm', [...codecArgs, ...rangeArgs, '-r', String(dpi), path, prefix], {
       maxBuffer: 64 * 1024 * 1024,
+      timeout: timeoutMs,
+      killSignal: 'SIGKILL',
     });
   } catch (err) {
-    const e = err as { code?: string; message?: string };
+    // A failed run hands the caller no pages to clean up — drop our temp dir.
+    if (ownsDir) await rm(outDir, { recursive: true, force: true }).catch(() => undefined);
+    const e = err as { code?: string | number | null; message?: string; killed?: boolean };
     if (e.code === 'ENOENT') {
       throw new Error(
         'pdftoppm not found on PATH — install poppler-utils to enable PDF rasterization. ' +
           '(brew install poppler / apt install poppler-utils / choco install poppler)',
+      );
+    }
+    if (e.killed === true && e.code !== 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') {
+      throw new Error(
+        `pdftoppm timed out after ${timeoutMs} ms and was killed — the PDF may be malformed ` +
+          'or unusually large; split it, or raise PDFTOPPM_TIMEOUT_MS',
       );
     }
     throw new Error(`pdftoppm failed: ${e.message ?? String(err)}`);
@@ -258,6 +297,9 @@ export const rasterizePdf = async (
   const ext = format === 'jpeg' ? '.jpg' : '.png';
   const mediaType = format === 'jpeg' ? ('image/jpeg' as const) : ('image/png' as const);
   const pageFiles = entries.filter((f) => f.startsWith('page-') && f.endsWith(ext)).sort();
+  if (pageFiles.length === 0 && ownsDir) {
+    await rm(outDir, { recursive: true, force: true }).catch(() => undefined);
+  }
   return pageFiles.map((file, i) => {
     const filePath = join(outDir, file);
     return {
@@ -273,7 +315,25 @@ export const rasterizePdf = async (
 
 // ---- Cleanup ----------------------------------------------------------------
 
-const tmpRoot = (): string => join(process.env.DATA_DIR ?? './data', 'tmp');
+// Delete the directory a rasterizePdf() call rendered into (pass the pages it
+// returned, or any subset). Rendered pages carry check images / account
+// numbers, so callers remove them as soon as they've been read. Best-effort:
+// a no-op for an empty list or a directory rasterizePdf didn't create (no
+// ownership marker), and errors are swallowed — the maintenance sweep reclaims
+// DATA_DIR/tmp leftovers after 6 h.
+export const removeRasterDir = async (
+  pages: ReadonlyArray<Pick<RasterizedPage, 'path'>>,
+): Promise<void> => {
+  const first = pages[0];
+  if (!first) return;
+  const dir = dirname(first.path);
+  try {
+    await access(join(dir, RASTER_DIR_MARKER));
+    await rm(dir, { recursive: true, force: true });
+  } catch {
+    // not ours / already gone — nothing to do
+  }
+};
 
 export const tmpDirForHash = (hash: string): string => join(tmpRoot(), hash);
 

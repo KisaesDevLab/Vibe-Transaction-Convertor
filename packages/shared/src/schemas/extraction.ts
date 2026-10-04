@@ -100,14 +100,54 @@ export type ExtractionTransaction = z.infer<typeof ExtractionTransaction>;
 // No backwards-compatible flat shape — every consumer was updated in
 // the same change.
 
+// --- Non-essential metadata salvage ----------------------------------------
+// account / institution / date-format evidence / notes are informational. A
+// json_object-mode, Anthropic, or router response can emit them with the wrong
+// type (numeric last-4, lower-case "checking", a string `account`, null
+// notes) — that must never fail the whole statement, so coerce here (output
+// types are unchanged).
+const isPlainObject = (v: unknown): v is Record<string, unknown> =>
+  typeof v === 'object' && v !== null && !Array.isArray(v);
+// Scalar → string; null/undefined pass through; objects/arrays → null.
+const coerceOptionalString = (v: unknown): unknown => {
+  if (v == null || typeof v === 'string') return v;
+  if (typeof v === 'number' || typeof v === 'boolean' || typeof v === 'bigint') return String(v);
+  return null;
+};
+const ACCOUNT_TYPE_ALIASES: Readonly<Record<string, (typeof ACCOUNT_TYPES)[number]>> = {
+  MONEYMARKET: 'MONEYMRKT',
+  LINEOFCREDIT: 'CREDITLINE',
+};
+// Case/separator-insensitive match onto ACCOUNT_TYPES ("checking",
+// "credit_card"); anything else (e.g. "BANK") → null ("unknown").
+const coerceAccountType = (v: unknown): unknown => {
+  if (v == null) return v;
+  if (typeof v !== 'string') return null;
+  const key = v.toUpperCase().replace(/[^A-Z]/g, '');
+  if ((ACCOUNT_TYPES as readonly string[]).includes(key)) return key;
+  return ACCOUNT_TYPE_ALIASES[key] ?? null;
+};
+const coerceNotes = (v: unknown): unknown => {
+  if (v == null) return undefined;
+  const s =
+    typeof v === 'string'
+      ? v
+      : Array.isArray(v)
+        ? v.map((x) => (typeof x === 'string' ? x : JSON.stringify(x))).join('; ')
+        : typeof v === 'object'
+          ? JSON.stringify(v)
+          : String(v);
+  return s.slice(0, 2000);
+};
+
 export const ExtractionAccount = z.object({
-  masked_number: z.string().nullable().optional(),
-  type_hint: z.enum(ACCOUNT_TYPES).nullable().optional(),
+  masked_number: z.preprocess(coerceOptionalString, z.string().nullable().optional()),
+  type_hint: z.preprocess(coerceAccountType, z.enum(ACCOUNT_TYPES).nullable().optional()),
 });
 
 export const ExtractionInstitution = z.object({
-  name: z.string().nullable().optional(),
-  intu_org_hint: z.string().nullable().optional(),
+  name: z.preprocess(coerceOptionalString, z.string().nullable().optional()),
+  intu_org_hint: z.preprocess(coerceOptionalString, z.string().nullable().optional()),
 });
 
 export const ExtractionPeriod = z.object({
@@ -120,17 +160,24 @@ export const ExtractionBalances = z.object({
   closing_cents: z.number().int(),
 });
 
+// evidence / sample are free-text diagnostics; a non-string value → null.
+const stringOrNull = (v: unknown): unknown => (v === undefined || typeof v === 'string' ? v : null);
+
 export const ExtractionDateFormat = z.object({
   format: SourceDateFormatEnum,
   confidence: z.number().min(0).max(1),
-  evidence: z.string().nullable().optional(),
-  sample: z.string().nullable().optional(),
+  evidence: z.preprocess(stringOrNull, z.string().nullable().optional()),
+  sample: z.preprocess(stringOrNull, z.string().nullable().optional()),
 });
 
 export const ExtractionResult = z.object({
-  // Absorb an explicit `null` (not just omission) into the default object.
-  account: z.preprocess((v) => v ?? undefined, ExtractionAccount.default({})),
-  institution: z.preprocess((v) => v ?? undefined, ExtractionInstitution.default({})),
+  // Absorb an explicit `null` — or any non-object (a bare string / array) — into
+  // the default object rather than failing the statement.
+  account: z.preprocess((v) => (isPlainObject(v) ? v : undefined), ExtractionAccount.default({})),
+  institution: z.preprocess(
+    (v) => (isPlainObject(v) ? v : undefined),
+    ExtractionInstitution.default({}),
+  ),
   // period / balances / source_date_format are filled (derived or defaulted) by
   // the parse-time salvage in parseExtractionResponse before this runs, so they
   // stay strict here to keep the DB invariants (ISO dates, integer cents).
@@ -138,10 +185,9 @@ export const ExtractionResult = z.object({
   balances: ExtractionBalances,
   transactions: z.array(ExtractionTransaction),
   source_date_format: ExtractionDateFormat,
-  notes: z.preprocess(
-    (v) => (typeof v === 'string' ? v.slice(0, 2000) : v),
-    z.string().max(2000).optional(),
-  ),
+  // null → absent; a non-string (number / array of strings / object) is
+  // stringified rather than failing the statement.
+  notes: z.preprocess(coerceNotes, z.string().max(2000).optional()),
 });
 export type ExtractionResult = z.infer<typeof ExtractionResult>;
 

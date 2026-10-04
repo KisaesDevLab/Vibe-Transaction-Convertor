@@ -1,11 +1,15 @@
 // Re-runs the Golden Rule against a statement's current persisted
-// transactions and updates `statements.reconciliation_status`. Called
-// from the PATCH/POST/DELETE transaction routes so manual corrections
-// flip discrepancy → verified automatically (Phase 16 item 16). The
+// transactions and updates `statements.reconciliation_status` and
+// `statements.period_bounds_violations`. Called from the PATCH/POST/DELETE
+// transaction routes so manual corrections flip discrepancy → verified
+// automatically (Phase 16 item 16) — `verified` requires both a tied
+// balance and zero out-of-period rows (Phase 16 item 2). The
 // 'overridden' state is sticky — it intentionally does NOT downgrade
 // to 'verified' here, because the audit trail already captured the
 // human acknowledgement and we don't want a subsequent edit to silently
-// erase it.
+// erase it. Its period-bounds count is still refreshed (a date edit
+// changes it, and the statements list filters on it), and the function
+// still returns null for it ("status not recomputed").
 
 import { eq, sql } from 'drizzle-orm';
 
@@ -22,8 +26,6 @@ export const recomputeReconciliation = async (
   const stmt = stmtRows[0];
   if (!stmt) return null;
   if (stmt.openingBalanceCents === null || stmt.closingBalanceCents === null) return null;
-  // Don't downgrade an explicit override.
-  if (stmt.reconciliationStatus === 'overridden') return null;
 
   const txs = await db
     .select()
@@ -43,16 +45,38 @@ export const recomputeReconciliation = async (
     transactionDates: txs.map((t) => t.postedDate),
   });
 
+  // Don't downgrade an explicit override — but keep its stored period-bounds
+  // count current. Returns null (status not recomputed), as callers expect.
+  if (stmt.reconciliationStatus === 'overridden') {
+    if (result.periodBoundsViolations !== stmt.periodBoundsViolations) {
+      await db
+        .update(statements)
+        .set({ periodBoundsViolations: result.periodBoundsViolations, updatedAt: sql`now()` })
+        .where(eq(statements.id, statementId));
+    }
+    return null;
+  }
+
   const nextStatus =
     result.status === 'verified'
       ? 'verified'
       : result.status === 'discrepancy'
         ? 'discrepancy'
         : 'failed';
-  if (nextStatus !== stmt.reconciliationStatus) {
+  // Persist the refreshed period-bounds count alongside the status (Phase 16
+  // #2b) — an edited posted_date can change the count without changing the
+  // status, and the statements list filters on the stored count.
+  if (
+    nextStatus !== stmt.reconciliationStatus ||
+    result.periodBoundsViolations !== stmt.periodBoundsViolations
+  ) {
     await db
       .update(statements)
-      .set({ reconciliationStatus: nextStatus, updatedAt: sql`now()` })
+      .set({
+        reconciliationStatus: nextStatus,
+        periodBoundsViolations: result.periodBoundsViolations,
+        updatedAt: sql`now()`,
+      })
       .where(eq(statements.id, statementId));
   }
   return { status: nextStatus, deltaCents: result.deltaCents };
